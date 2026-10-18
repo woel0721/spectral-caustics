@@ -92,11 +92,12 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 
 ### Day 1 — 输出链路与最小 Framebuffer
 
-- [ ] `cargo new` 创建可编译项目，加入 `nalgebra` 和 `image`。
-- [ ] 实现二维 `Framebuffer`：宽高、线性 `XYZ` 三通道存储、边界安全访问。
-- [ ] 实现 XYZ -> 线性 sRGB -> sRGB8 -> PNG 的导出接口；可先用已知颜色/简单测试画面验证。
-- [ ] 运行 `cargo run --release`，得到 `output/test.png`。
-- **验收：** PNG 尺寸、像素索引、sRGB 编码单测正确；`cargo test` 通过。
+- [x] 创建可编译项目（现有目录使用 `cargo init`），加入 `nalgebra` 和 `image`。
+- [x] 实现二维 `Framebuffer`：宽高、线性 `XYZ` 三通道存储、边界安全访问。
+- [x] 实现 XYZ -> 线性 sRGB -> sRGB8 -> PNG 的导出接口；使用位置渐变测试图验证。
+- [x] 运行 `cargo run --release --locked`，得到 512×512 的 `output/test.png`。
+- **验收（已通过）：** PNG 尺寸、像素索引、sRGB 编码单测正确；`cargo test --locked` 通过。
+- **验证：** PNG 读回测试检查 3×2 尺寸、RGB8 格式、六个已知位置的颜色，以及线性灰色 0.5 编码为 188；`cargo fmt --check` 和 `cargo clippy -- -D warnings` 通过。
 
 ### Day 2 — 光线、几何与求交
 
