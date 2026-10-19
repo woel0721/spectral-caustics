@@ -1,52 +1,61 @@
-//! 位置渐变测试图：图片坐标 -> 线性 RGB 测试颜色 -> XYZ 缓冲 -> sRGB PNG。
-//! 用已知测试颜色验证图片输出链路；光谱与折射计算在后续阶段实现。
+//! Day 2 光线示例：方向归一化，以及与地面、单个三角形分别求交。
 
 mod framebuffer;
+mod hit;
+mod object;
+mod ray;
 mod render;
+mod triangle;
 
-// use 将模块中的类型引入当前作用域，后面可以直接写 Framebuffer、Vector3。
-use framebuffer::Framebuffer;
-use nalgebra::{Matrix3, Vector3};
+use nalgebra::Vector3;
+use object::Hittable;
 
 fn main() {
-    let width = 512;
-    let height = 512;
+    let ray = ray::Ray::new(
+        Vector3::new(0.0, 0.0, 2.0),
+        Vector3::new(0.0, 0.0, -5.0),
+        0.0,
+    )
+    .expect("光线参数非法");
 
-    let mut framebuffer = Framebuffer::new(width, height);
+    println!("归一化后的方向：{:?}", ray.direction);
+    println!("方向分量的倒数：{:?}", ray.direction_inv);
+    println!("光线携带的时间：{}", ray.t);
 
-    // 为了直观控制红、绿通道，先用线性 RGB 定义测试颜色。
-    // Framebuffer 保存 XYZ，因此用此矩阵转换后再写入；导出时会转换回线性 RGB。
-    // 来源：W3C CSS Color 4 的 lin_sRGB_to_XYZ（D65 白点）。
-    // https://www.w3.org/TR/css-color-4/#color-conversion-code
-    let rgb_to_xyz = Matrix3::new(
-        506752.0 / 1228815.0,
-        87881.0 / 245763.0,
-        12673.0 / 70218.0,
-        87098.0 / 409605.0,
-        175762.0 / 245763.0,
-        12673.0 / 175545.0,
-        7918.0 / 409605.0,
-        87881.0 / 737289.0,
-        1001167.0 / 1053270.0,
-    );
+    // map 将 Some(distance) 转为 Some(hit)，未命中的 None 保持不变。
+    let hit = ray.intersect_ground().map(|distance| hit::Hit {
+        coords: ray.at(distance),
+        normal: Vector3::new(0.0, 0.0, 1.0),
+        distance,
+        ..hit::Hit::default()
+    });
 
-    // 坐标范围是 0..=width-1，归一化后两端恰好映射为 0 和 1。
-    // 若某个方向只有一个像素，分母取 1，使对应坐标为 0，避免除零。
-    let x_span = (width - 1).max(1) as f64;
-    let y_span = (height - 1).max(1) as f64;
+    println!("是否命中：{}", hit.is_some());
 
-    for y in 0..height {
-        for x in 0..width {
-            // 先转成 f64 再相除，得到浮点比例，避免整数除法。
-            let u = x as f64 / x_span;
-            let v = y as f64 / y_span;
-
-            // 从左向右红色增加，从上向下绿色增加，蓝色固定为 0.25。
-            let linear_rgb = Vector3::new(u, v, 0.25);
-            let xyz = rgb_to_xyz * linear_rgb;
-            assert!(framebuffer.set(x, y, xyz));
+    match hit {
+        Some(hit) => {
+            println!("命中地面的距离：{} 米", hit.distance);
+            println!("地面交点：{:?}", hit.coords);
+            println!("地面朝外法线：{:?}", hit.normal);
+            println!("是否正面命中：{}", ray.direction.dot(&hit.normal) < 0.0);
         }
+        None => println!("光线没有有效的地面交点"),
     }
-    render::save_png(&framebuffer, "output/test.png").expect("保存渐变 PNG 失败");
-    println!("已保存 {width}×{height} 渐变测试图：output/test.png");
+
+    // 单独测试 z = 1 的三角形；当前尚未将多个物体组合为场景。
+    let triangle = triangle::Triangle::new(
+        Vector3::new(-1.0, -1.0, 1.0),
+        Vector3::new(1.0, -1.0, 1.0),
+        Vector3::new(0.0, 1.0, 1.0),
+    )
+    .expect("三角形顶点非法");
+
+    match triangle.intersect(&ray) {
+        Some(hit) => {
+            println!("三角形交点距离：{} 米", hit.distance);
+            println!("三角形交点：{:?}", hit.coords);
+            println!("三角形法线：{:?}", hit.normal);
+        }
+        None => println!("光线没有有效的三角形交点"),
+    }
 }
