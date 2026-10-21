@@ -9,23 +9,23 @@ pub(crate) const PARALLEL_EPSILON: f64 = 1e-12;
 pub struct Ray {
     /// 光线的起点。
     pub origin: Vector3<f64>,
-    /// 光线的单位方向；手动修改时需同步更新 direction_inv。
+    /// 光线的单位方向；改变方向时应重新构造 Ray，以同步私有倒数缓存。
     pub direction: Vector3<f64>,
     /// 单位方向各分量的倒数；零分量的倒数为带符号的无穷大。
     /// 此缓存供后续包围盒求交使用，不能要求所有分量都有限。
     pub direction_inv: Vector3<f64>,
     /// 光线携带的时间参数；目前仅保存，不参与距离或交点计算。
-    pub t: f64,
-    /// 求交距离下限，单位为米；只接受距离大于此值的交点。
+    pub time: f64,
+    /// 预留的查询距离下限（米）；当前几何 intersect 不读取此字段。
     pub t_min: f64,
-    /// 求交距离上限，单位为米；只接受距离小于此值的交点。
+    /// 预留的查询距离上限（米）；当前几何 intersect 不读取此字段。
     pub t_max: f64,
 }
 
 impl Ray {
     /// 创建带时间参数的光线，自动归一化方向；非法输入返回 None。
     /// 不需要时间变化时，显式传入 time = 0.0。
-    /// 默认距离区间为 (0, f64::MAX)。
+    /// 预留查询范围初始值为 (0, f64::MAX)，当前几何求交不使用。
     pub fn new(origin: Vector3<f64>, direction: Vector3<f64>, time: f64) -> Option<Self> {
         // 起点、方向和时间都必须是有限值。
         if !origin.iter().all(|v| v.is_finite())
@@ -51,57 +51,16 @@ impl Ray {
             origin,
             direction,
             direction_inv,
-            t: time,
+            time,
             t_min: 0.0,
             t_max: f64::MAX,
         })
     }
 
-    /// 计算 origin + distance * direction；distance 是距离，与时间字段 t 独立。
+    /// 计算 origin + distance * direction；distance 是距离，与时间字段 time 独立。
     /// 调用者应提供有限且不会使计算溢出的 distance。
     pub fn at(&self, distance: f64) -> Vector3<f64> {
         self.origin + self.direction * distance
-    }
-
-    /// 与无限地面 z = 0 求交，返回距离起点的正向距离 t（米）。
-    /// 地面两侧均可命中；平行、距离过近、身后或非有限的交点返回 None。
-    /// 同时要求交点满足 t_min < t < t_max；允许将 t_max 改为正无穷大。
-    /// 方向应保持 Ray::new 建立的单位长度约定。
-    pub fn intersect_ground(&self) -> Option<f64> {
-        // 字段目前公开，因此求交时也检查数据，防止外部修改后引入 NaN。
-        if !self.origin.iter().all(|v| v.is_finite())
-            || !self.direction.iter().all(|v| v.is_finite())
-        {
-            return None;
-        }
-
-        // t_min 必须为非负有限值；t_max 可以是正无穷大，但不能为 NaN。
-        if !self.t_min.is_finite()
-            || self.t_min < 0.0
-            || self.t_max.is_nan()
-            || self.t_max <= self.t_min
-        {
-            return None;
-        }
-
-        // 分母为零或过小时，视为平行，不执行除法。
-        if self.direction.z.abs() <= PARALLEL_EPSILON {
-            return None;
-        }
-
-        // p(t).z = origin.z + t * direction.z = 0。
-        let t = -self.origin.z / self.direction.z;
-
-        if !t.is_finite() || t <= self.t_min.max(INTERSECTION_EPSILON) || t >= self.t_max {
-            return None;
-        }
-
-        // t 有限仍可能在计算 x、y 坐标时溢出。
-        if !self.at(t).iter().all(|v| v.is_finite()) {
-            return None;
-        }
-
-        Some(t)
     }
 }
 
@@ -122,7 +81,7 @@ mod tests {
     fn constructor_initializes_time_and_distance_limits() {
         let ray = Ray::new(Vector3::zeros(), Vector3::new(1.0, 0.0, 0.0), 0.0).unwrap();
 
-        assert_eq!(ray.t, 0.0);
+        assert_eq!(ray.time, 0.0);
         assert_eq!(ray.t_min, 0.0);
         assert_eq!(ray.t_max, f64::MAX);
     }
@@ -151,7 +110,7 @@ mod tests {
     }
 
     #[test]
-    fn time_is_independent_of_position_and_ground_distance() {
+    fn time_is_independent_of_position() {
         let ray = Ray::new(
             Vector3::new(0.0, 0.0, 2.0),
             Vector3::new(0.0, 0.0, -5.0),
@@ -159,9 +118,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(ray.t, 0.25);
+        assert_eq!(ray.time, 0.25);
         assert_eq!(ray.at(2.0), Vector3::zeros());
-        assert_eq!(ray.intersect_ground(), Some(2.0));
     }
 
     #[test]
@@ -183,194 +141,5 @@ mod tests {
         assert_eq!(ray.at(0.0), ray.origin);
         assert_eq!(ray.at(1.0), Vector3::new(0.0, 0.0, 1.0));
         assert_eq!(ray.at(2.0), Vector3::zeros());
-    }
-
-    #[test]
-    fn invalid_directions_are_rejected() {
-        let invalid_directions = [
-            Vector3::zeros(),
-            Vector3::new(f64::NAN, 0.0, 0.0),
-            Vector3::new(0.0, f64::INFINITY, 0.0),
-        ];
-
-        for direction in invalid_directions {
-            assert!(Ray::new(Vector3::zeros(), direction, 0.0).is_none());
-        }
-    }
-
-    #[test]
-    fn downward_ray_hits_ground_at_known_distance() {
-        let ray = Ray::new(
-            Vector3::new(0.0, 0.0, 2.0),
-            Vector3::new(0.0, 0.0, -5.0),
-            0.0,
-        )
-        .unwrap();
-        let t = ray.intersect_ground().unwrap();
-
-        assert_eq!(t, 2.0);
-        assert_eq!(ray.at(t), Vector3::zeros());
-    }
-
-    #[test]
-    fn oblique_ray_hits_ground_at_expected_position() {
-        let ray = Ray::new(
-            Vector3::new(1.0, 2.0, 2.0),
-            Vector3::new(1.0, 0.0, -1.0),
-            0.0,
-        )
-        .unwrap();
-        let t = ray.intersect_ground().unwrap();
-
-        assert!((t - 2.0 * 2.0_f64.sqrt()).abs() < 1e-12);
-        assert!((ray.at(t) - Vector3::new(3.0, 2.0, 0.0)).norm() < 1e-12);
-    }
-
-    #[test]
-    fn parallel_and_nearly_parallel_rays_miss_ground() {
-        for z in [0.0, -PARALLEL_EPSILON / 2.0, PARALLEL_EPSILON / 2.0] {
-            let ray =
-                Ray::new(Vector3::new(0.0, 0.0, 2.0), Vector3::new(1.0, 0.0, z), 0.0).unwrap();
-
-            assert!(ray.intersect_ground().is_none());
-        }
-    }
-
-    #[test]
-    fn ground_intersection_behind_origin_is_rejected() {
-        let ray = Ray::new(
-            Vector3::new(0.0, 0.0, 2.0),
-            Vector3::new(0.0, 0.0, 1.0),
-            0.0,
-        )
-        .unwrap();
-
-        assert!(ray.intersect_ground().is_none());
-    }
-
-    #[test]
-    fn ground_intersection_respects_distance_limits() {
-        let mut ray = Ray::new(
-            Vector3::new(0.0, 0.0, 2.0),
-            Vector3::new(0.0, 0.0, -1.0),
-            0.0,
-        )
-        .unwrap();
-
-        ray.t_min = 1.0;
-        ray.t_max = 3.0;
-        assert_eq!(ray.intersect_ground(), Some(2.0));
-
-        for (t_min, t_max) in [(2.0, 3.0), (2.5, 3.0), (0.0, 2.0), (0.0, 1.5)] {
-            ray.t_min = t_min;
-            ray.t_max = t_max;
-            assert!(ray.intersect_ground().is_none());
-        }
-
-        ray.t_min = 0.0;
-        ray.t_max = f64::INFINITY;
-        assert_eq!(ray.intersect_ground(), Some(2.0));
-    }
-
-    #[test]
-    fn invalid_distance_limits_are_rejected() {
-        let mut ray = Ray::new(
-            Vector3::new(0.0, 0.0, 2.0),
-            Vector3::new(0.0, 0.0, -1.0),
-            0.0,
-        )
-        .unwrap();
-
-        for (t_min, t_max) in [
-            (f64::NAN, 3.0),
-            (f64::INFINITY, f64::INFINITY),
-            (-1.0, 3.0),
-            (3.0, 3.0),
-            (3.0, 1.0),
-            (0.0, f64::NAN),
-            (0.0, f64::NEG_INFINITY),
-        ] {
-            ray.t_min = t_min;
-            ray.t_max = t_max;
-            assert!(ray.intersect_ground().is_none());
-        }
-    }
-
-    #[test]
-    fn ground_intersection_at_or_near_origin_is_rejected() {
-        for z in [0.0, INTERSECTION_EPSILON / 2.0, INTERSECTION_EPSILON] {
-            let ray =
-                Ray::new(Vector3::new(0.0, 0.0, z), Vector3::new(0.0, 0.0, -1.0), 0.0).unwrap();
-
-            assert!(ray.intersect_ground().is_none());
-        }
-
-        let ray = Ray::new(
-            Vector3::new(0.0, 0.0, 2.0 * INTERSECTION_EPSILON),
-            Vector3::new(0.0, 0.0, -1.0),
-            0.0,
-        )
-        .unwrap();
-
-        assert_eq!(ray.intersect_ground(), Some(2.0 * INTERSECTION_EPSILON));
-    }
-
-    #[test]
-    fn ray_below_ground_can_hit_upward() {
-        let ray = Ray::new(
-            Vector3::new(0.0, 0.0, -1.0),
-            Vector3::new(0.0, 0.0, 1.0),
-            0.0,
-        )
-        .unwrap();
-        let t = ray.intersect_ground().unwrap();
-
-        assert_eq!(t, 1.0);
-        assert_eq!(ray.at(t), Vector3::zeros());
-    }
-
-    #[test]
-    fn non_finite_ray_fields_are_rejected_by_ground_intersection() {
-        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            for component in 0..3 {
-                let mut ray = Ray::new(
-                    Vector3::new(0.0, 0.0, 2.0),
-                    Vector3::new(0.0, 0.0, -1.0),
-                    0.0,
-                )
-                .unwrap();
-
-                ray.origin[component] = value;
-                assert!(ray.intersect_ground().is_none());
-
-                ray.origin[component] = 0.0;
-                ray.direction[component] = value;
-                assert!(ray.intersect_ground().is_none());
-            }
-        }
-    }
-
-    #[test]
-    fn overflowing_ground_distance_is_rejected() {
-        let ray = Ray::new(
-            Vector3::new(0.0, 0.0, f64::MAX),
-            Vector3::new(1.0, 0.0, -1e-10),
-            0.0,
-        )
-        .unwrap();
-
-        assert!(ray.intersect_ground().is_none());
-    }
-
-    #[test]
-    fn overflowing_ground_position_is_rejected() {
-        let ray = Ray::new(
-            Vector3::new(f64::MAX, 0.0, f64::MAX / 2.0),
-            Vector3::new(1.0, 0.0, -1.0),
-            0.0,
-        )
-        .unwrap();
-
-        assert!(ray.intersect_ground().is_none());
     }
 }

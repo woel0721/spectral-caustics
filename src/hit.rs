@@ -6,13 +6,9 @@ use nalgebra::Vector3;
 pub struct Hit {
     /// 交点的世界坐标。
     pub coords: Vector3<f64>,
-    /// 预留的纹理坐标，当前尚未使用。
-    pub tcoords: Vector3<f64>,
     /// 由求交算法填写的单位几何法线，封闭物体约定朝外。
     pub normal: Vector3<f64>,
-    /// 对应 C++ 示例的发光字段；当前仅预留，不用于光谱计算。
-    pub emit: Vector3<f64>,
-    /// 光线起点到交点的距离（米），与 Ray.t 的时间参数独立。
+    /// 光线起点到交点的距离（米），与 Ray.time 的时间参数独立。
     pub distance: f64,
     /// 场景中的物体编号；None 对应 C++ 示例中 obj = nullptr。
     pub object_id: Option<usize>,
@@ -25,9 +21,7 @@ impl Default for Hit {
     fn default() -> Self {
         Self {
             coords: Vector3::zeros(),
-            tcoords: Vector3::zeros(),
             normal: Vector3::zeros(),
-            emit: Vector3::zeros(),
             distance: f64::MAX,
             object_id: None,
             material_id: None,

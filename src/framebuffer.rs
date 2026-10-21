@@ -67,6 +67,19 @@ impl Framebuffer {
         self.pixels[i] = xyz;
         true
     }
+
+    pub fn accelerated(&mut self, x: usize, y: usize, xyz: Vector3<f64>) -> bool {
+        if !xyz.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+
+        let Some(i) = self.index(x, y) else {
+            return false;
+        };
+        // 将这个位置的颜色替换为 xyz。后续的光子能量累积需要另外实现加法操作。
+        self.pixels[i] += xyz;
+        true
+    }
 }
 
 // 此模块只在测试配置下编译；#[test] 标记的函数由 cargo test 执行。

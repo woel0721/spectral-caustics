@@ -50,17 +50,6 @@ impl Hittable for Triangle {
             return None;
         }
 
-        // 直接使用光线携带的距离范围；正无穷大可以作为距离上限。
-        if !ray.t_min.is_finite() || ray.t_min < 0.0 || ray.t_max.is_nan() || ray.t_max <= ray.t_min
-        {
-            return None;
-        }
-        let lower = ray.t_min.max(INTERSECTION_EPSILON);
-        let upper = ray.t_max;
-        if lower >= upper {
-            return None;
-        }
-
         // 用单位法线检测平行，阈值不随三角形面积变化。
         // 取绝对值以保留双面求交，玻璃内部的光线也能找到出射面。
         let facing = ray.direction.dot(&self.normal);
@@ -88,7 +77,7 @@ impl Hittable for Triangle {
         }
 
         let distance = self.edge2.dot(&q) / det;
-        if !distance.is_finite() || distance <= lower || distance >= upper {
+        if !distance.is_finite() || distance <= INTERSECTION_EPSILON {
             return None;
         }
         let coords = ray.at(distance);
@@ -241,39 +230,20 @@ mod tests {
     }
 
     #[test]
-    fn ray_distance_limits_are_respected() {
-        let triangle = unit_triangle();
-        let mut ray = downward_ray(0.25, 0.25, 2.0);
-        ray.t_min = 1.0;
-        ray.t_max = 3.0;
-        assert!(triangle.intersect(&ray).is_some());
-        for (min, max) in [(2.0, 3.0), (2.5, 3.0), (0.0, 2.0), (0.0, 1.5)] {
-            ray.t_min = min;
-            ray.t_max = max;
-            assert!(triangle.intersect(&ray).is_none());
-        }
-
-        ray.t_min = 0.0;
-        ray.t_max = f64::INFINITY;
-        assert!(triangle.intersect(&ray).is_some());
-    }
-
-    #[test]
-    fn invalid_distance_intervals_are_rejected() {
+    fn reserved_distance_limits_do_not_affect_geometric_hit() {
         let triangle = unit_triangle();
         let mut ray = downward_ray(0.25, 0.25, 2.0);
         for (min, max) in [
-            (f64::NAN, 3.0),
-            (-1.0, 3.0),
-            (f64::INFINITY, f64::INFINITY),
-            (0.0, f64::NAN),
-            (0.0, f64::NEG_INFINITY),
-            (3.0, 3.0),
+            (0.0, 1.0),
+            (3.0, 4.0),
             (3.0, 1.0),
+            (f64::NAN, f64::NEG_INFINITY),
         ] {
             ray.t_min = min;
             ray.t_max = max;
-            assert!(triangle.intersect(&ray).is_none());
+            let hit = triangle.intersect(&ray).unwrap();
+            assert!((hit.distance - 2.0).abs() < 1e-12);
+            assert!((hit.coords - Vector3::new(0.25, 0.25, 0.0)).norm() < 1e-12);
         }
     }
 
