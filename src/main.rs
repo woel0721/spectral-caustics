@@ -4,8 +4,10 @@ mod framebuffer;
 mod ground;
 mod hit;
 mod object;
+mod prism;
 mod ray;
 mod render;
+mod sence;
 mod triangle;
 
 fn main() {}

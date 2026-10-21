@@ -68,7 +68,7 @@ impl Framebuffer {
         true
     }
 
-    pub fn accelerated(&mut self, x: usize, y: usize, xyz: Vector3<f64>) -> bool {
+    pub fn accumulate(&mut self, x: usize, y: usize, xyz: Vector3<f64>) -> bool {
         if !xyz.iter().all(|v| v.is_finite()) {
             return false;
         }

@@ -13,7 +13,7 @@
 - Day 1 曾通过 512×512 的 `output/test.png` 位置渐变图验证输出链路。
 - Framebuffer、颜色转换与 PNG 读回测试。
 
-**Day 2 进行中：已实现 Ray、地面与单个三角形求交。** `Ray::new` 检查输入并归一化方向，`at(distance)` 计算光线上的位置。地面求交已移入独立的 `Ground`；`Ground` 和 `Triangle` 均实现 `Hittable::intersect(&Ray) -> Option<Hit>`。三棱镜组合和地面命中点灰度图尚未实现。
+**Day 2 进行中：已实现 Ray、地面、三角形、固定三棱镜与场景容器。** `Ray::new` 检查输入并归一化方向，`at(distance)` 计算光线上的位置。`Ground`、`Triangle` 和 `Prism` 实现 `Hittable::intersect(&Ray) -> Option<Hit>`；`Scene` 保存参数和物体集合，场景级 `cast_ray` 与地面命中点灰度图尚未实现。
 
 `Ray` 保存 `origin`、单位方向 `direction`、私有的方向倒数缓存 `direction_inv`、时间参数 `time` 与距离区间 `t_min/t_max`。统一使用 `Ray::new(origin, direction, time)` 构造；Rust 不支持默认函数参数，因此普通光线显式传入 `0.0`。预留的 `t_min/t_max` 初始值为 `(0, f64::MAX)`，当前地面与三角形求交均不读取这两个字段。时间字段目前仅保存数值，不模拟传播时间，与 `at(distance)` 的距离参数独立。零方向分量的倒数为 `±∞`，这是允许的缓存值；后续包围盒求交需单独处理平行轴，避免 `0 × ∞` 产生 NaN。
 
@@ -24,6 +24,18 @@
 `Ground::new(height)` 创建无限水平面 `z = height`，第一周场景使用 `Ground::new(0.0)`。求交距离为 `(height - ray.origin.z) / ray.direction.z`，检查平行、非有限值、溢出及 `1e-6` 米的自相交阈值。地面支持双面求交，法线始终为 `(0, 0, 1)`，不会随入射方向翻转。`Ground` 只负责几何求交；地面像素映射与能量累积尚未接入。
 
 `Triangle::new(v0, v1, v2)` 保存三个顶点并缓存两条边和单位几何法线，拒绝非有限顶点、退化三角形及计算溢出。法线按 `(v1 - v0) × (v2 - v0)` 定向，顶点和缓存保持私有，保证二者一致。求交采用双面的 Möller–Trumbore 算法，求解 `origin + t * direction = v0 + u * edge1 + v * edge2`；交点需满足 `u >= 0`、`v >= 0`、`u + v <= 1`，以及正向距离 `distance > 1e-6` 米。算法填写 `Hit.coords/normal/distance`，其余预留字段沿用默认值，`Hit` 本身保持纯数据结构。
+
+`Prism::new()` 将 6 个固定顶点组成 8 个三角形：两个三角形端面，加上三个各拆成两个三角形的矩形侧面。三角截面沿 y 轴从 `-1` 米拉伸至 `1` 米，底面为 `z = 1` 米，顶棱为 `z = 1.8` 米；所有三角形法线朝外。求交遍历所有面并取最近有效交点，支持从内部寻找出射面。
+
+`sence::Scene::new(width, height)` 创建空场景，保存像素宽高、垂直视场角 `fov`（默认 90 度）、线性 RGB 背景色 `background_color`（默认黑色）与 `objects: Vec<Box<dyn Hittable>>`。`Box<dyn Hittable>` 让不同具体类型的物体保存在同一个集合中，通过 `add` 显式添加：
+
+```rust
+let mut scene = Scene::new(512, 512);
+scene.add(Box::new(Prism::new().unwrap()));
+scene.add(Box::new(Ground::new(0.0).unwrap()));
+```
+
+场景级求交留给后续 `cast_ray`，当前不实现；命中的物体与材质编号仍为 `None`。画面参数只保存，尚未用于生成光线或输出背景；背景色写入 XYZ Framebuffer 前需转换颜色空间。
 
 ## 运行
 
@@ -51,7 +63,9 @@ cargo test --locked
 cargo clippy --locked --tests -- -D warnings
 ```
 
-`Hittable` 已由 `Ground` 和 `Triangle` 实现。当前入口为空，因此普通程序的严格 Clippy 会报告未使用的类型与函数；测试目标仍有未使用的 `Framebuffer::accelerated` 和 `Hit` 预留编号字段。接入场景和图片输出后，需重新验证 `cargo clippy --locked -- -D warnings`。
+当前入口为空，因此普通程序的严格 Clippy 会报告未使用的类型与函数；测试目标也有未使用的 `Framebuffer::accumulate`、场景画面参数与部分预留字段。接入主程序和图片输出后，需重新验证严格 Clippy。
+
+7 项三棱镜测试覆盖 8 个面的已知交点和朝外单位法线、最近面选择、棱边命中、内外求交、自相交与非有限光线；1 项场景集成测试验证通过 `add` 将三棱镜与地面放进同一集合后，仍可调用各自的求交算法。
 
 单三角形的 15 项测试涵盖已知交点和法线、斜射、双面命中、顶点顺序、三条边内外与顶点、平行/共面、自相交、预留距离字段不影响命中、退化输入、非有限值、溢出及小尺寸三角形。
 
@@ -66,6 +80,8 @@ PNG 读回测试在独立临时目录中保存一张 3×2 小图，再解码检�
 - `src/hit.rs`：求交结果的数据结构与字段默认值。
 - `src/object.rs`：返回 `Option<Hit>` 的统一求交接口。
 - `src/triangle.rs`：单三角形、几何法线、Möller–Trumbore 求交及测试。
+- `src/prism.rs`：固定三棱镜的顶点与面定义、最近交点查询及测试。
+- `src/sence.rs`：画面参数、物体集合与 `add` 方法；`cast_ray` 待实现。
 - `src/main.rs`：注册各模块，当前保留空入口。
 
 XYZ 转换使用 D65 白点约定，参考白的 Y = 1。矩阵来自 [W3C CSS Color 4 的颜色转换示例](https://www.w3.org/TR/css-color-4/#color-conversion-code)，保留负值和大于 1 的线性 RGB 分量。
@@ -77,7 +93,7 @@ XYZ 转换使用 D65 白点约定，参考白的 Y = 1。矩阵来自 [W3C CSS C
 - 地面为双面、无限大的水平面，默认场景约定高度为 `0`；尚未定义有限接收区域与图片像素映射。光线方向保持单位长度，返回的距离才表示米。
 - 当前 `Ground` 和 `Triangle` 的几何求交仅要求有限的正向距离大于自相交阈值，不使用预留的 `ray.t_min/t_max`。改变光线方向时应重新构造 `Ray`，以归一化方向并同步私有的 `direction_inv` 缓存。
 - 求交忽略 `t <= 1e-6` 米的交点，以防止自相交；单位方向的 `|direction.z| <= 1e-12` 时视为平行。两个阈值分别作用于距离和方向分量。
-- 三角形复用 `1e-6` 米的距离阈值；平行判断使用单位方向与单位法线的点积绝对值，阈值为 `1e-12`，与三角形面积独立。当前尚未组合或验证完整封闭三棱镜的法线朝向。
+- 三角形复用 `1e-6` 米的距离阈值；平行判断使用单位方向与单位法线的点积绝对值，阈值为 `1e-12`，与三角形面积独立。三棱镜采用固定顶点，棱边处返回最近面之一的法线；棱边没有唯一的几何法线。
 - 固定曝光为 1.0；不会根据每张图片的最大值自动归一化。
 - 显示范围采用逐通道裁剪，可能丢失高亮和色域外的颜色细节；Framebuffer 中的线性 XYZ 数据保留原值。
 - Day 1 的 RGB → XYZ 仅用于构造已知测试颜色，尚未实现玻璃折射、光谱积分或物理焦散。
