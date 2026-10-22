@@ -1,7 +1,11 @@
-//! Day 2 地面命中图：规则网格发射平行光，三棱镜暂时作为不透明遮挡物。
-//! 只累计地面交点，不计算玻璃折射或光谱；Framebuffer 仍只保存输出像素。
+//! 固定网格发射平行光，将地面落点累积为线性 XYZ 灰度图。
+//! 支持 Day 2 的不透明遮挡和 Day 3 的固定折射率双界面折射，尚不计算光谱。
 
-use crate::{framebuffer::Framebuffer, ray::Ray, scene::Scene};
+use crate::{
+    framebuffer::Framebuffer,
+    ray::Ray,
+    scene::{Scene, take_photon},
+};
 use nalgebra::Vector3;
 use std::error::Error;
 
@@ -36,13 +40,40 @@ pub fn ground_to_pixel(
     Some((x, height - 1 - y_from_bottom))
 }
 
-/// 生成固定俯视接收区域的灰度图；ground_id 是 Scene::add 返回的地面编号。
-/// 每个像素对应的发射区域按每轴 samples_per_pixel_axis 份均匀细分。
-/// 使用各小格中心，无随机数；相同参数得到相同结果。
+/// Day 2 的直接命中灰度图；未先命中地面的光线被遮挡，不继续追踪。
 pub fn render_ground_hits(
     scene: &Scene,
     ground_id: usize,
     samples_per_pixel_axis: usize,
+) -> Result<Framebuffer, Box<dyn Error>> {
+    render_landing_points(scene, ground_id, samples_per_pixel_axis, |ray| {
+        let hit = scene.intersect(&ray)?;
+        (hit.object_id == Some(ground_id)).then_some(hit.coords)
+    })
+}
+
+/// Day 3：每条光线调用 take_photon，累计直接落地或通过玻璃两次折射后的落点。
+pub fn render_refracted_ground_hits(
+    scene: &Scene,
+    prism_id: usize,
+    ground_id: usize,
+    samples_per_pixel_axis: usize,
+) -> Result<Framebuffer, Box<dyn Error>> {
+    if prism_id == ground_id || prism_id >= scene.objects.len() {
+        return Err("三棱镜编号无效或与地面编号相同".into());
+    }
+    render_landing_points(scene, ground_id, samples_per_pixel_axis, |ray| {
+        take_photon(scene, ray, prism_id, ground_id)
+    })
+}
+
+/// 两种光路复用相同的发射网格、通量权重与像素映射；landing_point 决定光路。
+/// 每个发射小格按每轴 samples_per_pixel_axis 份细分，各取中心点，无随机数。
+fn render_landing_points(
+    scene: &Scene,
+    ground_id: usize,
+    samples_per_pixel_axis: usize,
+    landing_point: impl Fn(Ray) -> Option<Vector3<f64>>,
 ) -> Result<Framebuffer, Box<dyn Error>> {
     if scene.width == 0 || scene.height == 0 || samples_per_pixel_axis == 0 {
         return Err("图像尺寸和每轴采样数必须大于零".into());
@@ -88,14 +119,10 @@ pub fn render_ground_hits(
             )
             .ok_or("平行光线构造失败")?;
 
-            let Some(hit) = scene.intersect(&ray) else {
+            let Some(position) = landing_point(ray) else {
                 continue;
             };
-            // 最近交点不是地面，表示被三棱镜等物体遮挡；不再继续传播。
-            if hit.object_id != Some(ground_id) {
-                continue;
-            }
-            if let Some((x, y)) = ground_to_pixel(hit.coords, scene.width, scene.height)
+            if let Some((x, y)) = ground_to_pixel(position, scene.width, scene.height)
                 && !framebuffer.accumulate(x, y, contribution)
             {
                 return Err("地面像素累积失败".into());
@@ -181,6 +208,8 @@ mod tests {
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         assert!(render_ground_hits(&scene, ground_id, 0).is_err());
         assert!(render_ground_hits(&scene, ground_id, usize::MAX).is_err());
+        assert!(render_refracted_ground_hits(&scene, usize::MAX, ground_id, 1).is_err());
+        assert!(render_refracted_ground_hits(&scene, ground_id, ground_id, 1).is_err());
         scene.width = 0;
         assert!(render_ground_hits(&scene, ground_id, 1).is_err());
     }
@@ -212,6 +241,61 @@ mod tests {
                 assert_eq!(pixels.get_pixel(x, y).0, expected);
             }
         }
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn refracted_render_redistributes_energy_without_creating_flux() {
+        let mut scene = Scene::new(64, 32);
+        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        let refracted = render_refracted_ground_hits(&scene, prism_id, ground_id, 2).unwrap();
+        // 远离三棱镜的角落仍是相对亮度 0.5，部分落点与直射光叠加后更亮。
+        assert!((refracted.get(0, 0).unwrap().y - 0.5).abs() < 1e-12);
+        assert!(refracted.pixels.iter().any(|pixel| pixel.y > 0.5));
+        assert!(refracted.pixels.iter().any(|pixel| pixel.y == 0.0));
+        assert!(
+            refracted
+                .pixels
+                .iter()
+                .all(|pixel| pixel.iter().all(|v| v.is_finite() && *v >= 0.0))
+        );
+        let total_y: f64 = refracted.pixels.iter().map(|pixel| pixel.y).sum();
+        let emitted_y = 0.5 * (scene.width * scene.height) as f64;
+        assert!(total_y > 0.0 && total_y <= emitted_y + 1e-12);
+        let coarse = render_refracted_ground_hits(&scene, prism_id, ground_id, 1).unwrap();
+        let coarse_y: f64 = coarse.pixels.iter().map(|pixel| pixel.y).sum();
+        // 边界采样可能改变少量全反射分类，但四倍光线数不能使总能量接近四倍。
+        assert!((total_y - coarse_y).abs() < emitted_y * 0.02);
+    }
+
+    #[test]
+    fn refracted_png_preserves_grayscale_and_contains_brighter_landing_regions()
+    -> Result<(), Box<dyn Error>> {
+        let mut scene = Scene::new(64, 32);
+        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        let framebuffer = render_refracted_ground_hits(&scene, prism_id, ground_id, 2)?;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("refracted-png-{}-{timestamp}", std::process::id()));
+        let path = directory.join("refracted_hits.png");
+        save_png(&framebuffer, path.to_str().ok_or("临时路径必须是 UTF-8")?)?;
+        let decoded = image::open(&path)?;
+        assert_eq!(decoded.color(), image::ColorType::Rgb8);
+        let pixels = decoded.into_rgb8();
+        assert_eq!(pixels.dimensions(), (64, 32));
+        assert_eq!(pixels.get_pixel(0, 0).0, [188, 188, 188]);
+        assert!(
+            pixels
+                .pixels()
+                .all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2])
+        );
+        assert!(pixels.pixels().any(|pixel| pixel[0] > 188));
+        assert!(pixels.pixels().any(|pixel| pixel[0] == 0));
         std::fs::remove_dir_all(directory)?;
         Ok(())
     }

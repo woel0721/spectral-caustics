@@ -13,16 +13,21 @@
 - Day 1 曾通过 512×512 的 `output/test.png` 位置渐变图验证输出链路。
 - Framebuffer、颜色转换与 PNG 读回测试。
 
-**Day 2 已完成：光线、几何、最近交点与地面命中点灰度图。** `Ray::new` 检查输入并归一化方向，`at(distance)` 计算光线上的位置。`Ground`、`Triangle` 和 `Prism` 实现 `Hittable::intersect(&Ray) -> Option<Hit>`；`Scene::intersect` 遍历物体并返回最近交点。主程序从上方发射平行光，把地面交点映射到输出像素，生成 512×512 的 `output/ground_hits.png`。三棱镜暂时不透明，照亮处为灰色，阴影为黑色。
+**Day 2 已完成：光线、几何、最近交点与地面命中点灰度图。** `Ray::new` 检查输入并归一化方向，`at(distance)` 计算光线上的位置。`Ground`、`Triangle` 和 `Prism` 实现 `Hittable::intersect(&Ray) -> Option<Hit>`；`Scene::intersect` 遍历物体并返回最近交点。`render_ground_hits` 仅累计首先命中地面的光线，已保存 512×512 的 `output/ground_hits.png` 作为不透明遮挡示例。
 
-两张阶段示例随仓库保存：
+**Day 3 已完成：固定折射率双界面折射与批量地面累积。** `scene::take_photon` 返回直接落地或通过玻璃两次折射后的地面落点；全反射、其他遮挡和未命中时返回 `None`。主程序用相同发射网格、总通量和曝光输出无三棱镜对照图及玻璃折射图。
+
+阶段示例：
 
 - Day 1 输出链路：[位置渐变测试图](output/test.png)。
 - Day 2 几何验证：[地面命中点灰度图](output/ground_hits.png)。
+- Day 3 对照：[无三棱镜](output/no_prism.png)、[固定折射率玻璃](output/refracted_hits.png)。
 
 ![Day 1：位置渐变测试图](output/test.png)
 
 ![Day 2：地面灰度与三棱镜阴影](output/ground_hits.png)
+
+![Day 3：经过玻璃双界面折射后的地面灰度分布](output/refracted_hits.png)
 
 `Ray` 保存 `origin`、单位方向 `direction`、方向倒数缓存 `direction_inv`、时间参数 `time` 与距离区间 `t_min/t_max`。统一使用 `Ray::new(origin, direction, time)` 构造；Rust 不支持默认函数参数，因此普通光线显式传入 `0.0`。预留的 `t_min/t_max` 初始值为 `(0, f64::MAX)`，当前地面与三角形求交均不读取这两个字段。时间字段目前仅保存数值，不模拟传播时间，与 `at(distance)` 的距离参数独立。零方向分量的倒数为 `±∞`，这是允许的缓存值；后续包围盒求交需单独处理平行轴，避免 `0 × ∞` 产生 NaN。
 
@@ -40,11 +45,13 @@
 
 ```rust
 let mut scene = Scene::new(512, 512);
-scene.add(Box::new(Prism::new().unwrap()));
+let prism_id = scene.add(Box::new(Prism::new().unwrap()));
 let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
 ```
 
 `Scene::intersect(&ray)` 返回最近的 `Option<Hit>`，并填写 `Hit.object_id`；`material_id` 仍为 `None`。物体编号是当前集合下标，查询期间不能重排集合。地面命中图使用宽高，保留的 `fov` 与 `background_color` 不参与当前光源追踪。
+
+`take_photon(&scene, ray, prism_id, ground_id)` 按顺序执行首次求交、空气 → 玻璃折射、内部求交、玻璃 → 空气折射、最后一次地面求交。折射率固定为 `1.0` 与 `1.52`，界面起点沿法线偏移 `1e-5` 米，后续 Ray 保留原来的 `time`。入射使用朝外法线，出射使用取反后的法线。光线需从空气中出发，不处理已有玻璃内部起点。
 
 ## 运行
 
@@ -54,11 +61,11 @@ let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
 cargo run --release --locked
 ```
 
-输出 `output/ground_hits.png`。默认从 `z = 3` 米的 4×4 米区域发射 512×512 条向下的平行光，方向为 `(0, 0, -1)`。接收区域为地面 `x、y ∈ [-2, 2)` 米，世界 +x 朝图片右侧，+y 朝图片上方。每个发射小格取中心点，因此不需要随机数，结果可复现。
+输出两张 512×512 PNG：`output/no_prism.png` 为无三棱镜对照，`output/refracted_hits.png` 为固定折射率玻璃的地面分布。默认从 `z = 3` 米的 4×4 米区域发射向下的平行光，方向为 `(0, 0, -1)`。每个发射小格均匀取 2×2 个中心样本，每张图共 1,048,576 条光线；不需要随机数，结果可复现。
 
-三棱镜的俯视投影为 `x ∈ [-0.5, 0.5]`、`y ∈ [-1, 1]` 米，因此图片中央是 128×256 像素的黑色矩形。其余像素的线性亮度为 0.5，通过 XYZ → 线性 sRGB → sRGB 编码后为 `[188, 188, 188]`。
+接收区域为地面 `x、y ∈ [-2, 2)` 米，世界 +x 朝图片右侧，+y 朝图片上方。无三棱镜时像素线性亮度为 0.5，经过 XYZ → 线性 sRGB → sRGB 编码后为 `[188, 188, 188]`。加入玻璃后，透射落点向两侧移动，与直射光叠加形成更亮的区域；原来的部分区域没有光线落入。单条已知光线的地面落点从无玻璃时的 `(0.25, 0.2, 0)` 移至约 `(-0.7196, 0.2, 0)`。
 
-在 `main.rs` 中将 `render_ground_hits(&scene, ground_id, 1)` 的最后一个参数改为 `2`，会在每个发射小格内细分出 2×2 条光线。相对总通量固定为 `0.5 × 16`，每条光线的通量除以总光线数，再除以像素对应的地面面积后累积；增加采样数不会直接提高未遮挡区域的亮度。这个灰度标尺只用于几何验证，没有实际光源功率单位。
+在 `main.rs` 中修改 `samples_per_pixel_axis` 可以改变每格的采样数。两种光路复用相同的发射网格、像素映射和归一化：相对总通量固定为 `0.5 × 16`，每条光线的通量除以总光线数，再除以像素对应的地面面积后累积。增加采样数不会直接提高亮度；边界采样和全反射可能使落地通量有少量变化。这个灰度标尺没有实际光源功率单位。
 
 Day 3 的单条光线折射示例：
 
@@ -66,7 +73,7 @@ Day 3 的单条光线折射示例：
 cargo run --locked --example refract_ray
 ```
 
-示例按顺序执行空气 → 玻璃（`n = 1.52`）→ 空气 → 地面，打印入射点、玻璃内方向、出射点、出射方向和地面落点。`refract` 要求单位方向、单位法线，且法线朝向入射介质，所以出射调用使用 `-exit.normal`。界面处沿法线偏移 `1e-5` 米；全反射时终止并报告原因。示例位于 `examples/refract_ray.rs`，当前默认 PNG 仍使用 Day 2 的不透明遮挡流程。
+示例按顺序执行空气 → 玻璃（`n = 1.52`）→ 空气 → 地面，打印入射点、玻璃内方向、出射点、出射方向和地面落点。`refract` 要求单位方向、单位法线，且法线朝向入射介质，所以出射调用使用 `-exit.normal`。界面处沿法线偏移 `1e-5` 米；全反射时终止并报告原因。`examples/refract_ray.rs` 保留了逐步展开的写法，方便对照 `take_photon` 阅读。
 
 仅运行地面求交的 11 项测试：
 
@@ -84,7 +91,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-当前 70 项测试通过，严格 Clippy 通过。测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、采样数量归一化、三棱镜遮挡、XYZ 累积溢出保护，以及地面灰度图的 PNG 读回。折射测试覆盖法向入射、全反射、非法数值、Snell 定律和单条光线通过两个界面后落地。
+当前 78 项测试通过，严格 Clippy 通过。测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、采样数量归一化、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地。`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、物体编号和添加顺序；批量渲染检查落点能量重分布、总能量上界与增加采样数后的尺度。
 
 7 项三棱镜测试覆盖 8 个面的已知交点和朝外单位法线、最近面选择、棱边命中、内外求交、自相交与非有限光线；场景测试验证同一集合中不同物体的求交，以及改变添加顺序后仍选择最近交点。
 
@@ -95,7 +102,7 @@ PNG 读回测试在独立临时目录中保存一张 3×2 小图，再解码检�
 ## 文件与颜色约定
 
 - `src/framebuffer.rs`：二维图像缓冲，图片坐标通过 `y * width + x` 转成数组下标。
-- `src/caustics.rs`：当前 Day 2 的固定平行光网格、地面像素映射与归一化灰度累积，尚不计算折射。
+- `src/caustics.rs`：固定平行光网格、地面像素映射与归一化灰度累积，支持直接命中和调用 `take_photon` 的折射光路。
 - `src/render.rs`：XYZ → 线性 sRGB → sRGB8 → PNG，以及颜色转换和 PNG 读回测试。
 - `src/ray.rs`：Ray、方向归一化、沿光线取点及对应测试。
 - `src/ground.rs`：可配置高度的无限地面、`Hittable` 求交实现及对应测试。
@@ -103,9 +110,9 @@ PNG 读回测试在独立临时目录中保存一张 3×2 小图，再解码检�
 - `src/object.rs`：返回 `Option<Hit>` 的统一求交接口。
 - `src/triangle.rs`：单三角形、几何法线、Möller–Trumbore 求交及测试。
 - `src/prism.rs`：固定三棱镜的顶点与面定义、最近交点查询及测试。
-- `src/scene.rs`：画面参数、物体集合、返回物体编号的 `add` 与最近交点查询。
+- `src/scene.rs`：画面参数、物体集合、物体编号、最近交点、Snell 折射和 `take_photon` 双界面追踪。
 - `src/lib.rs`：导出现有模块，供主程序和测试复用。
-- `src/main.rs`：搭建三棱镜与地面场景，生成灰度 Framebuffer 并保存 PNG。
+- `src/main.rs`：搭建玻璃与无玻璃对照场景，生成两张灰度 Framebuffer 并保存 PNG。
 - `examples/refract_ray.rs`：单条光线进入三棱镜、内部传播、出射及落地的顺序示例。
 
 XYZ 转换使用 D65 白点约定，参考白的 Y = 1。矩阵来自 [W3C CSS Color 4 的颜色转换示例](https://www.w3.org/TR/css-color-4/#color-conversion-code)，保留负值和大于 1 的线性 RGB 分量。
@@ -120,7 +127,9 @@ XYZ 转换使用 D65 白点约定，参考白的 Y = 1。矩阵来自 [W3C CSS C
 - 三角形复用 `1e-6` 米的距离阈值；平行判断使用单位方向与单位法线的点积绝对值，阈值为 `1e-12`，与三角形面积独立。三棱镜采用固定顶点，棱边处返回最近面之一的法线；棱边没有唯一的几何法线。
 - 固定曝光为 1.0；不会根据每张图片的最大值自动归一化。
 - 显示范围采用逐通道裁剪，可能丢失高亮和色域外的颜色细节；Framebuffer 中的线性 XYZ 数据保留原值。
-- 默认 PNG 中三棱镜暂时作为完全不透明的遮挡物；当前是地面阴影验证图。灰色采用现有 D65 参考白缩放；单条光线示例已接通固定折射率双界面折射，批量折射图、光谱积分和物理焦散尚待实现。
-- 当前光源高度、方向、发射区域和接收区域固定；使用最近像素累积，没有双线性过滤。Day 3 下一步将单条光线的折射过程接入批量地面灰度累积。
+- 当前折射率固定为 `1.52`，灰色采用现有 D65 参考白缩放，尚未进行波长采样、色散或光谱积分。
+- `take_photon` 最多经过两个玻璃界面；全反射直接终止，不继续内部反射。未计算 Fresnel 反射损失和吸收；超出接收区域的落点不写入图像。
+- 当前光源高度、方向、发射区域和接收区域固定；使用最近像素累积，没有双线性过滤。规则网格与落点量化可能形成竖向条纹，较亮落点还可能被显示范围裁剪；没有按每张图的最大值自动归一化。
+- 下一阶段为 Day 4 的波长与 Cauchy 色散模型。
 
-使用 `nalgebra` 进行数学计算，`image` 编解码 PNG。`Cargo.lock` 与两张阶段示例 `output/test.png`、`output/ground_hits.png` 随项目提交；编译目录 `target/` 和其他生成文件继续忽略。运行默认命令会更新已跟踪的 `output/ground_hits.png`。
+使用 `nalgebra` 进行数学计算，`image` 编解码 PNG。`Cargo.lock` 随项目提交；`.gitignore` 仅放行 `output/test.png`、`output/ground_hits.png`、`output/no_prism.png`、`output/refracted_hits.png` 四张阶段示例，编译目录 `target/` 和其他生成文件继续忽略。运行默认命令会更新 Day 3 的两张对照图。

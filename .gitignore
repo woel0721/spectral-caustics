@@ -2,4 +2,6 @@
 /output/*
 !/output/test.png
 !/output/ground_hits.png
+!/output/no_prism.png
+!/output/refracted_hits.png
 .DS_Store

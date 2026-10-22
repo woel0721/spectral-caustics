@@ -68,6 +68,9 @@ pub fn refract(
         return None;
     }
     let cosi = -normal.dot(&direction);
+    if cosi < 0.0 {
+        return None;
+    }
     let eta = eta_i / eta_t;
     let k = 1.0 - eta * eta * (1.0 - cosi * cosi);
     if !k.is_finite() || k < 0.0 {
@@ -75,6 +78,61 @@ pub fn refract(
     } else {
         let refracted = eta * direction + (eta * cosi - k.sqrt()) * normal;
         refracted.iter().all(|v| v.is_finite()).then_some(refracted)
+    }
+}
+
+/// 追踪从空气出发的单条光线，返回最终地面落点。
+/// 只支持一个三棱镜的两次透射；全反射、其他遮挡或未命中地面时返回 None。
+pub fn take_photon(
+    scene: &Scene,
+    ray: Ray,
+    prism_id: usize,
+    ground_id: usize,
+) -> Option<Vector3<f64>> {
+    const AIR_IOR: f64 = 1.0;
+    const GLASS_IOR: f64 = 1.52;
+    const EPSILON: f64 = 1e-5;
+
+    if prism_id == ground_id || prism_id >= scene.objects.len() || ground_id >= scene.objects.len()
+    {
+        return None;
+    }
+
+    let first_hit = scene.intersect(&ray)?;
+    // 没有经过玻璃，直接落地。
+    if first_hit.object_id == Some(ground_id) {
+        return Some(first_hit.coords);
+    }
+    if first_hit.object_id != Some(prism_id) {
+        return None;
+    }
+
+    // 空气 -> 玻璃：朝外法线朝向入射介质。
+    let inside_direction = refract(ray.direction, first_hit.normal, AIR_IOR, GLASS_IOR)?;
+    let inside_ray = Ray::new(
+        first_hit.coords - first_hit.normal * EPSILON,
+        inside_direction,
+        ray.time,
+    )?;
+
+    let exit_hit = scene.intersect(&inside_ray)?;
+    if exit_hit.object_id != Some(prism_id) {
+        return None;
+    }
+
+    // 玻璃 -> 空气：法线取反，朝向玻璃内部；全反射由 ? 提前返回 None。
+    let outside_direction = refract(inside_ray.direction, -exit_hit.normal, GLASS_IOR, AIR_IOR)?;
+    let outside_ray = Ray::new(
+        exit_hit.coords + exit_hit.normal * EPSILON,
+        outside_direction,
+        ray.time,
+    )?;
+
+    let ground_hit = scene.intersect(&outside_ray)?;
+    if ground_hit.object_id == Some(ground_id) {
+        Some(ground_hit.coords)
+    } else {
+        None
     }
 }
 
@@ -215,5 +273,124 @@ mod tests {
         assert!((ground_hit.coords.y - 0.2).abs() < 1e-12);
         // 不加玻璃时落在 x=0.25；经过两次折射后向 -x 偏移。
         assert!((-0.8..-0.7).contains(&ground_hit.coords.x));
+    }
+
+    fn photon_scene() -> (Scene, usize, usize) {
+        let mut scene = Scene::new(16, 8);
+        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        (scene, prism_id, ground_id)
+    }
+
+    #[test]
+    fn photon_returns_direct_ground_hit_or_none_when_ray_misses() {
+        let (scene, prism_id, ground_id) = photon_scene();
+        let ray = Ray::new(
+            Vector3::new(1.0, 0.2, 3.0),
+            Vector3::new(0.0, 0.0, -1.0),
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(
+            take_photon(&scene, ray, prism_id, ground_id),
+            Some(Vector3::new(1.0, 0.2, 0.0))
+        );
+        let ray = Ray::new(
+            Vector3::new(1.0, 0.2, 3.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            0.0,
+        )
+        .unwrap();
+        assert!(take_photon(&scene, ray, prism_id, ground_id).is_none());
+    }
+
+    #[test]
+    fn photon_reaches_expected_refracted_landing_point_in_either_object_order() {
+        for ground_first in [false, true] {
+            let mut scene = Scene::new(16, 8);
+            let (prism_id, ground_id) = if ground_first {
+                let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+                (scene.add(Box::new(Prism::new().unwrap())), ground_id)
+            } else {
+                let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+                (prism_id, scene.add(Box::new(Ground::new(0.0).unwrap())))
+            };
+            let ray = Ray::new(
+                Vector3::new(0.25, 0.2, 3.0),
+                Vector3::new(0.0, 0.0, -1.0),
+                2.0,
+            )
+            .unwrap();
+            let position = take_photon(&scene, ray, prism_id, ground_id).unwrap();
+            // 与独立单光线示例的已知落点比较；直接落地时 x 应为 0.25。
+            assert!((position - Vector3::new(-0.719593104236608, 0.2, 0.0)).norm() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn photon_stops_at_other_objects_before_inside_or_after_glass() {
+        // 三个高度分别遮挡入射段、玻璃内部段和出射后的空气段。
+        for height in [2.5, 1.2, 0.5] {
+            let (mut scene, prism_id, ground_id) = photon_scene();
+            scene.add(Box::new(Ground::new(height).unwrap()));
+            let ray = Ray::new(
+                Vector3::new(0.25, 0.2, 3.0),
+                Vector3::new(0.0, 0.0, -1.0),
+                0.0,
+            )
+            .unwrap();
+            assert!(take_photon(&scene, ray, prism_id, ground_id).is_none());
+        }
+    }
+
+    #[test]
+    fn photon_terminates_on_total_internal_reflection_at_prism_bottom() {
+        let (scene, prism_id, ground_id) = photon_scene();
+        // 垂直于右斜面入射，进入后方向不变；与底面法线夹角约 58°，超过临界角。
+        let ray = Ray::new(
+            Vector3::new(1.05, 0.2, 1.9),
+            Vector3::new(-1.6, 0.0, -1.0),
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(scene.intersect(&ray).unwrap().object_id, Some(prism_id));
+        assert!(take_photon(&scene, ray, prism_id, ground_id).is_none());
+    }
+
+    #[test]
+    fn photon_rejects_invalid_or_identical_object_ids() {
+        let (scene, prism_id, ground_id) = photon_scene();
+        let ray = Ray::new(
+            Vector3::new(1.0, 0.2, 3.0),
+            Vector3::new(0.0, 0.0, -1.0),
+            0.0,
+        )
+        .unwrap();
+        assert!(take_photon(&scene, ray, usize::MAX, ground_id).is_none());
+        assert!(take_photon(&scene, ray, prism_id, usize::MAX).is_none());
+        assert!(take_photon(&scene, ray, ground_id, ground_id).is_none());
+    }
+
+    #[test]
+    fn refraction_handles_near_normal_near_critical_and_reversed_normals() {
+        let normal = Vector3::new(0.0, 0.0, 1.0);
+        let angle = 1e-9_f64;
+        let direction = Vector3::new(angle.sin(), 0.0, -angle.cos());
+        let refracted = refract(direction, normal, 1.0, 1.52).unwrap();
+        assert!((refracted.x - direction.x / 1.52).abs() < 1e-15);
+        assert!((refracted.norm() - 1.0).abs() < 1e-12);
+        assert!(refract(direction, -normal, 1.0, 1.52).is_none());
+
+        let critical = (1.0_f64 / 1.52).asin();
+        for (offset, transmitted) in [(-1e-8, true), (1e-8, false)] {
+            let angle = critical + offset;
+            let direction = Vector3::new(angle.sin(), 0.0, -angle.cos());
+            let result = refract(direction, normal, 1.52, 1.0);
+            assert_eq!(result.is_some(), transmitted);
+            if let Some(direction) = result {
+                assert!(direction.iter().all(|value| value.is_finite()));
+                assert!((direction.norm() - 1.0).abs() < 1e-12);
+            }
+        }
     }
 }
