@@ -1,4 +1,4 @@
-//! 固定网格发射平行光，将地面落点累积为线性 XYZ 灰度图。
+//! 分层随机发射平行光，将地面落点累积为线性 XYZ 灰度图。
 //! 支持 Day 2 的不透明遮挡和 Day 3 的固定折射率双界面折射，尚不计算光谱。
 
 use crate::{
@@ -8,6 +8,7 @@ use crate::{
     utils::bilinear_weights,
 };
 use nalgebra::Vector3;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::error::Error;
 
 // 第一张验证图使用固定的 4×4 米接收区域与同样大小的发射区域。
@@ -15,6 +16,8 @@ const GROUND_MIN: f64 = -2.0;
 const GROUND_MAX: f64 = 2.0;
 const LIGHT_HEIGHT: f64 = 3.0;
 const UNBLOCKED_BRIGHTNESS: f64 = 0.5;
+// 每次渲染都从同一种子重新开始，两种场景使用相同的发射位置。
+const SAMPLING_SEED: u64 = 42;
 
 /// 将地面世界坐标映射为连续像素坐标；世界 x、y 采用 [-2, 2) 米的半开区间。
 /// 世界 +x 朝图片右侧，+y 朝图片上方；整数输出坐标是像素中心，边界在 -0.5。
@@ -65,7 +68,8 @@ pub fn render_refracted_ground_hits(
 }
 
 /// 两种光路复用相同的发射网格、通量权重与像素映射；landing_point 决定光路。
-/// 每个发射小格按每轴 samples_per_pixel_axis 份细分，各取中心点，无随机数。
+/// 每个发射小格按每轴 samples_per_pixel_axis 份细分，每层独立随机取一点。
+/// 固定种子保证可复现；每条光线都先消耗两个随机数，再进行命中查询。
 fn render_landing_points(
     scene: &Scene,
     ground_id: usize,
@@ -104,11 +108,15 @@ fn render_landing_points(
     let white_xyz = Vector3::new(0.3127 / 0.3290, 1.0, (1.0 - 0.3127 - 0.3290) / 0.3290);
     let contribution = white_xyz * (flux_per_ray / pixel_area);
     let mut framebuffer = Framebuffer::new(scene.width, scene.height);
+    let mut rng = StdRng::seed_from_u64(SAMPLING_SEED);
 
     for sample_y in 0..samples_y {
         for sample_x in 0..samples_x {
-            let origin_x = GROUND_MIN + (sample_x as f64 + 0.5) / samples_x as f64 * span;
-            let origin_y = GROUND_MAX - (sample_y as f64 + 0.5) / samples_y as f64 * span;
+            // 分层不变，只把固定的 0.5 偏移改为每轴独立的 [0, 1) 随机偏移。
+            let origin_x =
+                GROUND_MIN + (sample_x as f64 + rng.random::<f64>()) / samples_x as f64 * span;
+            let origin_y =
+                GROUND_MIN + (sample_y as f64 + rng.random::<f64>()) / samples_y as f64 * span;
             let ray = Ray::new(
                 Vector3::new(origin_x, origin_y, LIGHT_HEIGHT),
                 Vector3::new(0.0, 0.0, -1.0),
@@ -178,19 +186,74 @@ mod tests {
     }
 
     #[test]
-    fn unblocked_ground_is_uniform_and_more_samples_preserve_brightness() {
-        let mut scene = Scene::new(8, 4);
+    fn unblocked_ground_preserves_total_energy_and_more_samples_reduce_noise() {
+        let mut scene = Scene::new(32, 16);
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         let coarse = render_ground_hits(&scene, ground_id, 1).unwrap();
         let fine = render_ground_hits(&scene, ground_id, 3).unwrap();
-        for (a, b) in coarse.pixels.iter().zip(&fine.pixels) {
-            assert!((a.y - 0.5).abs() < 1e-12);
-            assert!((a - b).norm() < 1e-12);
+        let expected_total = 0.5 * (scene.width * scene.height) as f64;
+        for image in [&coarse, &fine] {
+            let total: f64 = image.pixels.iter().map(|pixel| pixel.y).sum();
+            assert!((total - expected_total).abs() < 1e-10);
         }
+        let coarse_error: f64 = coarse
+            .pixels
+            .iter()
+            .map(|pixel| (pixel.y - 0.5).powi(2))
+            .sum();
+        let fine_error: f64 = fine
+            .pixels
+            .iter()
+            .map(|pixel| (pixel.y - 0.5).powi(2))
+            .sum();
+        assert!(coarse_error > 0.0 && fine_error < coarse_error);
+    }
+
+    #[test]
+    fn jittered_sampling_covers_each_stratum_once_and_repeats_with_fixed_seed() {
+        use std::cell::RefCell;
+
+        let mut scene = Scene::new(4, 3);
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        let record = || {
+            let origins = RefCell::new(Vec::new());
+            let image = render_landing_points(&scene, ground_id, 2, |ray| {
+                origins.borrow_mut().push(ray.origin);
+                Some(Vector3::new(ray.origin.x, ray.origin.y, 0.0))
+            })
+            .unwrap();
+            (origins.into_inner(), image)
+        };
+        let (origins, first_image) = record();
+        let (repeated_origins, repeated_image) = record();
+        assert_eq!(origins, repeated_origins);
+        assert_eq!(first_image.pixels, repeated_image.pixels);
+
+        let (samples_x, samples_y) = (8, 6);
+        assert_eq!(origins.len(), samples_x * samples_y);
+        let span = GROUND_MAX - GROUND_MIN;
+        let mut off_center = false;
+        let mut different_axis_offsets = false;
+        for (index, origin) in origins.iter().enumerate() {
+            let (sample_x, sample_y) = (index % samples_x, index / samples_x);
+            let x = (origin.x - GROUND_MIN) / span * samples_x as f64;
+            let y = (origin.y - GROUND_MIN) / span * samples_y as f64;
+            assert!((sample_x as f64..(sample_x + 1) as f64).contains(&x));
+            assert!((sample_y as f64..(sample_y + 1) as f64).contains(&y));
+            assert_eq!(origin.z, LIGHT_HEIGHT);
+            let (jitter_x, jitter_y) = (x - sample_x as f64, y - sample_y as f64);
+            off_center |= (jitter_x - 0.5).abs() > 1e-12;
+            different_axis_offsets |= (jitter_x - jitter_y).abs() > 1e-12;
+        }
+        assert!(off_center && different_axis_offsets);
     }
 
     #[test]
     fn prism_shadow_has_bilinear_edges_and_preserves_flux_in_either_object_order() {
+        let mut reference_scene = Scene::new(16, 8);
+        let reference_ground_id = reference_scene.add(Box::new(Ground::new(0.0).unwrap()));
+        let reference = render_ground_hits(&reference_scene, reference_ground_id, 2).unwrap();
+        let mut previous_image = None;
         for ground_first in [false, true] {
             let mut scene = Scene::new(16, 8);
             if !ground_first {
@@ -201,19 +264,23 @@ mod tests {
                 scene.add(Box::new(Prism::new().unwrap()));
             }
             let framebuffer = render_ground_hits(&scene, ground_id, 2).unwrap();
-            // 双线性分配让投影边缘的两个像素共享能量；深处仍黑，远处仍是 0.5。
-            for (x, y, expected) in [
-                (7, 3, 0.0),
-                (0, 0, 0.5),
-                (6, 3, 0.0625),
-                (5, 3, 0.4375),
-                (6, 2, 0.1171875),
-            ] {
-                assert!((framebuffer.get(x, y).unwrap().y - expected).abs() < 1e-12);
+            // 相同种子的有/无遮挡场景共享发射位置；增加遮挡不能增加任何像素的能量。
+            for (shadowed, unblocked) in framebuffer.pixels.iter().zip(&reference.pixels) {
+                assert!(shadowed.y <= unblocked.y + 1e-12);
             }
+            assert_eq!(framebuffer.get(7, 3).unwrap().y, 0.0);
+            assert_eq!(framebuffer.get(0, 0), reference.get(0, 0));
+            // 边缘仍有双线性贡献，但比无遮挡时暗；随机位置使具体数值有波动。
+            assert!(framebuffer.get(6, 3).unwrap().y > 0.0);
+            assert!(framebuffer.get(5, 3).unwrap().y > 0.0);
+            assert!(framebuffer.get(5, 3).unwrap().y < reference.get(5, 3).unwrap().y);
             let total_y: f64 = framebuffer.pixels.iter().map(|pixel| pixel.y).sum();
             // 128 个像素中，几何投影遮挡等效的 16 个像素；过滤不改变总量。
             assert!((total_y - 56.0).abs() < 1e-12);
+            if let Some(previous) = &previous_image {
+                assert_eq!(&framebuffer.pixels, previous);
+            }
+            previous_image = Some(framebuffer.pixels);
         }
     }
 
@@ -266,10 +333,10 @@ mod tests {
 
     #[test]
     fn ground_hit_png_contains_gray_ground_and_black_shadow() -> Result<(), Box<dyn Error>> {
-        let mut scene = Scene::new(8, 4);
+        let mut scene = Scene::new(32, 16);
         scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        let framebuffer = render_ground_hits(&scene, ground_id, 1)?;
+        let framebuffer = render_ground_hits(&scene, ground_id, 2)?;
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos();
@@ -280,17 +347,14 @@ mod tests {
         let decoded = image::open(&path)?;
         assert_eq!(decoded.color(), image::ColorType::Rgb8);
         let pixels = decoded.into_rgb8();
-        assert_eq!(pixels.dimensions(), (8, 4));
-        for y in 0..4 {
-            for x in 0..8 {
-                let expected = if (3..5).contains(&x) && (1..3).contains(&y) {
-                    [0, 0, 0]
-                } else {
-                    [188, 188, 188]
-                };
-                assert_eq!(pixels.get_pixel(x, y).0, expected);
-            }
-        }
+        assert_eq!(pixels.dimensions(), (32, 16));
+        assert_eq!(pixels.get_pixel(16, 8).0, [0, 0, 0]);
+        assert!(pixels.get_pixel(0, 0)[0] > 0);
+        assert!(
+            pixels
+                .pixels()
+                .all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2])
+        );
         std::fs::remove_dir_all(directory)?;
         Ok(())
     }
@@ -301,9 +365,18 @@ mod tests {
         let prism_id = scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         let refracted = render_refracted_ground_hits(&scene, prism_id, ground_id, 2).unwrap();
-        // 远离三棱镜的角落仍是相对亮度 0.5，部分落点与直射光叠加后更亮。
-        assert!((refracted.get(0, 0).unwrap().y - 0.5).abs() < 1e-12);
-        assert!(refracted.pixels.iter().any(|pixel| pixel.y > 0.5));
+        let mut reference_scene = Scene::new(scene.width, scene.height);
+        let reference_ground_id = reference_scene.add(Box::new(Ground::new(0.0).unwrap()));
+        let reference = render_ground_hits(&reference_scene, reference_ground_id, 2).unwrap();
+        // 相同随机发射位置下，远处相同；部分折射落点与直射光叠加后更亮。
+        assert_eq!(refracted.get(0, 0), reference.get(0, 0));
+        assert!(
+            refracted
+                .pixels
+                .iter()
+                .zip(&reference.pixels)
+                .any(|(a, b)| a.y > b.y + 1e-12)
+        );
         assert!(refracted.pixels.iter().any(|pixel| pixel.y == 0.0));
         assert!(
             refracted
@@ -338,7 +411,7 @@ mod tests {
         assert_eq!(decoded.color(), image::ColorType::Rgb8);
         let pixels = decoded.into_rgb8();
         assert_eq!(pixels.dimensions(), (64, 32));
-        assert_eq!(pixels.get_pixel(0, 0).0, [188, 188, 188]);
+        assert!(pixels.get_pixel(0, 0)[0] > 0);
         assert!(
             pixels
                 .pixels()

@@ -14,8 +14,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let prism_id = scene.add(Box::new(Prism::new().expect("固定三棱镜应能正常构造")));
     let ground_id = scene.add(Box::new(Ground::new(0.0).expect("地面高度应为有限值")));
 
-    // 每个发射小格细分 2×2 条光线；每条都通过 take_photon 查询最终地面落点。
-    let samples_per_pixel_axis = 2;
+    // 每个发射小格分为 4×4 层，每层随机发射一条光线，并通过 take_photon 查询落点。
+    let samples_per_pixel_axis = 4;
     let framebuffer =
         render_refracted_ground_hits(&scene, prism_id, ground_id, samples_per_pixel_axis)?;
     let path = "output/refracted_hits.png";
