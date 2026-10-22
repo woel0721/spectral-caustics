@@ -1,3 +1,5 @@
 /target
-/output/
+/output/*
+!/output/test.png
+!/output/ground_hits.png
 .DS_Store

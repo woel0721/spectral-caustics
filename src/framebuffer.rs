@@ -68,6 +68,7 @@ impl Framebuffer {
         true
     }
 
+    /// 累加线性 XYZ；越界、非有限输入或相加溢出时返回 false，保留原值。
     pub fn accumulate(&mut self, x: usize, y: usize, xyz: Vector3<f64>) -> bool {
         if !xyz.iter().all(|v| v.is_finite()) {
             return false;
@@ -76,8 +77,11 @@ impl Framebuffer {
         let Some(i) = self.index(x, y) else {
             return false;
         };
-        // 将这个位置的颜色替换为 xyz。后续的光子能量累积需要另外实现加法操作。
-        self.pixels[i] += xyz;
+        let sum = self.pixels[i] + xyz;
+        if !sum.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        self.pixels[i] = sum;
         true
     }
 }
@@ -146,6 +150,29 @@ mod tests {
                 assert_eq!(fb.get(2, 1), Some(&original));
             }
         }
+    }
+
+    #[test]
+    fn accumulation_adds_energy_and_rejects_invalid_or_overflowing_writes() {
+        let mut fb = Framebuffer::new(3, 2);
+        let color = Vector3::new(0.2, 0.3, 0.4);
+        assert!(fb.accumulate(2, 1, color));
+        assert!(fb.accumulate(2, 1, color));
+        assert_eq!(fb.get(2, 1), Some(&(color * 2.0)));
+        let original = fb.pixels.clone();
+        assert!(!fb.accumulate(3, 0, color));
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for channel in 0..3 {
+                let mut invalid = color;
+                invalid[channel] = value;
+                assert!(!fb.accumulate(2, 1, invalid));
+            }
+        }
+        assert_eq!(fb.pixels, original);
+        let large = Vector3::new(f64::MAX, 0.0, 0.0);
+        assert!(fb.set(2, 1, large));
+        assert!(!fb.accumulate(2, 1, large));
+        assert_eq!(fb.get(2, 1), Some(&large));
     }
 
     // should_panic 表示测试预期发生 panic；expected 同时核对错误信息。
