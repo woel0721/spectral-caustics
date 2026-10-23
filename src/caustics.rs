@@ -1,5 +1,5 @@
 //! 分层随机发射平行光，将地面落点累积为线性 XYZ 灰度图。
-//! 支持 Day 2 的不透明遮挡和 Day 3 的固定折射率双界面折射，尚不计算光谱。
+//! 支持不透明遮挡、固定折射率双界面折射及三波长落点调试，尚不计算真实光谱颜色。
 
 use crate::{
     framebuffer::Framebuffer,
@@ -18,6 +18,9 @@ const LIGHT_HEIGHT: f64 = 3.0;
 const UNBLOCKED_BRIGHTNESS: f64 = 0.5;
 // 每次渲染都从同一种子重新开始，两种场景使用相同的发射位置。
 const SAMPLING_SEED: u64 = 42;
+
+/// 三张落点调试图对应的波长，单位为 nm；每个波长分配 1/3 总通量。
+pub const DEBUG_WAVELENGTHS_NM: [f64; 3] = [450.0, 550.0, 650.0];
 
 /// 将地面世界坐标映射为连续像素坐标；世界 x、y 采用 [-2, 2) 米的半开区间。
 /// 世界 +x 朝图片右侧，+y 朝图片上方；整数输出坐标是像素中心，边界在 -0.5。
@@ -68,17 +71,51 @@ pub fn render_refracted_ground_hits(
     })
 }
 
-/// 两种光路复用相同的发射网格、通量权重与像素映射；landing_point 决定光路。
-/// 每个发射小格按每轴 samples_per_pixel_axis 份细分，每层独立随机取一点。
-/// 固定种子保证可复现；每条光线都先消耗两个随机数，再进行命中查询。
+/// 同一条空间光线依次追踪 450、550、650 nm，按该顺序返回三张灰度调试图。
+/// 每个波长等权分配 1/3 通量；灰色仅用于观察落点，不代表该波长的真实颜色。
+pub fn render_wavelength_ground_hits(
+    scene: &Scene,
+    prism_id: usize,
+    ground_id: usize,
+    samples_per_pixel_axis: usize,
+) -> Result<[Framebuffer; 3], Box<dyn Error>> {
+    if prism_id == ground_id || prism_id >= scene.objects.len() {
+        return Err("三棱镜编号无效或与地面编号相同".into());
+    }
+    render_landing_point_sets(scene, ground_id, samples_per_pixel_axis, |ray| {
+        let mut positions = [None; 3];
+        for (index, wavelength_nm) in DEBUG_WAVELENGTHS_NM.into_iter().enumerate() {
+            positions[index] = take_photon(scene, ray, prism_id, ground_id, Some(wavelength_nm));
+        }
+        positions
+    })
+}
+
+/// 单落点光路复用批量发射和累积，N = 1 时保持原有通量尺度。
 fn render_landing_points(
     scene: &Scene,
     ground_id: usize,
     samples_per_pixel_axis: usize,
     landing_point: impl Fn(Ray) -> Option<Vector3<f64>>,
 ) -> Result<Framebuffer, Box<dyn Error>> {
-    if scene.width == 0 || scene.height == 0 || samples_per_pixel_axis == 0 {
-        return Err("图像尺寸和每轴采样数必须大于零".into());
+    let [framebuffer] =
+        render_landing_point_sets(scene, ground_id, samples_per_pixel_axis, |ray| {
+            [landing_point(ray)]
+        })?;
+    Ok(framebuffer)
+}
+
+/// 每条空间光线返回 N 个独立落点，每个落点组使用一张图及 1/N 通量。
+/// 每个发射小格按每轴 samples_per_pixel_axis 份细分，每层独立随机取一点。
+/// 固定种子保证可复现；每条光线都先消耗两个随机数，再进行命中查询。
+fn render_landing_point_sets<const N: usize>(
+    scene: &Scene,
+    ground_id: usize,
+    samples_per_pixel_axis: usize,
+    landing_points: impl Fn(Ray) -> [Option<Vector3<f64>>; N],
+) -> Result<[Framebuffer; N], Box<dyn Error>> {
+    if N == 0 || scene.width == 0 || scene.height == 0 || samples_per_pixel_axis == 0 {
+        return Err("图像尺寸、每轴采样数和落点组数必须大于零".into());
     }
     if ground_id >= scene.objects.len() {
         return Err("地面编号不在场景中".into());
@@ -107,8 +144,10 @@ fn render_landing_points(
     let pixel_area = area / pixel_count as f64;
     // 沿用 render.rs 中的 D65 参考白，仅生成已知灰色，不代表已实现光谱积分。
     let white_xyz = Vector3::new(0.3127 / 0.3290, 1.0, (1.0 - 0.3127 - 0.3290) / 0.3290);
-    let contribution = white_xyz * (flux_per_ray / pixel_area);
-    let mut framebuffer = Framebuffer::new(scene.width, scene.height);
+    // 调试光源只含这 N 个等权离散分量，权重和为 1；尚不做连续光谱积分。
+    let wavelength_weight = 1.0 / N as f64;
+    let contribution = white_xyz * (flux_per_ray / pixel_area * wavelength_weight);
+    let mut framebuffers = std::array::from_fn(|_| Framebuffer::new(scene.width, scene.height));
     let mut rng = StdRng::seed_from_u64(SAMPLING_SEED);
 
     for sample_y in 0..samples_y {
@@ -125,24 +164,27 @@ fn render_landing_points(
             )
             .ok_or("平行光线构造失败")?;
 
-            let Some(position) = landing_point(ray) else {
-                continue;
-            };
-            if let Some((x, y)) = ground_to_pixel(position, scene.width, scene.height) {
-                let neighbors = bilinear_weights(x, y, scene.width, scene.height)
-                    .ok_or("双线性权重计算失败")?;
-                // 同一条光子的 XYZ 分成四份，权重和为 1；在 sRGB 编码之前累积。
-                for (pixel_x, pixel_y, weight) in neighbors {
-                    if weight > 0.0
-                        && !framebuffer.accumulate(pixel_x, pixel_y, contribution * weight)
-                    {
-                        return Err("地面像素累积失败".into());
+            for (framebuffer, position) in framebuffers.iter_mut().zip(landing_points(ray)) {
+                // 某个波长未落地时只丢弃它的通量，其余波长继续累积，权重不重新归一化。
+                let Some(position) = position else {
+                    continue;
+                };
+                if let Some((x, y)) = ground_to_pixel(position, scene.width, scene.height) {
+                    let neighbors = bilinear_weights(x, y, scene.width, scene.height)
+                        .ok_or("双线性权重计算失败")?;
+                    // 同一条光子的 XYZ 分成四份，权重和为 1；在 sRGB 编码之前累积。
+                    for (pixel_x, pixel_y, weight) in neighbors {
+                        if weight > 0.0
+                            && !framebuffer.accumulate(pixel_x, pixel_y, contribution * weight)
+                        {
+                            return Err("地面像素累积失败".into());
+                        }
                     }
                 }
             }
         }
     }
-    Ok(framebuffer)
+    Ok(framebuffers)
 }
 
 #[cfg(test)]
@@ -320,6 +362,90 @@ mod tests {
     }
 
     #[test]
+    fn three_landing_sets_share_spatial_samples_and_preserve_total_xyz() {
+        use std::cell::Cell;
+
+        let mut scene = Scene::new(16, 8);
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        let white_xyz = Vector3::new(0.3127 / 0.3290, 1.0, (1.0 - 0.3127 - 0.3290) / 0.3290);
+        let expected = white_xyz * (0.5 * (scene.width * scene.height) as f64);
+        for samples in [1, 3] {
+            let calls = Cell::new(0);
+            let images = render_landing_point_sets(&scene, ground_id, samples, |ray| {
+                calls.set(calls.get() + 1);
+                [Some(Vector3::new(ray.origin.x, ray.origin.y, 0.0)); 3]
+            })
+            .unwrap();
+            assert_eq!(calls.get(), scene.width * scene.height * samples * samples);
+            let reference = render_ground_hits(&scene, ground_id, samples).unwrap();
+            let mut total = Vector3::zeros();
+            for image in &images {
+                for (pixel, unblocked) in image.pixels.iter().zip(&reference.pixels) {
+                    assert!((pixel * 3.0 - unblocked).norm() < 1e-12);
+                    total += pixel;
+                }
+            }
+            assert!((total - expected).norm() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn lost_wavelengths_do_not_stop_others_or_redistribute_their_flux() {
+        let mut scene = Scene::new(4, 3);
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        for samples in [1, 4] {
+            let images = render_landing_point_sets(&scene, ground_id, samples, |_| {
+                [
+                    None,
+                    Some(Vector3::new(0.0, 0.0, 0.0)),
+                    Some(Vector3::new(3.0, 0.0, 0.0)),
+                ]
+            })
+            .unwrap();
+            let totals = images.map(|image| image.pixels.iter().map(|pixel| pixel.y).sum::<f64>());
+            assert_eq!(totals[0], 0.0);
+            assert!((totals[1] - 2.0).abs() < 1e-12);
+            assert_eq!(totals[2], 0.0);
+        }
+    }
+
+    #[test]
+    fn wavelength_images_match_single_wavelength_paths_and_repeat() {
+        let mut scene = Scene::new(64, 32);
+        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        let images = render_wavelength_ground_hits(&scene, prism_id, ground_id, 2).unwrap();
+        let repeated = render_wavelength_ground_hits(&scene, prism_id, ground_id, 2).unwrap();
+        assert_ne!(images[0].pixels, images[1].pixels);
+        assert_ne!(images[1].pixels, images[2].pixels);
+        for ((wavelength_nm, image), repeated_image) in
+            DEBUG_WAVELENGTHS_NM.into_iter().zip(&images).zip(repeated)
+        {
+            assert_eq!(image.pixels, repeated_image.pixels);
+            // 独立按单个波长重放相同的发射采样，检查顺序、落点与 1/3 权重。
+            let single = render_landing_points(&scene, ground_id, 2, |ray| {
+                take_photon(&scene, ray, prism_id, ground_id, Some(wavelength_nm))
+            })
+            .unwrap();
+            for (pixel, single_pixel) in image.pixels.iter().zip(single.pixels) {
+                assert!(pixel.iter().all(|value| value.is_finite() && *value >= 0.0));
+                assert!((pixel * 3.0 - single_pixel).norm() < 1e-12);
+            }
+        }
+        let coarse = render_wavelength_ground_hits(&scene, prism_id, ground_id, 1).unwrap();
+        let sum_y = |images: &[Framebuffer; 3]| {
+            images
+                .iter()
+                .flat_map(|image| &image.pixels)
+                .map(|pixel| pixel.y)
+                .sum::<f64>()
+        };
+        let emitted_y = 0.5 * (scene.width * scene.height) as f64;
+        assert!(sum_y(&images) > 0.0 && sum_y(&images) <= emitted_y + 1e-10);
+        assert!((sum_y(&images) - sum_y(&coarse)).abs() < emitted_y * 0.02);
+    }
+
+    #[test]
     fn invalid_render_settings_return_errors() {
         let mut scene = Scene::new(8, 4);
         assert!(render_ground_hits(&scene, 0, 1).is_err());
@@ -328,8 +454,16 @@ mod tests {
         assert!(render_ground_hits(&scene, ground_id, usize::MAX).is_err());
         assert!(render_refracted_ground_hits(&scene, usize::MAX, ground_id, 1).is_err());
         assert!(render_refracted_ground_hits(&scene, ground_id, ground_id, 1).is_err());
+        assert!(render_wavelength_ground_hits(&scene, usize::MAX, ground_id, 1).is_err());
+        assert!(render_wavelength_ground_hits(&scene, ground_id, ground_id, 1).is_err());
+        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        assert!(render_wavelength_ground_hits(&scene, prism_id, usize::MAX, 1).is_err());
+        assert!(render_wavelength_ground_hits(&scene, prism_id, ground_id, 0).is_err());
+        assert!(render_wavelength_ground_hits(&scene, prism_id, ground_id, usize::MAX).is_err());
+        assert!(render_landing_point_sets(&scene, ground_id, 1, |_| []).is_err());
         scene.width = 0;
         assert!(render_ground_hits(&scene, ground_id, 1).is_err());
+        assert!(render_wavelength_ground_hits(&scene, prism_id, ground_id, 1).is_err());
     }
 
     #[test]

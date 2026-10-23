@@ -4,4 +4,7 @@
 !/output/ground_hits.png
 !/output/no_prism.png
 !/output/refracted_hits.png
+!/output/wavelength_450nm.png
+!/output/wavelength_550nm.png
+!/output/wavelength_650nm.png
 .DS_Store

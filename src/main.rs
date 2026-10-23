@@ -1,7 +1,10 @@
-//! Day 3：比较无三棱镜和固定折射率玻璃的地面灰度分布。
+//! 比较无三棱镜、固定折射率和 450/550/650 nm 的地面灰度分布。
 
 use spectral_caustics::{
-    caustics::{render_ground_hits, render_refracted_ground_hits},
+    caustics::{
+        DEBUG_WAVELENGTHS_NM, render_ground_hits, render_refracted_ground_hits,
+        render_wavelength_ground_hits,
+    },
     ground::Ground,
     prism::Prism,
     render::save_png,
@@ -24,6 +27,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         "已输出 {}×{} 折射地面灰度图：{path}",
         framebuffer.width, framebuffer.height
     );
+
+    let wavelength_images =
+        render_wavelength_ground_hits(&scene, prism_id, ground_id, samples_per_pixel_axis)?;
+    for (wavelength_nm, framebuffer) in DEBUG_WAVELENGTHS_NM.into_iter().zip(wavelength_images) {
+        let path = format!("output/wavelength_{wavelength_nm:.0}nm.png");
+        save_png(&framebuffer, &path)?;
+        println!("已输出 {wavelength_nm:.0} nm 地面落点调试图：{path}");
+    }
 
     // 无三棱镜对照：相同尺寸、发射网格、总通量和曝光，便于观察折射造成的偏移。
     let mut reference_scene = Scene::new(scene.width, scene.height);
