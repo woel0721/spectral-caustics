@@ -120,7 +120,8 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 
 ### Day 4 — 波长与色散
 
-- [ ] 实现 `wavelength_nm -> refractive_index`（Cauchy），完成单位换算。
+- [x] 实现 `wavelength_nm -> refractive_index`（Cauchy），完成单位换算。
+- **Cauchy 子项已实现：** `scene::refractive_index` 使用上述演示参数，将 nm 转为 μm，拒绝非正、非有限波长及计算溢出。`refractive_index(None)` 返回默认玻璃折射率 `1.52`，`Some(波长)` 使用 Cauchy 模型。`take_photon` 接收可选波长并在内部调用该函数，两个界面使用同一数值；现有批量灰度对照传入 `None`。单光线测试核对 450 nm 与 650 nm 的折射率和地面落点；批量多波长与模式接口仍待实现。
 - [ ] 在相同空间光线下追踪多个波长，并正确累计采样权重。
 - [ ] 增加 `constant_ior` 与 `dispersion` 两种模式，使用相同随机种子作对比。
 - [ ] 临时输出不同波长的落点位置/调试散点图，不要求最终颜色准确。

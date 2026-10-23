@@ -81,18 +81,41 @@ pub fn refract(
     }
 }
 
+/// None 返回默认玻璃折射率 1.52；Some(wavelength_nm) 按 Cauchy 模型计算。
+/// Cauchy 色散模型：n(λ) = A + B / λ_μm²，输入波长单位为 nm。
+/// A = 1.5046、B = 0.0042 μm² 是 ROADMAP 中的演示参数，不代表特定真实玻璃。
+/// 非有限、非正波长或计算溢出返回 None。
+pub fn refractive_index(wavelength_nm: Option<f64>) -> Option<f64> {
+    const DEFAULT_GLASS_IOR: f64 = 1.52;
+    const A: f64 = 1.5046;
+    const B: f64 = 0.0042;
+
+    let Some(wavelength_nm) = wavelength_nm else {
+        return Some(DEFAULT_GLASS_IOR);
+    };
+    if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
+        return None;
+    }
+    let wavelength_um = wavelength_nm / 1000.0;
+    let index = A + B / wavelength_um.powi(2);
+    index.is_finite().then_some(index)
+}
+
 /// 追踪从空气出发的单条光线，返回最终地面落点。
-/// 只支持一个三棱镜的两次透射；全反射、其他遮挡或未命中地面时返回 None。
+/// wavelength_nm 为 None 时使用默认玻璃，Some(波长) 时使用 Cauchy 色散。
+/// 玻璃折射率由 refractive_index 统一计算，两个界面使用同一数值。
+/// 只支持一个三棱镜的两次透射；非法波长、全反射、其他遮挡或未命中地面时返回 None。
 pub fn take_photon(
     scene: &Scene,
     ray: Ray,
     prism_id: usize,
     ground_id: usize,
+    wavelength_nm: Option<f64>,
 ) -> Option<Vector3<f64>> {
     const AIR_IOR: f64 = 1.0;
-    const GLASS_IOR: f64 = 1.52;
     const EPSILON: f64 = 1e-5;
 
+    let glass_ior = refractive_index(wavelength_nm)?;
     if prism_id == ground_id || prism_id >= scene.objects.len() || ground_id >= scene.objects.len()
     {
         return None;
@@ -108,7 +131,7 @@ pub fn take_photon(
     }
 
     // 空气 -> 玻璃：朝外法线朝向入射介质。
-    let inside_direction = refract(ray.direction, first_hit.normal, AIR_IOR, GLASS_IOR)?;
+    let inside_direction = refract(ray.direction, first_hit.normal, AIR_IOR, glass_ior)?;
     let inside_ray = Ray::new(
         first_hit.coords - first_hit.normal * EPSILON,
         inside_direction,
@@ -121,7 +144,7 @@ pub fn take_photon(
     }
 
     // 玻璃 -> 空气：法线取反，朝向玻璃内部；全反射由 ? 提前返回 None。
-    let outside_direction = refract(inside_ray.direction, -exit_hit.normal, GLASS_IOR, AIR_IOR)?;
+    let outside_direction = refract(inside_ray.direction, -exit_hit.normal, glass_ior, AIR_IOR)?;
     let outside_ray = Ray::new(
         exit_hit.coords + exit_hit.normal * EPSILON,
         outside_direction,
@@ -140,6 +163,44 @@ pub fn take_photon(
 mod tests {
     use super::*;
     use crate::{ground::Ground, prism::Prism, ray::Ray};
+
+    #[test]
+    fn refractive_index_without_wavelength_returns_default_glass() {
+        assert_eq!(refractive_index(None), Some(1.52));
+    }
+
+    #[test]
+    fn cauchy_index_converts_nm_to_um_and_decreases_with_wavelength() {
+        for (wavelength_nm, expected) in [
+            (450.0, 1.5253407407407407),
+            (500.0, 1.5214),
+            (650.0, 1.514540828402367),
+        ] {
+            assert!((refractive_index(Some(wavelength_nm)).unwrap() - expected).abs() < 1e-12);
+        }
+        // 第一周使用的可见光区间内，短波折射率更高，且均为有限值。
+        let indices: Vec<_> = (380..=780)
+            .step_by(10)
+            .map(|nm| refractive_index(Some(f64::from(nm))).unwrap())
+            .collect();
+        assert!(indices.windows(2).all(|pair| pair[0] > pair[1]));
+    }
+
+    #[test]
+    fn cauchy_index_rejects_invalid_wavelengths_and_overflow() {
+        for wavelength_nm in [
+            0.0,
+            -0.0,
+            -450.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+        ] {
+            assert_eq!(refractive_index(Some(wavelength_nm)), None);
+        }
+    }
 
     #[test]
     fn added_objects_keep_their_own_intersection_behavior() {
@@ -292,7 +353,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            take_photon(&scene, ray, prism_id, ground_id),
+            take_photon(&scene, ray, prism_id, ground_id, None),
             Some(Vector3::new(1.0, 0.2, 0.0))
         );
         let ray = Ray::new(
@@ -301,7 +362,7 @@ mod tests {
             0.0,
         )
         .unwrap();
-        assert!(take_photon(&scene, ray, prism_id, ground_id).is_none());
+        assert!(take_photon(&scene, ray, prism_id, ground_id, None).is_none());
     }
 
     #[test]
@@ -321,9 +382,61 @@ mod tests {
                 2.0,
             )
             .unwrap();
-            let position = take_photon(&scene, ray, prism_id, ground_id).unwrap();
+            let position = take_photon(&scene, ray, prism_id, ground_id, None).unwrap();
             // 与独立单光线示例的已知落点比较；直接落地时 x 应为 0.25。
             assert!((position - Vector3::new(-0.719593104236608, 0.2, 0.0)).norm() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn photon_uses_wavelength_dependent_index_at_both_interfaces() {
+        let (scene, prism_id, ground_id) = photon_scene();
+        let ray = Ray::new(
+            Vector3::new(0.25, 0.2, 3.0),
+            Vector3::new(0.0, 0.0, -1.0),
+            0.0,
+        )
+        .unwrap();
+        let mut positions = Vec::new();
+        // 将斜面入射与水平底面出射分别代入 Snell 定律所得的参考落点，包含原点偏移。
+        for (wavelength_nm, expected_x) in
+            [(450.0, -0.7321163297863346), (650.0, -0.7069588738883907)]
+        {
+            let position =
+                take_photon(&scene, ray, prism_id, ground_id, Some(wavelength_nm)).unwrap();
+            assert!((position - Vector3::new(expected_x, 0.2, 0.0)).norm() < 1e-12);
+            assert_eq!(
+                take_photon(&scene, ray, prism_id, ground_id, Some(wavelength_nm)),
+                Some(position)
+            );
+            positions.push(position);
+        }
+        // 蓝光偏折更大，两波长沿同一条初始空间光线产生不同落点。
+        assert!(positions[0].x < positions[1].x);
+    }
+
+    #[test]
+    fn photon_rejects_invalid_wavelengths_even_for_direct_ground_hits() {
+        let (scene, prism_id, ground_id) = photon_scene();
+        for origin_x in [0.25, 1.0] {
+            let ray = Ray::new(
+                Vector3::new(origin_x, 0.2, 3.0),
+                Vector3::new(0.0, 0.0, -1.0),
+                0.0,
+            )
+            .unwrap();
+            for wavelength_nm in [
+                0.0,
+                -1.0,
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::MIN_POSITIVE,
+            ] {
+                assert!(
+                    take_photon(&scene, ray, prism_id, ground_id, Some(wavelength_nm)).is_none()
+                );
+            }
         }
     }
 
@@ -339,7 +452,7 @@ mod tests {
                 0.0,
             )
             .unwrap();
-            assert!(take_photon(&scene, ray, prism_id, ground_id).is_none());
+            assert!(take_photon(&scene, ray, prism_id, ground_id, None).is_none());
         }
     }
 
@@ -354,7 +467,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(scene.intersect(&ray).unwrap().object_id, Some(prism_id));
-        assert!(take_photon(&scene, ray, prism_id, ground_id).is_none());
+        assert!(take_photon(&scene, ray, prism_id, ground_id, None).is_none());
     }
 
     #[test]
@@ -366,9 +479,9 @@ mod tests {
             0.0,
         )
         .unwrap();
-        assert!(take_photon(&scene, ray, usize::MAX, ground_id).is_none());
-        assert!(take_photon(&scene, ray, prism_id, usize::MAX).is_none());
-        assert!(take_photon(&scene, ray, ground_id, ground_id).is_none());
+        assert!(take_photon(&scene, ray, usize::MAX, ground_id, None).is_none());
+        assert!(take_photon(&scene, ray, prism_id, usize::MAX, None).is_none());
+        assert!(take_photon(&scene, ray, ground_id, ground_id, None).is_none());
     }
 
     #[test]

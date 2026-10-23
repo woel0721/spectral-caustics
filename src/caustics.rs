@@ -63,7 +63,8 @@ pub fn render_refracted_ground_hits(
         return Err("三棱镜编号无效或与地面编号相同".into());
     }
     render_landing_points(scene, ground_id, samples_per_pixel_axis, |ray| {
-        take_photon(scene, ray, prism_id, ground_id)
+        // 不指定波长，使用 refractive_index 提供的默认玻璃折射率 1.52。
+        take_photon(scene, ray, prism_id, ground_id, None)
     })
 }
 
