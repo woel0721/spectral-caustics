@@ -10,5 +10,6 @@ pub mod prism;
 pub mod ray;
 pub mod render;
 pub mod scene;
+pub mod spectrum;
 pub mod triangle;
 pub mod utils;
