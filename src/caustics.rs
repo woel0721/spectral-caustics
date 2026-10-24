@@ -56,42 +56,32 @@ pub fn render_ground_hits(
     })
 }
 
-/// Day 3：每条光线调用 take_photon，累计直接落地或通过玻璃两次折射后的落点。
-pub fn render_refracted_ground_hits(
+/// 统一追踪固定折射率或 Cauchy 色散，按波长数组顺序返回 N 张灰度落点图。
+/// 固定模式传 [None] 可生成一张图；色散模式要求每项均为 Some(有效波长 nm)。
+/// 同一条空间光线复用于全部波长，每张图分配 1/N 通量；灰色不代表真实光谱颜色。
+pub fn render_refracted_ground_hits<const N: usize>(
     scene: &Scene,
     prism_id: usize,
     ground_id: usize,
     samples_per_pixel_axis: usize,
-) -> Result<Framebuffer, Box<dyn Error>> {
+    wavelengths_nm: [Option<f64>; N],
+    mode: IorMode,
+) -> Result<[Framebuffer; N], Box<dyn Error>> {
     if prism_id == ground_id || prism_id >= scene.objects.len() {
         return Err("三棱镜编号无效或与地面编号相同".into());
     }
-    render_landing_points(scene, ground_id, samples_per_pixel_axis, |ray| {
-        take_photon(scene, ray, prism_id, ground_id, || {
-            refractive_index(None, IorMode::Constant)
-        })
-    })
-}
-
-/// 同一条空间光线依次追踪 450、550、650 nm，按该顺序返回三张灰度调试图。
-/// 每个波长等权分配 1/3 通量；灰色仅用于观察落点，不代表该波长的真实颜色。
-pub fn render_wavelength_ground_hits(
-    scene: &Scene,
-    prism_id: usize,
-    ground_id: usize,
-    samples_per_pixel_axis: usize,
-) -> Result<[Framebuffer; 3], Box<dyn Error>> {
-    if prism_id == ground_id || prism_id >= scene.objects.len() {
-        return Err("三棱镜编号无效或与地面编号相同".into());
+    if wavelengths_nm
+        .iter()
+        .any(|&wavelength_nm| refractive_index(wavelength_nm, mode).is_none())
+    {
+        return Err("色散模式要求每项波长均为正有限值，且折射率计算不能溢出".into());
     }
     render_landing_point_sets(scene, ground_id, samples_per_pixel_axis, |ray| {
-        let mut positions = [None; 3];
-        for (index, wavelength_nm) in DEBUG_WAVELENGTHS_NM.into_iter().enumerate() {
-            positions[index] = take_photon(scene, ray, prism_id, ground_id, || {
-                refractive_index(Some(wavelength_nm), IorMode::Dispersion)
-            });
-        }
-        positions
+        wavelengths_nm.map(|wavelength_nm| {
+            take_photon(scene, ray, prism_id, ground_id, || {
+                refractive_index(wavelength_nm, mode)
+            })
+        })
     })
 }
 
@@ -418,8 +408,24 @@ mod tests {
         let mut scene = Scene::new(64, 32);
         let prism_id = scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        let images = render_wavelength_ground_hits(&scene, prism_id, ground_id, 2).unwrap();
-        let repeated = render_wavelength_ground_hits(&scene, prism_id, ground_id, 2).unwrap();
+        let images = render_refracted_ground_hits(
+            &scene,
+            prism_id,
+            ground_id,
+            2,
+            DEBUG_WAVELENGTHS_NM.map(Some),
+            IorMode::Dispersion,
+        )
+        .unwrap();
+        let repeated = render_refracted_ground_hits(
+            &scene,
+            prism_id,
+            ground_id,
+            2,
+            DEBUG_WAVELENGTHS_NM.map(Some),
+            IorMode::Dispersion,
+        )
+        .unwrap();
         assert_ne!(images[0].pixels, images[1].pixels);
         assert_ne!(images[1].pixels, images[2].pixels);
         for ((wavelength_nm, image), repeated_image) in
@@ -438,7 +444,15 @@ mod tests {
                 assert!((pixel * 3.0 - single_pixel).norm() < 1e-12);
             }
         }
-        let coarse = render_wavelength_ground_hits(&scene, prism_id, ground_id, 1).unwrap();
+        let coarse = render_refracted_ground_hits(
+            &scene,
+            prism_id,
+            ground_id,
+            1,
+            DEBUG_WAVELENGTHS_NM.map(Some),
+            IorMode::Dispersion,
+        )
+        .unwrap();
         let sum_y = |images: &[Framebuffer; 3]| {
             images
                 .iter()
@@ -452,24 +466,125 @@ mod tests {
     }
 
     #[test]
+    fn unified_modes_share_sampling_and_constant_wavelengths_keep_total_flux() {
+        let mut scene = Scene::new(64, 32);
+        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        let [single] =
+            render_refracted_ground_hits(&scene, prism_id, ground_id, 2, [None], IorMode::Constant)
+                .unwrap();
+        let constant = render_refracted_ground_hits(
+            &scene,
+            prism_id,
+            ground_id,
+            2,
+            DEBUG_WAVELENGTHS_NM.map(Some),
+            IorMode::Constant,
+        )
+        .unwrap();
+        let dispersion = render_refracted_ground_hits(
+            &scene,
+            prism_id,
+            ground_id,
+            2,
+            DEBUG_WAVELENGTHS_NM.map(Some),
+            IorMode::Dispersion,
+        )
+        .unwrap();
+        assert_eq!(constant[0].pixels, constant[1].pixels);
+        assert_eq!(constant[1].pixels, constant[2].pixels);
+        for (constant_image, dispersion_image) in constant.iter().zip(&dispersion) {
+            // 远处直射区域相同，玻璃折射区域随模式改变。
+            assert_eq!(constant_image.get(0, 0), dispersion_image.get(0, 0));
+            assert_ne!(constant_image.pixels, dispersion_image.pixels);
+            for (pixel, single_pixel) in constant_image.pixels.iter().zip(&single.pixels) {
+                assert!((pixel * 3.0 - single_pixel).norm() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn dispersion_render_rejects_missing_invalid_or_overflowing_wavelengths() {
+        let mut scene = Scene::new(8, 4);
+        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        for wavelength_nm in [
+            None,
+            Some(0.0),
+            Some(-450.0),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+            Some(f64::MIN_POSITIVE),
+        ] {
+            assert!(
+                render_refracted_ground_hits(
+                    &scene,
+                    prism_id,
+                    ground_id,
+                    1,
+                    [Some(450.0), wavelength_nm],
+                    IorMode::Dispersion,
+                )
+                .is_err()
+            );
+            // 固定模式不读取波长，仍可使用同一个入口。
+            assert!(
+                render_refracted_ground_hits(
+                    &scene,
+                    prism_id,
+                    ground_id,
+                    1,
+                    [wavelength_nm],
+                    IorMode::Constant,
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
     fn invalid_render_settings_return_errors() {
         let mut scene = Scene::new(8, 4);
         assert!(render_ground_hits(&scene, 0, 1).is_err());
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         assert!(render_ground_hits(&scene, ground_id, 0).is_err());
         assert!(render_ground_hits(&scene, ground_id, usize::MAX).is_err());
-        assert!(render_refracted_ground_hits(&scene, usize::MAX, ground_id, 1).is_err());
-        assert!(render_refracted_ground_hits(&scene, ground_id, ground_id, 1).is_err());
-        assert!(render_wavelength_ground_hits(&scene, usize::MAX, ground_id, 1).is_err());
-        assert!(render_wavelength_ground_hits(&scene, ground_id, ground_id, 1).is_err());
         let prism_id = scene.add(Box::new(Prism::new().unwrap()));
-        assert!(render_wavelength_ground_hits(&scene, prism_id, usize::MAX, 1).is_err());
-        assert!(render_wavelength_ground_hits(&scene, prism_id, ground_id, 0).is_err());
-        assert!(render_wavelength_ground_hits(&scene, prism_id, ground_id, usize::MAX).is_err());
+        for (mode, wavelengths_nm) in [
+            (IorMode::Constant, [None]),
+            (IorMode::Dispersion, [Some(450.0)]),
+        ] {
+            for (prism_id, ground_id, samples) in [
+                (usize::MAX, ground_id, 1),
+                (ground_id, ground_id, 1),
+                (prism_id, usize::MAX, 1),
+                (prism_id, ground_id, 0),
+                (prism_id, ground_id, usize::MAX),
+            ] {
+                assert!(
+                    render_refracted_ground_hits(
+                        &scene,
+                        prism_id,
+                        ground_id,
+                        samples,
+                        wavelengths_nm,
+                        mode,
+                    )
+                    .is_err()
+                );
+            }
+            assert!(
+                render_refracted_ground_hits(&scene, prism_id, ground_id, 1, [], mode).is_err()
+            );
+        }
         assert!(render_landing_point_sets(&scene, ground_id, 1, |_| []).is_err());
         scene.width = 0;
         assert!(render_ground_hits(&scene, ground_id, 1).is_err());
-        assert!(render_wavelength_ground_hits(&scene, prism_id, ground_id, 1).is_err());
+        assert!(
+            render_refracted_ground_hits(&scene, prism_id, ground_id, 1, [None], IorMode::Constant)
+                .is_err()
+        );
     }
 
     #[test]
@@ -505,7 +620,9 @@ mod tests {
         let mut scene = Scene::new(64, 32);
         let prism_id = scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        let refracted = render_refracted_ground_hits(&scene, prism_id, ground_id, 2).unwrap();
+        let [refracted] =
+            render_refracted_ground_hits(&scene, prism_id, ground_id, 2, [None], IorMode::Constant)
+                .unwrap();
         let mut reference_scene = Scene::new(scene.width, scene.height);
         let reference_ground_id = reference_scene.add(Box::new(Ground::new(0.0).unwrap()));
         let reference = render_ground_hits(&reference_scene, reference_ground_id, 2).unwrap();
@@ -528,7 +645,9 @@ mod tests {
         let total_y: f64 = refracted.pixels.iter().map(|pixel| pixel.y).sum();
         let emitted_y = 0.5 * (scene.width * scene.height) as f64;
         assert!(total_y > 0.0 && total_y <= emitted_y + 1e-12);
-        let coarse = render_refracted_ground_hits(&scene, prism_id, ground_id, 1).unwrap();
+        let [coarse] =
+            render_refracted_ground_hits(&scene, prism_id, ground_id, 1, [None], IorMode::Constant)
+                .unwrap();
         let coarse_y: f64 = coarse.pixels.iter().map(|pixel| pixel.y).sum();
         // 边界采样可能改变少量全反射分类，但四倍光线数不能使总能量接近四倍。
         assert!((total_y - coarse_y).abs() < emitted_y * 0.02);
@@ -540,7 +659,14 @@ mod tests {
         let mut scene = Scene::new(64, 32);
         let prism_id = scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        let framebuffer = render_refracted_ground_hits(&scene, prism_id, ground_id, 2)?;
+        let [framebuffer] = render_refracted_ground_hits(
+            &scene,
+            prism_id,
+            ground_id,
+            2,
+            [None],
+            IorMode::Constant,
+        )?;
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos();

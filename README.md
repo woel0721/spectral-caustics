@@ -17,7 +17,7 @@
 
 **Day 3 已完成：固定折射率双界面折射与批量地面累积。** `scene::take_photon` 返回直接落地或通过玻璃两次折射后的地面落点；全反射、其他遮挡和未命中时返回 `None`。主程序用相同发射网格、总通量和曝光输出无三棱镜对照图及玻璃折射图。
 
-**Day 4 已实现 Cauchy 及折射率模式。** `scene::refractive_index(wavelength_nm, mode)` 返回 `Option<f64>`：`IorMode::Constant` 忽略波长并使用 `1.52`，`IorMode::Dispersion` 要求有效波长并按 Cauchy 计算。`take_photon` 接收返回折射率的闭包。`render_wavelength_ground_hits` 让同一条空间光线依次追踪 450、550、650 nm，分别生成色散落点灰度图；固定折射率对照显式使用 `Constant`。批量渲染入口的统一模式参数与真实光谱颜色转换尚未接入。
+**Day 4 已实现 Cauchy 及折射率模式。** `scene::refractive_index(wavelength_nm, mode)` 返回 `Option<f64>`：`IorMode::Constant` 忽略波长并使用 `1.52`，`IorMode::Dispersion` 要求有效波长并按 Cauchy 计算。`take_photon` 接收返回折射率的闭包。`render_refracted_ground_hits` 统一接收波长数组和 `IorMode`，固定折射率对照与三波长色散调试共用这一个入口；真实光谱颜色转换尚未接入。
 
 **已接入双线性光子累积。** `utils::bilinear_weights` 根据落点的小数位置计算四个邻近像素及其权重，`caustics.rs` 将线性 XYZ 能量按权重分配；接收区域内的边缘落点也保留全部能量。这对应 Day 6 中的双线性 splat 子项。
 
@@ -77,6 +77,20 @@ let position = take_photon(&scene, ray, prism_id, ground_id, || {
 let position = take_photon(&scene, ray, prism_id, ground_id, || Some(1.52));
 ```
 
+批量折射统一使用 `render_refracted_ground_hits(..., wavelengths_nm, mode)`，返回 `[Framebuffer; N]`，其中 `N` 由传入的波长数组长度推导。输出顺序与输入顺序一致，总通量在 N 张图之间等分；单张图仍使用全部通量。固定模式忽略波长，通常传 `[None]`；色散模式要求每项均为有效的 `Some(波长 nm)`，错误会在发射光线前返回。示例：
+
+```rust
+use spectral_caustics::caustics::{DEBUG_WAVELENGTHS_NM, render_refracted_ground_hits};
+
+let [constant] = render_refracted_ground_hits(
+    &scene, prism_id, ground_id, 4, [None], IorMode::Constant,
+)?;
+let wavelengths = render_refracted_ground_hits(
+    &scene, prism_id, ground_id, 4,
+    DEBUG_WAVELENGTHS_NM.map(Some), IorMode::Dispersion,
+)?;
+```
+
 ## 运行
 
 安装 Rust stable 后，在仓库根目录执行：
@@ -119,7 +133,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-当前 95 项测试通过，严格 Clippy 通过。测试覆盖固定模式忽略波长、色散模式要求有效波长、闭包只求值一次并复用于两个界面、闭包返回非法折射率时拒绝追踪、Cauchy 单位换算、可见光区间折射率单调性、非法波长与溢出、两种波长通过双界面后的已知落点，以及传入光子追踪的非法波长。三波长测试检查共享空间采样、完整 XYZ 能量守恒、采样数归一化、丢失通量不重分配、各波长结果与独立单波长追踪一致，以及图像分布不同且可复现。采样测试逐格检查每层恰有一个点、点不越出所属层、两轴随机偏移，以及固定种子下的发射位置和图像完全重复。增加采样数时检查总能量守恒与无玻璃图的噪声降低；两种光路通过同种子对照验证发射位置一致。其余测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。双线性测试覆盖已知小数位置的四点权重、像素中心、权重和、边缘与单像素尺寸、完整 XYZ 总能量守恒及遮挡边缘的平滑分配。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地；`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、编号与添加顺序。
+当前 97 项测试通过，严格 Clippy 通过。统一入口测试覆盖单张固定模式图与多张固定模式图的通量一致性、两模式共享采样、固定模式各波长分布相同而色散模式不同，以及色散波长缺失、非法或溢出时返回错误。测试覆盖固定模式忽略波长、色散模式要求有效波长、闭包只求值一次并复用于两个界面、闭包返回非法折射率时拒绝追踪、Cauchy 单位换算、可见光区间折射率单调性、非法波长与溢出、两种波长通过双界面后的已知落点，以及传入光子追踪的非法波长。三波长测试检查共享空间采样、完整 XYZ 能量守恒、采样数归一化、丢失通量不重分配、各波长结果与独立单波长追踪一致，以及图像分布不同且可复现。采样测试逐格检查每层恰有一个点、点不越出所属层、两轴随机偏移，以及固定种子下的发射位置和图像完全重复。增加采样数时检查总能量守恒与无玻璃图的噪声降低；两种光路通过同种子对照验证发射位置一致。其余测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。双线性测试覆盖已知小数位置的四点权重、像素中心、权重和、边缘与单像素尺寸、完整 XYZ 总能量守恒及遮挡边缘的平滑分配。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地；`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、编号与添加顺序。
 
 7 项三棱镜测试覆盖 8 个面的已知交点和朝外单位法线、最近面选择、棱边命中、内外求交、自相交与非有限光线；场景测试验证同一集合中不同物体的求交，以及改变添加顺序后仍选择最近交点。
 
@@ -130,7 +144,7 @@ PNG 读回测试在独立临时目录中保存一张 3×2 小图，再解码检�
 ## 文件与颜色约定
 
 - `src/framebuffer.rs`：二维图像缓冲，图片坐标通过 `y * width + x` 转成数组下标。
-- `src/caustics.rs`：固定种子的分层随机平行光发射、连续像素映射与归一化双线性灰度累积，支持直接命中、固定折射率和三波长分别累积的折射光路。
+- `src/caustics.rs`：固定种子的分层随机平行光发射、连续像素映射与归一化双线性灰度累积，支持直接命中，以及通过统一的 `render_refracted_ground_hits` 按波长数组和模式分别累积的折射光路。
 - `src/utils.rs`：双线性四邻域与权重计算，含边缘夹紧和非法输入检查。
 - `src/render.rs`：XYZ → 线性 sRGB → sRGB8 → PNG，以及颜色转换和 PNG 读回测试。
 - `src/ray.rs`：Ray、方向归一化、沿光线取点及对应测试。
@@ -160,6 +174,6 @@ XYZ 转换使用 D65 白点约定，参考白的 Y = 1。矩阵来自 [W3C CSS C
 - 固定折射率对照使用 `1.52`，三波长批量调试使用 Cauchy 色散和等权离散分量。各波长图仍采用 D65 参考白缩放以显示落点密度，尚未按真实光谱颜色匹配函数着色，也未进行连续光谱积分。
 - `take_photon` 最多经过两个玻璃界面；全反射直接终止，不继续内部反射。未计算 Fresnel 反射损失和吸收；超出接收区域的落点不写入图像。
 - 当前光源高度、方向、发射区域和接收区域固定。分层随机采样与双线性 splat 减轻周期性条纹，但有限采样仍产生颗粒噪声，可增加 `samples_per_pixel_axis` 来降低噪声；较亮落点还可能被显示范围裁剪，没有按每张图的最大值自动归一化。
-- 下一阶段可将 Day 4 的 `IorMode` 接入批量渲染入口，统一切换固定折射率/色散模式，随后进入 Day 5 的可追溯 CIE/D65 数据和真实光谱颜色积分。
+- 下一阶段进入 Day 5：导入可追溯 CIE/D65 数据并实现真实光谱颜色积分。
 
 使用 `nalgebra` 进行数学计算，`image` 编解码 PNG，`rand` 提供固定种子的格内随机偏移。`Cargo.lock` 随项目提交；`.gitignore` 仅放行 `output/test.png`、`output/ground_hits.png`、`output/no_prism.png`、`output/refracted_hits.png` 和三张 `output/wavelength_*nm.png` 阶段示例，编译目录 `target/` 和其他生成文件继续忽略。运行默认命令会更新 Day 3 的两张对照图及 Day 4 的三张波长落点图。

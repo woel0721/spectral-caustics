@@ -1,11 +1,9 @@
 //! 比较无三棱镜、固定折射率和 450/550/650 nm 的地面灰度分布。
 
 use spectral_caustics::{
-    caustics::{
-        DEBUG_WAVELENGTHS_NM, render_ground_hits, render_refracted_ground_hits,
-        render_wavelength_ground_hits,
-    },
+    caustics::{DEBUG_WAVELENGTHS_NM, render_ground_hits, render_refracted_ground_hits},
     ground::Ground,
+    iormode::IorMode,
     prism::Prism,
     render::save_png,
     scene::Scene,
@@ -19,8 +17,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 每个发射小格分为 4×4 层，每层随机发射一条光线，并通过 take_photon 查询落点。
     let samples_per_pixel_axis = 4;
-    let framebuffer =
-        render_refracted_ground_hits(&scene, prism_id, ground_id, samples_per_pixel_axis)?;
+    let [framebuffer] = render_refracted_ground_hits(
+        &scene,
+        prism_id,
+        ground_id,
+        samples_per_pixel_axis,
+        [None],
+        IorMode::Constant,
+    )?;
     let path = "output/refracted_hits.png";
     save_png(&framebuffer, path)?;
     println!(
@@ -28,8 +32,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         framebuffer.width, framebuffer.height
     );
 
-    let wavelength_images =
-        render_wavelength_ground_hits(&scene, prism_id, ground_id, samples_per_pixel_axis)?;
+    let wavelength_images = render_refracted_ground_hits(
+        &scene,
+        prism_id,
+        ground_id,
+        samples_per_pixel_axis,
+        DEBUG_WAVELENGTHS_NM.map(Some),
+        IorMode::Dispersion,
+    )?;
     for (wavelength_nm, framebuffer) in DEBUG_WAVELENGTHS_NM.into_iter().zip(wavelength_images) {
         let path = format!("output/wavelength_{wavelength_nm:.0}nm.png");
         save_png(&framebuffer, &path)?;

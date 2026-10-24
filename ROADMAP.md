@@ -121,10 +121,11 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 ### Day 4 — 波长与色散
 
 - [x] 实现 `wavelength_nm -> refractive_index`（Cauchy），完成单位换算。
-- **Cauchy 与模式子项已实现：** `scene::refractive_index(wavelength_nm, mode)` 使用上述演示参数，将 nm 转为 μm。`IorMode::Constant` 忽略波长并返回默认玻璃折射率 `1.52`；`IorMode::Dispersion` 要求 `Some(波长)`，拒绝缺失、非正、非有限波长及计算溢出。`take_photon` 接收 `glass_ior: impl FnOnce() -> Option<f64>`，调用一次闭包并校验折射率，两个界面使用同一数值；调用方通过 `|| refractive_index(Some(波长), mode)` 捕获参数，也可传入 `|| Some(1.52)`。现有批量灰度对照显式使用 `Constant`，三波长调试使用 `Dispersion`。单光线测试核对 450 nm 与 650 nm 在固定模式下落点相同、在色散模式下落点不同；批量入口的统一模式参数仍待接入。
+- **Cauchy 与模式子项已实现：** `scene::refractive_index(wavelength_nm, mode)` 使用上述演示参数，将 nm 转为 μm。`IorMode::Constant` 忽略波长并返回默认玻璃折射率 `1.52`；`IorMode::Dispersion` 要求 `Some(波长)`，拒绝缺失、非正、非有限波长及计算溢出。`take_photon` 接收 `glass_ior: impl FnOnce() -> Option<f64>`，调用一次闭包并校验折射率，两个界面使用同一数值；调用方通过 `|| refractive_index(Some(波长), mode)` 捕获参数，也可传入 `|| Some(1.52)`。现有批量灰度对照显式使用 `Constant`，三波长调试使用 `Dispersion`。单光线测试核对 450 nm 与 650 nm 在固定模式下落点相同、在色散模式下落点不同；批量入口已统一为 `render_refracted_ground_hits(..., wavelengths_nm, mode)`，传 `[None]` 返回一张固定折射率图，传波长数组返回同长度的图像数组，每张图等权分配 `1/N` 通量。
 - [x] 在相同空间光线下追踪多个波长，并正确累计采样权重。
 - **三波长调试已实现：** 每条空间光线依次追踪 450、550、650 nm，分别用双线性 splat 累积到三张灰度图。光源暂定义为三个等权离散分量，每个分配 `1/3` 通量；丢失光子不重新分配能量，增加空间采样数不增加总亮度。所有光路共享种子 `42` 和空间发射位置，输出 `output/wavelength_450nm.png`、`output/wavelength_550nm.png`、`output/wavelength_650nm.png`。尚未进行连续光谱积分或真实波长颜色转换。
-- [ ] 增加 `constant_ior` 与 `dispersion` 两种模式，使用相同随机种子作对比。
+- [x] 增加 `constant_ior` 与 `dispersion` 两种模式，使用相同随机种子作对比。
+- **统一入口已实现：** `render_refracted_ground_hits` 接收波长数组和 `IorMode`，复用同一套分层采样与双线性累积。固定模式各波长图相同，色散模式分布不同；单张与多张固定模式图的 XYZ 通量一致，空数组和非法色散波长返回错误。默认五张 PNG 的输出路径和通量尺度保持不变。
 - [x] 临时输出不同波长的落点位置/调试散点图，不要求最终颜色准确。
 - **验收：** `n(450 nm) > n(650 nm)`；两模式落点分布不同且结果可复现。
 
