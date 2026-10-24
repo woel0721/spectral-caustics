@@ -57,8 +57,8 @@ pub fn render_ground_hits(
     })
 }
 
-/// 将 380–780 nm、每 10 nm 一点的 41 张落点图合成为一张线性 XYZ 图。
-/// 复用现有分层随机采样、空间通量归一化和双线性 splat，不对已累积的图重复插值。
+/// 追踪 380–780 nm、每 10 nm 一点的光线，落地后直接累积到同一张线性 XYZ 图。
+/// 独立完成分层随机发射、空间通量归一化和双线性 splat，不生成逐波长灰度图。
 /// D65 使用同一个 k；梯形积分两个端点取半宽度，丢失通量不重新分配。
 pub fn render_spectral_caustics(
     scene: &Scene,
@@ -67,6 +67,37 @@ pub fn render_spectral_caustics(
     samples_per_pixel_axis: usize,
     mode: IorMode,
 ) -> Result<Framebuffer, Box<dyn Error>> {
+    if scene.width == 0 || scene.height == 0 || samples_per_pixel_axis == 0 {
+        return Err("图像尺寸和每轴采样数必须大于零".into());
+    }
+    if prism_id == ground_id || prism_id >= scene.objects.len() {
+        return Err("三棱镜编号无效或与地面编号相同".into());
+    }
+    if ground_id >= scene.objects.len() {
+        return Err("地面编号不在场景中".into());
+    }
+
+    let pixel_count = scene
+        .width
+        .checked_mul(scene.height)
+        .ok_or("像素数量溢出")?;
+    let samples_x = scene
+        .width
+        .checked_mul(samples_per_pixel_axis)
+        .ok_or("横向采样数溢出")?;
+    let samples_y = scene
+        .height
+        .checked_mul(samples_per_pixel_axis)
+        .ok_or("纵向采样数溢出")?;
+    let ray_count = samples_x.checked_mul(samples_y).ok_or("光线数量溢出")?;
+
+    let span = GROUND_MAX - GROUND_MIN;
+    let area = span * span;
+    let total_flux = UNBLOCKED_BRIGHTNESS * area;
+    let flux_per_ray = total_flux / ray_count as f64;
+    let pixel_area = area / pixel_count as f64;
+    let spatial_weight = flux_per_ray / pixel_area;
+
     // 每项为 (波长 nm, 积分宽度 nm)，宽度之和为 400 nm。
     let samples: [(f64, f64); 41] = std::array::from_fn(|index| {
         let wavelength_nm = 380.0 + index as f64 * 10.0;
@@ -75,17 +106,12 @@ pub fn render_spectral_caustics(
     });
     // 归一化只取决于完整发射光谱，在追踪/丢弃光子之前计算。
     let k = d65_normalization(&samples).ok_or("D65 光谱归一化失败")?;
-    let wavelength_images = render_refracted_ground_hits(
-        scene,
-        prism_id,
-        ground_id,
-        samples_per_pixel_axis,
-        samples.map(|(wavelength_nm, _)| Some(wavelength_nm)),
-        mode,
-    )?;
-    let mut framebuffer = Framebuffer::new(scene.width, scene.height);
-
-    for ((wavelength_nm, delta_lambda_nm), image) in samples.into_iter().zip(wavelength_images) {
+    // 每项缓存 (玻璃折射率, 单条光线的 XYZ)，不在追踪内重复查表或计算 Cauchy。
+    let mut contributions = [(0.0, Vector3::zeros()); 41];
+    for ((wavelength_nm, delta_lambda_nm), contribution) in
+        samples.into_iter().zip(&mut contributions)
+    {
+        let glass_ior = refractive_index(Some(wavelength_nm), mode).ok_or("折射率计算失败")?;
         let spectral_xyz = wavelength_to_xyz(
             wavelength_nm,
             d65_spd(wavelength_nm).ok_or("D65 光谱查询失败")?,
@@ -94,14 +120,43 @@ pub fn render_spectral_caustics(
         )
         .ok_or("波长到 XYZ 转换失败")?;
 
-        for (index, pixel) in image.pixels.into_iter().enumerate() {
-            // 灰度调试图保存 white_xyz * 空间通量 / N，且 white_xyz.y = 1。
-            // 取 Y 并乘回 N，只保留该波长的空间通量；再乘真正的光谱 XYZ 权重。
-            // 这里不能直接相加灰度 XYZ，也不能在已有 Δλ 之外再次除以 N。
-            let spatial_weight = pixel.y * samples.len() as f64;
-            let xyz = spectral_xyz * spatial_weight;
-            if !framebuffer.accumulate(index % scene.width, index / scene.width, xyz) {
-                return Err("光谱 XYZ 像素累积失败".into());
+        // spectral_xyz 已含 Δλ，不再除以 41；空间权重只按发射数和像素面积归一化。
+        *contribution = (glass_ior, spectral_xyz * spatial_weight);
+    }
+
+    let mut framebuffer = Framebuffer::new(scene.width, scene.height);
+    let mut rng = StdRng::seed_from_u64(SAMPLING_SEED);
+    for sample_y in 0..samples_y {
+        for sample_x in 0..samples_x {
+            // 同一空间光线的所有波长共享发射位置，每次仅消耗两个随机数。
+            let origin_x =
+                GROUND_MIN + (sample_x as f64 + rng.random::<f64>()) / samples_x as f64 * span;
+            let origin_y =
+                GROUND_MIN + (sample_y as f64 + rng.random::<f64>()) / samples_y as f64 * span;
+            let ray = Ray::new(
+                Vector3::new(origin_x, origin_y, LIGHT_HEIGHT),
+                Vector3::new(0.0, 0.0, -1.0),
+                0.0,
+            )
+            .ok_or("平行光线构造失败")?;
+
+            for &(glass_ior, xyz) in &contributions {
+                let Some(position) =
+                    take_photon(scene, ray, prism_id, ground_id, || Some(glass_ior))
+                else {
+                    continue;
+                };
+                let Some((x, y)) = ground_to_pixel(position, scene.width, scene.height) else {
+                    continue;
+                };
+                let neighbors = bilinear_weights(x, y, scene.width, scene.height)
+                    .ok_or("双线性权重计算失败")?;
+                // 落地即把当前波长的 XYZ 分配到四邻域；丢失光子不重新分配通量。
+                for (pixel_x, pixel_y, weight) in neighbors {
+                    if weight > 0.0 && !framebuffer.accumulate(pixel_x, pixel_y, xyz * weight) {
+                        return Err("光谱 XYZ 像素累积失败".into());
+                    }
+                }
             }
         }
     }
@@ -270,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn spectral_merge_matches_independent_single_wavelength_renders_with_lost_flux() {
+    fn spectral_accumulation_matches_independent_single_wavelength_renders_with_lost_flux() {
         let mut scene = Scene::new(32, 16);
         let prism_id = scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
@@ -293,7 +348,7 @@ mod tests {
         let mut expected = vec![Vector3::zeros(); scene.width * scene.height];
         let mut lost_flux = false;
         for (nm, width_nm) in samples {
-            // N = 1 的独立图不含 1/41 因子，检查合并时是否正确抵消了调试图的等权。
+            // N = 1 的独立灰度图记录空间通量，作为直接 XYZ 累积的对照。
             let [single] = render_refracted_ground_hits(
                 &scene,
                 prism_id,

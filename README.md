@@ -19,7 +19,7 @@
 
 **Day 4 已实现 Cauchy 及折射率模式。** `scene::refractive_index(wavelength_nm, mode)` 返回 `Option<f64>`：`IorMode::Constant` 忽略波长并使用 `1.52`，`IorMode::Dispersion` 要求有效波长并按 Cauchy 计算。`take_photon` 接收返回折射率的闭包。`render_refracted_ground_hits` 统一接收波长数组和 `IorMode`，固定折射率对照与三波长灰度调试共用这一个入口。
 
-**Day 5 已完成：光谱积分与彩色 PNG 输出。** `spectrum` 导入可追溯的 CIE 1931 2° CMF 和 D65 相对 SPD，支持非整数波长的线性插值，按 `k × S(λ) × CMF(λ) × Δλ` 返回单个波长的线性 XYZ。`render_spectral_caustics` 复用分层采样与双线性累积，将 41 个波长的落点图按该权重合成为一张 XYZ 图。`main` 以相同采样和曝光输出彩色 `output/caustics.png` 及固定折射率白光对照 `output/constant_ior.png`。数据、许可和校验和见 [assets/color/README.md](assets/color/README.md)。
+**Day 5 已完成：光谱积分与彩色 PNG 输出。** `spectrum` 导入可追溯的 CIE 1931 2° CMF 和 D65 相对 SPD，支持非整数波长的线性插值，按 `k × S(λ) × CMF(λ) × Δλ` 返回单个波长的线性 XYZ。`render_spectral_caustics` 独立发射与追踪光线，将 41 个波长的光子贡献直接双线性累积到一张 XYZ 图。`main` 以相同采样和曝光输出彩色 `output/caustics.png` 及固定折射率白光对照 `output/constant_ior.png`。数据、许可和校验和见 [assets/color/README.md](assets/color/README.md)。
 
 **已接入双线性光子累积。** `utils::bilinear_weights` 根据落点的小数位置计算四个邻近像素及其权重，`caustics.rs` 将线性 XYZ 能量按权重分配；接收区域内的边缘落点也保留全部能量。这对应 Day 6 中的双线性 splat 子项。
 
@@ -120,7 +120,7 @@ let xyz_i = wavelength_to_xyz(550.0, d65_spd(550.0).unwrap(), 10.0, k).unwrap();
 
 两张表均使用原始 1 nm 数据，表内线性插值，表外按官方元数据返回零；非正或非有限波长返回 `None`。功率或 k 为负、积分宽度非正、非有限输入及计算溢出也返回 `None`。
 
-`caustics::render_spectral_caustics` 已接入这些权重：固定采样 380–780 nm 的 41 个波长，共用种子 42 和相同空间发射位置；先调用 `render_refracted_ground_hits` 完成各波长的双界面追踪、空间通量归一化与双线性 splat，再合成为单个 Framebuffer。原灰度图采用 Y = 1 的白色乘以 `空间通量 / 41`，因此合并时用 `pixel.y × 41` 恢复空间通量，再乘该波长真正的 XYZ 积分贡献。线性权重可以在 splat 后相乘，合并阶段无需再次做空间插值。
+`caustics::render_spectral_caustics` 独立执行分层发射和光谱追踪，不调用灰度渲染入口。固定采样 380–780 nm 的 41 个波长，在追踪前缓存各波长的折射率和 `k × S(λ) × CMF(λ) × Δλ × 空间通量权重`。所有波长共用种子 42 和相同空间发射位置；每条波长光线经过双界面追踪落地后，立即按双线性权重将 XYZ 累加到同一个 Framebuffer。全程只保留一张 XYZ 图，不生成 41 张中间灰度图，也不需要除以或乘回 41。512×512 时，像素缓冲由原来合并开始时的 42 份（252 MiB）降为 1 份（6 MiB）；色散模式仍逐空间光线追踪全部 41 个波长。
 
 ```rust
 use spectral_caustics::{caustics::render_spectral_caustics, render::save_png};
@@ -199,7 +199,7 @@ PNG 读回测试在独立临时目录中保存一张 3×2 小图，再解码检�
 ## 文件与颜色约定
 
 - `src/framebuffer.rs`：二维图像缓冲，图片坐标通过 `y * width + x` 转成数组下标。
-- `src/caustics.rs`：固定种子的分层随机平行光发射、连续像素映射与归一化双线性累积；`render_refracted_ground_hits` 返回各波长灰度图，`render_spectral_caustics` 将 41 个波长按 D65/CMF 积分合成为一张线性 XYZ 图。
+- `src/caustics.rs`：固定种子的分层随机平行光发射、连续像素映射与归一化双线性累积；`render_refracted_ground_hits` 返回各波长灰度图，`render_spectral_caustics` 将每条光线的 D65/CMF 积分贡献直接累积到一张线性 XYZ 图。
 - `src/utils.rs`：双线性四邻域与权重计算，含边缘夹紧和非法输入检查。
 - `src/render.rs`：XYZ → 线性 sRGB → sRGB8 → PNG，以及颜色转换和 PNG 读回测试。
 - `src/spectrum.rs`：官方 CMF/D65 数据的线性插值、波长积分贡献与统一白光归一化，含白点、权重与边界测试。
