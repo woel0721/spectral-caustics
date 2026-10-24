@@ -1,11 +1,12 @@
-//! 分层随机发射平行光，将地面落点累积为线性 XYZ 灰度图。
-//! 支持不透明遮挡、固定折射率双界面折射及三波长落点调试，尚不计算真实光谱颜色。
+//! 分层随机发射平行光，将地面落点累积为线性 XYZ。
+//! 支持灰度落点调试，以及按 CIE/D65 光谱积分合成的彩色焦散。
 
 use crate::{
     framebuffer::Framebuffer,
     iormode::IorMode,
     ray::Ray,
     scene::{Scene, refractive_index, take_photon},
+    spectrum::{d65_normalization, d65_spd, wavelength_to_xyz},
     utils::bilinear_weights,
 };
 use nalgebra::Vector3;
@@ -54,6 +55,57 @@ pub fn render_ground_hits(
         let hit = scene.intersect(&ray)?;
         (hit.object_id == Some(ground_id)).then_some(hit.coords)
     })
+}
+
+/// 将 380–780 nm、每 10 nm 一点的 41 张落点图合成为一张线性 XYZ 图。
+/// 复用现有分层随机采样、空间通量归一化和双线性 splat，不对已累积的图重复插值。
+/// D65 使用同一个 k；梯形积分两个端点取半宽度，丢失通量不重新分配。
+pub fn render_spectral_caustics(
+    scene: &Scene,
+    prism_id: usize,
+    ground_id: usize,
+    samples_per_pixel_axis: usize,
+    mode: IorMode,
+) -> Result<Framebuffer, Box<dyn Error>> {
+    // 每项为 (波长 nm, 积分宽度 nm)，宽度之和为 400 nm。
+    let samples: [(f64, f64); 41] = std::array::from_fn(|index| {
+        let wavelength_nm = 380.0 + index as f64 * 10.0;
+        let delta_lambda_nm = if index == 0 || index == 40 { 5.0 } else { 10.0 };
+        (wavelength_nm, delta_lambda_nm)
+    });
+    // 归一化只取决于完整发射光谱，在追踪/丢弃光子之前计算。
+    let k = d65_normalization(&samples).ok_or("D65 光谱归一化失败")?;
+    let wavelength_images = render_refracted_ground_hits(
+        scene,
+        prism_id,
+        ground_id,
+        samples_per_pixel_axis,
+        samples.map(|(wavelength_nm, _)| Some(wavelength_nm)),
+        mode,
+    )?;
+    let mut framebuffer = Framebuffer::new(scene.width, scene.height);
+
+    for ((wavelength_nm, delta_lambda_nm), image) in samples.into_iter().zip(wavelength_images) {
+        let spectral_xyz = wavelength_to_xyz(
+            wavelength_nm,
+            d65_spd(wavelength_nm).ok_or("D65 光谱查询失败")?,
+            delta_lambda_nm,
+            k,
+        )
+        .ok_or("波长到 XYZ 转换失败")?;
+
+        for (index, pixel) in image.pixels.into_iter().enumerate() {
+            // 灰度调试图保存 white_xyz * 空间通量 / N，且 white_xyz.y = 1。
+            // 取 Y 并乘回 N，只保留该波长的空间通量；再乘真正的光谱 XYZ 权重。
+            // 这里不能直接相加灰度 XYZ，也不能在已有 Δλ 之外再次除以 N。
+            let spatial_weight = pixel.y * samples.len() as f64;
+            let xyz = spectral_xyz * spatial_weight;
+            if !framebuffer.accumulate(index % scene.width, index / scene.width, xyz) {
+                return Err("光谱 XYZ 像素累积失败".into());
+            }
+        }
+    }
+    Ok(framebuffer)
 }
 
 /// 统一追踪固定折射率或 Cauchy 色散，按波长数组顺序返回 N 张灰度落点图。
@@ -185,6 +237,194 @@ fn render_landing_point_sets<const N: usize>(
 mod tests {
     use super::*;
     use crate::{ground::Ground, prism::Prism, render::save_png};
+
+    #[test]
+    fn spectral_unblocked_white_preserves_xyz_flux_across_spatial_sample_counts() {
+        // 独立用官方 CSV 的 10 nm 梯形求和得到的参考白，Y = 1。
+        let white_xyz = Vector3::new(0.9501416822353593, 1.0, 1.087976622255359);
+        for (width, height) in [(1, 1), (1, 4), (4, 1), (12, 8)] {
+            let mut scene = Scene::new(width, height);
+            let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+            // 测试地面在三棱镜上方、光源下方，所有光线直接落地。
+            let ground_id = scene.add(Box::new(Ground::new(2.0).unwrap()));
+            for samples in [1, 3] {
+                let gray = render_ground_hits(&scene, ground_id, samples).unwrap();
+                for mode in [IorMode::Constant, IorMode::Dispersion] {
+                    let image =
+                        render_spectral_caustics(&scene, prism_id, ground_id, samples, mode)
+                            .unwrap();
+                    assert_eq!((image.width, image.height), (width, height));
+                    // 每个像素的空间分布应与同种子的灰度双线性累积完全对应。
+                    for (pixel, gray_pixel) in image.pixels.iter().zip(&gray.pixels) {
+                        assert!((pixel - white_xyz * gray_pixel.y).norm() < 1e-12);
+                    }
+                    let total = image
+                        .pixels
+                        .iter()
+                        .fold(Vector3::zeros(), |sum, pixel| sum + pixel);
+                    let expected = white_xyz * (0.5 * (width * height) as f64);
+                    assert!((total - expected).norm() < 1e-10);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spectral_merge_matches_independent_single_wavelength_renders_with_lost_flux() {
+        let mut scene = Scene::new(32, 16);
+        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        // 在光源与三棱镜之间遮住一部分光，确保真的测试了丢失通量。
+        scene.add(Box::new(
+            crate::triangle::Triangle::new(
+                Vector3::new(-2.0, -2.0, 2.0),
+                Vector3::new(0.0, -2.0, 2.0),
+                Vector3::new(-2.0, 2.0, 2.0),
+            )
+            .unwrap(),
+        ));
+        let samples: Vec<_> = (380..=780)
+            .step_by(10)
+            .map(|nm| (nm as f64, if nm == 380 || nm == 780 { 5.0 } else { 10.0 }))
+            .collect();
+        let k = d65_normalization(&samples).unwrap();
+        let actual =
+            render_spectral_caustics(&scene, prism_id, ground_id, 2, IorMode::Dispersion).unwrap();
+        let mut expected = vec![Vector3::zeros(); scene.width * scene.height];
+        let mut lost_flux = false;
+        for (nm, width_nm) in samples {
+            // N = 1 的独立图不含 1/41 因子，检查合并时是否正确抵消了调试图的等权。
+            let [single] = render_refracted_ground_hits(
+                &scene,
+                prism_id,
+                ground_id,
+                2,
+                [Some(nm)],
+                IorMode::Dispersion,
+            )
+            .unwrap();
+            let emitted_y = 0.5 * (scene.width * scene.height) as f64;
+            let landed_y: f64 = single.pixels.iter().map(|pixel| pixel.y).sum();
+            lost_flux |= landed_y < emitted_y - 1e-6;
+            let spectral_xyz = wavelength_to_xyz(nm, d65_spd(nm).unwrap(), width_nm, k).unwrap();
+            for (sum, pixel) in expected.iter_mut().zip(single.pixels) {
+                *sum += spectral_xyz * pixel.y;
+            }
+        }
+        assert!(lost_flux, "测试场景必须有未落地或落在接收区外的通量");
+        for (pixel, reference) in actual.pixels.iter().zip(expected) {
+            assert!((pixel - reference).norm() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn spectral_constant_stays_white_and_dispersion_separates_colors_reproducibly() {
+        let mut scene = Scene::new(128, 16);
+        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        let constant =
+            render_spectral_caustics(&scene, prism_id, ground_id, 2, IorMode::Constant).unwrap();
+        let dispersion =
+            render_spectral_caustics(&scene, prism_id, ground_id, 2, IorMode::Dispersion).unwrap();
+        let repeated =
+            render_spectral_caustics(&scene, prism_id, ground_id, 2, IorMode::Dispersion).unwrap();
+        assert_eq!(dispersion.pixels, repeated.pixels);
+        assert_ne!(constant.pixels, dispersion.pixels);
+        assert_eq!(constant.get(0, 0), dispersion.get(0, 0));
+        let white_xyz = Vector3::new(0.9501416822353593, 1.0, 1.087976622255359);
+        assert!(
+            constant
+                .pixels
+                .iter()
+                .all(|pixel| { (pixel - white_xyz * pixel.y).norm() < 1e-11 })
+        );
+        assert!(
+            dispersion
+                .pixels
+                .iter()
+                .any(|pixel| { (pixel - white_xyz * pixel.y).norm() > 1e-3 })
+        );
+        let emitted_y = 0.5 * (scene.width * scene.height) as f64;
+        for image in [&constant, &dispersion] {
+            assert!(
+                image
+                    .pixels
+                    .iter()
+                    .all(|pixel| { pixel.iter().all(|value| value.is_finite() && *value >= 0.0) })
+            );
+            let total_y: f64 = image.pixels.iter().map(|pixel| pixel.y).sum();
+            assert!(total_y > 0.0 && total_y <= emitted_y + 1e-9);
+        }
+    }
+
+    #[test]
+    fn spectral_png_roundtrip_has_neutral_constant_mode_and_colored_dispersion()
+    -> Result<(), Box<dyn Error>> {
+        let mut scene = Scene::new(128, 16);
+        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("spectral-png-{}-{timestamp}", std::process::id()));
+        for (mode, filename) in [
+            (IorMode::Constant, "constant.png"),
+            (IorMode::Dispersion, "dispersion.png"),
+        ] {
+            let image = render_spectral_caustics(&scene, prism_id, ground_id, 2, mode)?;
+            let path = directory.join(filename);
+            save_png(&image, path.to_str().ok_or("临时路径必须是 UTF-8")?)?;
+            let decoded = image::open(&path)?;
+            assert_eq!(decoded.color(), image::ColorType::Rgb8);
+            let rgb = decoded.into_rgb8();
+            assert_eq!(rgb.dimensions(), (128, 16));
+            let channel_spread = |pixel: &image::Rgb<u8>| {
+                pixel.0.iter().max().unwrap() - pixel.0.iter().min().unwrap()
+            };
+            match mode {
+                // 有限波长范围和 10 nm 积分使 D65 白点存在微小误差，允许 1 字节差异。
+                IorMode::Constant => assert!(rgb.pixels().all(|pixel| channel_spread(pixel) <= 1)),
+                IorMode::Dispersion => assert!(rgb.pixels().any(|pixel| channel_spread(pixel) > 2)),
+            }
+        }
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn spectral_render_rejects_invalid_ids_dimensions_and_sampling_overflow() {
+        let mut scene = Scene::new(8, 4);
+        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        for mode in [IorMode::Constant, IorMode::Dispersion] {
+            for (prism_id, ground_id, samples) in [
+                (usize::MAX, ground_id, 1),
+                (ground_id, ground_id, 1),
+                (prism_id, usize::MAX, 1),
+                (prism_id, ground_id, 0),
+                (prism_id, ground_id, usize::MAX),
+            ] {
+                assert!(
+                    render_spectral_caustics(&scene, prism_id, ground_id, samples, mode).is_err()
+                );
+            }
+        }
+        for (width, height) in [
+            (0, 4),
+            (4, 0),
+            (usize::MAX, 2),
+            (usize::MAX, 1),
+            (1, usize::MAX),
+        ] {
+            scene.width = width;
+            scene.height = height;
+            assert!(
+                render_spectral_caustics(&scene, prism_id, ground_id, 2, IorMode::Dispersion)
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn world_coordinates_map_to_non_square_image_with_y_flipped() {
