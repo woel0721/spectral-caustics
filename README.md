@@ -19,7 +19,7 @@
 
 **Day 4 已实现 Cauchy 及折射率模式。** `scene::refractive_index(wavelength_nm, mode)` 返回 `Option<f64>`：`IorMode::Constant` 忽略波长并使用 `1.52`，`IorMode::Dispersion` 要求有效波长并按 Cauchy 计算。`take_photon` 接收返回折射率的闭包。`render_refracted_ground_hits` 统一接收波长数组和 `IorMode`，固定折射率对照与三波长灰度调试共用这一个入口。
 
-**Day 5 已完成光谱计算与彩色 Framebuffer 合成。** `spectrum` 导入可追溯的 CIE 1931 2° CMF 和 D65 相对 SPD，支持非整数波长的线性插值，按 `k × S(λ) × CMF(λ) × Δλ` 返回单个波长的线性 XYZ。`render_spectral_caustics` 复用分层采样与双线性累积，将 41 个波长的落点图按该权重合成为一张 XYZ 图。数据、许可和校验和见 [assets/color/README.md](assets/color/README.md)。默认主程序仍输出原有灰度调试图，彩色图可通过这个新接口保存。
+**Day 5 已完成：光谱积分与彩色 PNG 输出。** `spectrum` 导入可追溯的 CIE 1931 2° CMF 和 D65 相对 SPD，支持非整数波长的线性插值，按 `k × S(λ) × CMF(λ) × Δλ` 返回单个波长的线性 XYZ。`render_spectral_caustics` 复用分层采样与双线性累积，将 41 个波长的落点图按该权重合成为一张 XYZ 图。`main` 以相同采样和曝光输出彩色 `output/caustics.png` 及固定折射率白光对照 `output/constant_ior.png`。数据、许可和校验和见 [assets/color/README.md](assets/color/README.md)。
 
 **已接入双线性光子累积。** `utils::bilinear_weights` 根据落点的小数位置计算四个邻近像素及其权重，`caustics.rs` 将线性 XYZ 能量按权重分配；接收区域内的边缘落点也保留全部能量。这对应 Day 6 中的双线性 splat 子项。
 
@@ -31,6 +31,11 @@
 - Day 2 几何验证：[地面命中点灰度图](output/ground_hits.png)。
 - Day 3 对照：[无三棱镜](output/no_prism.png)、[固定折射率玻璃](output/refracted_hits.png)。
 - Day 4 落点调试：[450 nm](output/wavelength_450nm.png)、[550 nm](output/wavelength_550nm.png)、[650 nm](output/wavelength_650nm.png)。
+- Day 5 光谱积分：[色散彩色焦散](output/caustics.png)、[固定折射率白光对照](output/constant_ior.png)。
+
+![Day 5：D65 光谱经过双界面折射后的彩色焦散](output/caustics.png)
+
+当前三棱镜和光源设置主要在光斑边缘形成窄色带；固定折射率对照保持中性灰白。两张图共用种子 42、4×4 空间分层采样、41 个波长和曝光 1.0。
 
 ![Day 1：位置渐变测试图](output/test.png)
 
@@ -137,7 +142,19 @@ save_png(&framebuffer, "output/caustics.png")?;
 cargo run --release --locked
 ```
 
-输出五张 512×512 PNG：`output/no_prism.png` 为无三棱镜对照，`output/refracted_hits.png` 为固定折射率玻璃的地面分布，`output/wavelength_450nm.png`、`output/wavelength_550nm.png`、`output/wavelength_650nm.png` 分别记录三个波长的落点。默认从 `z = 3` 米的 4×4 米区域发射向下的平行光，方向为 `(0, 0, -1)`。每个发射小格分为 4×4 层，每层随机取一点，共 4,194,304 个空间发射位置。三波长调试在每个位置复用同一条初始 Ray，依次传入 `Some(450.0)`、`Some(550.0)`、`Some(650.0)`，合计追踪 12,582,912 条波长光子。每轴的发射位置使用 `(sample_index + rng.random::<f64>()) / sample_count`，偏移在 `[0, 1)` 内；世界 x、y 均从区域最小值开始递增，图片的 y 翻转仍由地面映射负责。
+输出七张 512×512 PNG：
+
+| 文件 | 内容 |
+| --- | --- |
+| `output/caustics.png` | 41 点 D65/CIE 光谱积分，Cauchy 色散彩色焦散 |
+| `output/constant_ior.png` | 同样的光谱、采样和曝光，玻璃固定 n = 1.52 的白光对照 |
+| `output/no_prism.png` | 无三棱镜的灰度对照 |
+| `output/refracted_hits.png` | 固定折射率玻璃的灰度地面分布 |
+| `output/wavelength_450nm.png`、`output/wavelength_550nm.png`、`output/wavelength_650nm.png` | 三个波长各自的灰度落点调试图 |
+
+默认从 `z = 3` 米的 4×4 米区域发射向下的平行光，方向为 `(0, 0, -1)`。每个发射小格分为 4×4 层，每层随机取一点，共 4,194,304 个空间发射位置。每张光谱积分图使用 380–780 nm、10 nm 间隔的 41 个波长，共追踪 171,966,464 条波长光子；两个端点的积分宽度为 5 nm，其余为 10 nm。两种折射率模式都重新从种子 42 开始，逐张渲染并保存。
+
+三波长调试在每个位置复用同一条初始 Ray，依次传入 `Some(450.0)`、`Some(550.0)`、`Some(650.0)`，合计追踪 12,582,912 条波长光子。每轴的发射位置使用 `(sample_index + rng.random::<f64>()) / sample_count`，偏移在 `[0, 1)` 内；世界 x、y 均从区域最小值开始递增，图片的 y 翻转仍由地面映射负责。
 
 接收区域为地面 `x、y ∈ [-2, 2)` 米，世界 +x 朝图片右侧，+y 朝图片上方。无三棱镜时平均线性亮度保持 0.5，单个像素会有采样波动；线性亮度恰为 0.5 时，XYZ → 线性 sRGB → sRGB 编码结果为 `[188, 188, 188]`。加入玻璃后，透射落点向两侧移动，与直射光叠加形成更亮的区域；原来的部分区域没有光线落入。单条已知光线的地面落点从无玻璃时的 `(0.25, 0.2, 0)` 移至约 `(-0.7196, 0.2, 0)`。
 
@@ -196,7 +213,7 @@ PNG 读回测试在独立临时目录中保存一张 3×2 小图，再解码检�
 - `src/iormode.rs`：固定折射率 `Constant` 与 Cauchy 色散 `Dispersion` 模式。
 - `src/scene.rs`：画面参数、物体集合、物体编号、最近交点、Snell 折射、Cauchy 色散与接收折射率闭包的 `take_photon` 双界面追踪。
 - `src/lib.rs`：导出现有模块，供主程序和测试复用。
-- `src/main.rs`：搭建玻璃与无玻璃对照场景，保存两张基准灰度图和三张波长落点调试图。
+- `src/main.rs`：搭建玻璃与无玻璃对照场景，依次保存色散彩色焦散、固定折射率白光对照、两张基准灰度图和三张波长落点调试图。
 - `examples/refract_ray.rs`：单条光线进入三棱镜、内部传播、出射及落地的顺序示例。
 
 XYZ 转换使用 D65 白点约定，参考白的 Y = 1。矩阵来自 [W3C CSS Color 4 的颜色转换示例](https://www.w3.org/TR/css-color-4/#color-conversion-code)，保留负值和大于 1 的线性 RGB 分量。
@@ -215,6 +232,6 @@ XYZ 转换使用 D65 白点约定，参考白的 Y = 1。矩阵来自 [W3C CSS C
 - 彩色合成函数使用固定的 41 点梯形积分，未提供波长范围/步长参数；先保存各波长中间图再合成，512×512 时像素缓冲峰值约 252 MiB。有限波长范围与积分步长使 D65 白点略有误差，固定模式 PNG 允许 RGB 通道相差 1 个字节。
 - `take_photon` 最多经过两个玻璃界面；全反射直接终止，不继续内部反射。未计算 Fresnel 反射损失和吸收；超出接收区域的落点不写入图像。
 - 当前光源高度、方向、发射区域和接收区域固定。分层随机采样与双线性 splat 减轻周期性条纹，但有限采样仍产生颗粒噪声，可增加 `samples_per_pixel_axis` 来降低噪声；较亮落点还可能被显示范围裁剪，没有按每张图的最大值自动归一化。
-- Day 5 的彩色 Framebuffer 合成与 PNG 读回测试已完成；下一步在默认主程序调用新接口，保存彩色焦散与固定折射率白光对照。
+- Day 5 已完成；下一步可实现 Day 6 的参数入口，逐步开放尺寸、空间采样数、折射率模式、曝光、种子和输出路径。
 
-使用 `nalgebra` 进行数学计算，`image` 编解码 PNG，`rand` 提供固定种子的格内随机偏移。`Cargo.lock` 随项目提交；`.gitignore` 仅放行 `output/test.png`、`output/ground_hits.png`、`output/no_prism.png`、`output/refracted_hits.png` 和三张 `output/wavelength_*nm.png` 阶段示例，编译目录 `target/` 和其他生成文件继续忽略。运行默认命令会更新 Day 3 的两张对照图及 Day 4 的三张波长落点图。
+使用 `nalgebra` 进行数学计算，`image` 编解码 PNG，`rand` 提供固定种子的格内随机偏移。`Cargo.lock` 随项目提交；`.gitignore` 放行上述七张默认输出，以及 Day 1 的 `output/test.png`、Day 2 的 `output/ground_hits.png` 阶段示例，编译目录 `target/` 和其他生成文件继续忽略。

@@ -1,7 +1,10 @@
-//! 比较无三棱镜、固定折射率和 450/550/650 nm 的地面灰度分布。
+//! 输出彩色光谱焦散、固定折射率白光对照和各阶段的地面灰度调试图。
 
 use spectral_caustics::{
-    caustics::{DEBUG_WAVELENGTHS_NM, render_ground_hits, render_refracted_ground_hits},
+    caustics::{
+        DEBUG_WAVELENGTHS_NM, render_ground_hits, render_refracted_ground_hits,
+        render_spectral_caustics,
+    },
     ground::Ground,
     iormode::IorMode,
     prism::Prism,
@@ -17,6 +20,27 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 每个发射小格分为 4×4 层，每层随机发射一条光线，并通过 take_photon 查询落点。
     let samples_per_pixel_axis = 4;
+
+    // 两种模式使用相同空间采样、41 点 D65 光谱及固定曝光，仅改变玻璃折射率。
+    // 每次循环保存后释放当前 Framebuffer，避免同时保留两套光谱渲染缓冲。
+    for (mode, path, label) in [
+        (IorMode::Dispersion, "output/caustics.png", "色散彩色焦散"),
+        (
+            IorMode::Constant,
+            "output/constant_ior.png",
+            "固定折射率白光对照",
+        ),
+    ] {
+        println!("正在渲染{label}……");
+        let framebuffer =
+            render_spectral_caustics(&scene, prism_id, ground_id, samples_per_pixel_axis, mode)?;
+        save_png(&framebuffer, path)?;
+        println!(
+            "已输出 {}×{} {label}：{path}",
+            framebuffer.width, framebuffer.height
+        );
+    }
+
     let [framebuffer] = render_refracted_ground_hits(
         &scene,
         prism_id,
