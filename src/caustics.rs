@@ -3,8 +3,9 @@
 
 use crate::{
     framebuffer::Framebuffer,
+    iormode::IorMode,
     ray::Ray,
-    scene::{Scene, take_photon},
+    scene::{Scene, refractive_index, take_photon},
     utils::bilinear_weights,
 };
 use nalgebra::Vector3;
@@ -66,8 +67,9 @@ pub fn render_refracted_ground_hits(
         return Err("三棱镜编号无效或与地面编号相同".into());
     }
     render_landing_points(scene, ground_id, samples_per_pixel_axis, |ray| {
-        // 不指定波长，使用 refractive_index 提供的默认玻璃折射率 1.52。
-        take_photon(scene, ray, prism_id, ground_id, None)
+        take_photon(scene, ray, prism_id, ground_id, || {
+            refractive_index(None, IorMode::Constant)
+        })
     })
 }
 
@@ -85,7 +87,9 @@ pub fn render_wavelength_ground_hits(
     render_landing_point_sets(scene, ground_id, samples_per_pixel_axis, |ray| {
         let mut positions = [None; 3];
         for (index, wavelength_nm) in DEBUG_WAVELENGTHS_NM.into_iter().enumerate() {
-            positions[index] = take_photon(scene, ray, prism_id, ground_id, Some(wavelength_nm));
+            positions[index] = take_photon(scene, ray, prism_id, ground_id, || {
+                refractive_index(Some(wavelength_nm), IorMode::Dispersion)
+            });
         }
         positions
     })
@@ -424,7 +428,9 @@ mod tests {
             assert_eq!(image.pixels, repeated_image.pixels);
             // 独立按单个波长重放相同的发射采样，检查顺序、落点与 1/3 权重。
             let single = render_landing_points(&scene, ground_id, 2, |ray| {
-                take_photon(&scene, ray, prism_id, ground_id, Some(wavelength_nm))
+                take_photon(&scene, ray, prism_id, ground_id, || {
+                    refractive_index(Some(wavelength_nm), IorMode::Dispersion)
+                })
             })
             .unwrap();
             for (pixel, single_pixel) in image.pixels.iter().zip(single.pixels) {

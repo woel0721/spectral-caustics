@@ -1,6 +1,7 @@
 //! 场景参数与物体集合；intersect 查询所有物体中的最近交点。
 
 use crate::hit::Hit;
+use crate::iormode::IorMode;
 use crate::object::Hittable;
 use crate::ray::Ray;
 use nalgebra::Vector3;
@@ -81,17 +82,18 @@ pub fn refract(
     }
 }
 
-/// None 返回默认玻璃折射率 1.52；Some(wavelength_nm) 按 Cauchy 模型计算。
+/// Constant 忽略波长并返回 1.52；Dispersion 要求 Some(wavelength_nm)。
 /// Cauchy 色散模型：n(λ) = A + B / λ_μm²，输入波长单位为 nm。
 /// A = 1.5046、B = 0.0042 μm² 是 ROADMAP 中的演示参数，不代表特定真实玻璃。
 /// 非有限、非正波长或计算溢出返回 None。
-pub fn refractive_index(wavelength_nm: Option<f64>) -> Option<f64> {
+pub fn refractive_index(wavelength_nm: Option<f64>, mode: IorMode) -> Option<f64> {
     const DEFAULT_GLASS_IOR: f64 = 1.52;
     const A: f64 = 1.5046;
     const B: f64 = 0.0042;
 
-    let Some(wavelength_nm) = wavelength_nm else {
-        return Some(DEFAULT_GLASS_IOR);
+    let wavelength_nm = match mode {
+        IorMode::Constant => return Some(DEFAULT_GLASS_IOR),
+        IorMode::Dispersion => wavelength_nm?,
     };
     if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
         return None;
@@ -102,20 +104,23 @@ pub fn refractive_index(wavelength_nm: Option<f64>) -> Option<f64> {
 }
 
 /// 追踪从空气出发的单条光线，返回最终地面落点。
-/// wavelength_nm 为 None 时使用默认玻璃，Some(波长) 时使用 Cauchy 色散。
-/// 玻璃折射率由 refractive_index 统一计算，两个界面使用同一数值。
-/// 只支持一个三棱镜的两次透射；非法波长、全反射、其他遮挡或未命中地面时返回 None。
+/// glass_ior 是无参数闭包，例如 || refractive_index(Some(450.0), IorMode::Dispersion)。
+/// 闭包只调用一次，返回的正有限折射率用于两个界面；也可传入 || Some(1.52)。
+/// 只支持一个三棱镜的两次透射；闭包返回 None、折射率非法、全反射、其他遮挡或未命中地面时返回 None。
 pub fn take_photon(
     scene: &Scene,
     ray: Ray,
     prism_id: usize,
     ground_id: usize,
-    wavelength_nm: Option<f64>,
+    glass_ior: impl FnOnce() -> Option<f64>,
 ) -> Option<Vector3<f64>> {
     const AIR_IOR: f64 = 1.0;
     const EPSILON: f64 = 1e-5;
 
-    let glass_ior = refractive_index(wavelength_nm)?;
+    let glass_ior = glass_ior()?;
+    if !glass_ior.is_finite() || glass_ior <= 0.0 {
+        return None;
+    }
     if prism_id == ground_id || prism_id >= scene.objects.len() || ground_id >= scene.objects.len()
     {
         return None;
@@ -165,8 +170,13 @@ mod tests {
     use crate::{ground::Ground, prism::Prism, ray::Ray};
 
     #[test]
-    fn refractive_index_without_wavelength_returns_default_glass() {
-        assert_eq!(refractive_index(None), Some(1.52));
+    fn constant_index_ignores_wavelength() {
+        for wavelength_nm in [None, Some(450.0), Some(650.0), Some(f64::NAN)] {
+            assert_eq!(
+                refractive_index(wavelength_nm, IorMode::Constant),
+                Some(1.52)
+            );
+        }
     }
 
     #[test]
@@ -176,18 +186,23 @@ mod tests {
             (500.0, 1.5214),
             (650.0, 1.514540828402367),
         ] {
-            assert!((refractive_index(Some(wavelength_nm)).unwrap() - expected).abs() < 1e-12);
+            assert!(
+                (refractive_index(Some(wavelength_nm), IorMode::Dispersion).unwrap() - expected)
+                    .abs()
+                    < 1e-12
+            );
         }
         // 第一周使用的可见光区间内，短波折射率更高，且均为有限值。
         let indices: Vec<_> = (380..=780)
             .step_by(10)
-            .map(|nm| refractive_index(Some(f64::from(nm))).unwrap())
+            .map(|nm| refractive_index(Some(f64::from(nm)), IorMode::Dispersion).unwrap())
             .collect();
         assert!(indices.windows(2).all(|pair| pair[0] > pair[1]));
     }
 
     #[test]
     fn cauchy_index_rejects_invalid_wavelengths_and_overflow() {
+        assert_eq!(refractive_index(None, IorMode::Dispersion), None);
         for wavelength_nm in [
             0.0,
             -0.0,
@@ -198,7 +213,10 @@ mod tests {
             f64::MIN_POSITIVE,
             f64::from_bits(1),
         ] {
-            assert_eq!(refractive_index(Some(wavelength_nm)), None);
+            assert_eq!(
+                refractive_index(Some(wavelength_nm), IorMode::Dispersion),
+                None
+            );
         }
     }
 
@@ -353,7 +371,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            take_photon(&scene, ray, prism_id, ground_id, None),
+            take_photon(&scene, ray, prism_id, ground_id, || Some(1.52)),
             Some(Vector3::new(1.0, 0.2, 0.0))
         );
         let ray = Ray::new(
@@ -362,7 +380,7 @@ mod tests {
             0.0,
         )
         .unwrap();
-        assert!(take_photon(&scene, ray, prism_id, ground_id, None).is_none());
+        assert!(take_photon(&scene, ray, prism_id, ground_id, || Some(1.52)).is_none());
     }
 
     #[test]
@@ -382,7 +400,10 @@ mod tests {
                 2.0,
             )
             .unwrap();
-            let position = take_photon(&scene, ray, prism_id, ground_id, None).unwrap();
+            let position = take_photon(&scene, ray, prism_id, ground_id, || {
+                refractive_index(None, IorMode::Constant)
+            })
+            .unwrap();
             // 与独立单光线示例的已知落点比较；直接落地时 x 应为 0.25。
             assert!((position - Vector3::new(-0.719593104236608, 0.2, 0.0)).norm() < 1e-12);
         }
@@ -402,13 +423,25 @@ mod tests {
         for (wavelength_nm, expected_x) in
             [(450.0, -0.7321163297863346), (650.0, -0.7069588738883907)]
         {
-            let position =
-                take_photon(&scene, ray, prism_id, ground_id, Some(wavelength_nm)).unwrap();
+            let position = take_photon(&scene, ray, prism_id, ground_id, || {
+                refractive_index(Some(wavelength_nm), IorMode::Dispersion)
+            })
+            .unwrap();
             assert!((position - Vector3::new(expected_x, 0.2, 0.0)).norm() < 1e-12);
             assert_eq!(
-                take_photon(&scene, ray, prism_id, ground_id, Some(wavelength_nm)),
+                take_photon(&scene, ray, prism_id, ground_id, || {
+                    refractive_index(Some(wavelength_nm), IorMode::Dispersion)
+                }),
                 Some(position)
             );
+            let constant_position = take_photon(&scene, ray, prism_id, ground_id, || {
+                refractive_index(Some(wavelength_nm), IorMode::Constant)
+            })
+            .unwrap();
+            assert!(
+                (constant_position - Vector3::new(-0.719593104236608, 0.2, 0.0)).norm() < 1e-12
+            );
+            assert!((position - constant_position).norm() > 0.01);
             positions.push(position);
         }
         // 蓝光偏折更大，两波长沿同一条初始空间光线产生不同落点。
@@ -434,8 +467,55 @@ mod tests {
                 f64::MIN_POSITIVE,
             ] {
                 assert!(
-                    take_photon(&scene, ray, prism_id, ground_id, Some(wavelength_nm)).is_none()
+                    take_photon(&scene, ray, prism_id, ground_id, || {
+                        refractive_index(Some(wavelength_nm), IorMode::Dispersion)
+                    })
+                    .is_none()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn photon_evaluates_a_consuming_ior_closure_once_for_both_interfaces() {
+        let (scene, prism_id, ground_id) = photon_scene();
+        let ray = Ray::new(
+            Vector3::new(0.25, 0.2, 3.0),
+            Vector3::new(0.0, 0.0, -1.0),
+            0.0,
+        )
+        .unwrap();
+        let calls = std::cell::Cell::new(0);
+        let indices = vec![1.52];
+        let position = take_photon(&scene, ray, prism_id, ground_id, || {
+            calls.set(calls.get() + 1);
+            // 消耗捕获的 Vec，使闭包只实现 FnOnce。
+            indices.into_iter().next()
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert!((position - Vector3::new(-0.719593104236608, 0.2, 0.0)).norm() < 1e-12);
+    }
+
+    #[test]
+    fn photon_rejects_missing_or_invalid_ior_even_for_direct_ground_hits() {
+        let (scene, prism_id, ground_id) = photon_scene();
+        for origin_x in [0.25, 1.0] {
+            let ray = Ray::new(
+                Vector3::new(origin_x, 0.2, 3.0),
+                Vector3::new(0.0, 0.0, -1.0),
+                0.0,
+            )
+            .unwrap();
+            for glass_ior in [
+                None,
+                Some(0.0),
+                Some(-1.0),
+                Some(f64::NAN),
+                Some(f64::INFINITY),
+                Some(f64::NEG_INFINITY),
+            ] {
+                assert!(take_photon(&scene, ray, prism_id, ground_id, || glass_ior).is_none());
             }
         }
     }
@@ -452,7 +532,7 @@ mod tests {
                 0.0,
             )
             .unwrap();
-            assert!(take_photon(&scene, ray, prism_id, ground_id, None).is_none());
+            assert!(take_photon(&scene, ray, prism_id, ground_id, || Some(1.52)).is_none());
         }
     }
 
@@ -467,7 +547,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(scene.intersect(&ray).unwrap().object_id, Some(prism_id));
-        assert!(take_photon(&scene, ray, prism_id, ground_id, None).is_none());
+        assert!(take_photon(&scene, ray, prism_id, ground_id, || Some(1.52)).is_none());
     }
 
     #[test]
@@ -479,9 +559,9 @@ mod tests {
             0.0,
         )
         .unwrap();
-        assert!(take_photon(&scene, ray, usize::MAX, ground_id, None).is_none());
-        assert!(take_photon(&scene, ray, prism_id, usize::MAX, None).is_none());
-        assert!(take_photon(&scene, ray, ground_id, ground_id, None).is_none());
+        assert!(take_photon(&scene, ray, usize::MAX, ground_id, || Some(1.52)).is_none());
+        assert!(take_photon(&scene, ray, prism_id, usize::MAX, || Some(1.52)).is_none());
+        assert!(take_photon(&scene, ray, ground_id, ground_id, || Some(1.52)).is_none());
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod caustics;
 pub mod framebuffer;
 pub mod ground;
 pub mod hit;
+pub mod iormode;
 pub mod object;
 pub mod prism;
 pub mod ray;

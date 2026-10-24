@@ -17,7 +17,7 @@
 
 **Day 3 已完成：固定折射率双界面折射与批量地面累积。** `scene::take_photon` 返回直接落地或通过玻璃两次折射后的地面落点；全反射、其他遮挡和未命中时返回 `None`。主程序用相同发射网格、总通量和曝光输出无三棱镜对照图及玻璃折射图。
 
-**Day 4 已完成 Cauchy 子项。** `scene::refractive_index(wavelength_nm)` 接收可选波长，返回 `Option<f64>`；`None` 使用默认玻璃折射率 `1.52`，`Some(波长)` 按 Cauchy 计算。`take_photon` 接收同样的可选波长并在内部调用该函数。`render_wavelength_ground_hits` 让同一条空间光线依次追踪 450、550、650 nm，分别生成落点灰度图。固定折射率对照仍传入 `None`；真实光谱颜色转换尚未接入。
+**Day 4 已实现 Cauchy 及折射率模式。** `scene::refractive_index(wavelength_nm, mode)` 返回 `Option<f64>`：`IorMode::Constant` 忽略波长并使用 `1.52`，`IorMode::Dispersion` 要求有效波长并按 Cauchy 计算。`take_photon` 接收返回折射率的闭包。`render_wavelength_ground_hits` 让同一条空间光线依次追踪 450、550、650 nm，分别生成色散落点灰度图；固定折射率对照显式使用 `Constant`。批量渲染入口的统一模式参数与真实光谱颜色转换尚未接入。
 
 **已接入双线性光子累积。** `utils::bilinear_weights` 根据落点的小数位置计算四个邻近像素及其权重，`caustics.rs` 将线性 XYZ 能量按权重分配；接收区域内的边缘落点也保留全部能量。这对应 Day 6 中的双线性 splat 子项。
 
@@ -58,9 +58,24 @@ let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
 
 `Scene::intersect(&ray)` 返回最近的 `Option<Hit>`，并填写 `Hit.object_id`；`material_id` 仍为 `None`。物体编号是当前集合下标，查询期间不能重排集合。地面命中图使用宽高，保留的 `fov` 与 `background_color` 不参与当前光源追踪。
 
-`take_photon(&scene, ray, prism_id, ground_id, wavelength_nm)` 按顺序执行首次求交、空气 → 玻璃折射、内部求交、玻璃 → 空气折射、最后一次地面求交。空气折射率固定为 `1.0`，玻璃折射率统一由 `refractive_index(wavelength_nm)` 计算并用于两个界面；非法波长返回 `None`。界面起点沿法线偏移 `1e-5` 米，后续 Ray 保留原来的 `time`。入射使用朝外法线，出射使用取反后的法线。光线需从空气中出发，不处理已有玻璃内部起点。
+`take_photon(&scene, ray, prism_id, ground_id, glass_ior)` 按顺序执行首次求交、空气 → 玻璃折射、内部求交、玻璃 → 空气折射、最后一次地面求交。`glass_ior` 类型为 `impl FnOnce() -> Option<f64>`，通过 `||` 创建无参数闭包，并捕获当前波长和模式。函数只调用一次闭包，将得到的玻璃折射率用于两个界面；闭包返回 `None`、非正或非有限折射率时返回 `None`。空气折射率固定为 `1.0`。界面起点沿法线偏移 `1e-5` 米，后续 Ray 保留原来的 `time`。入射使用朝外法线，出射使用取反后的法线。光线需从空气中出发，不处理已有玻璃内部起点。
 
-`refractive_index(None)` 返回 `Some(1.52)`；`refractive_index(Some(wavelength_nm))` 使用 `n = 1.5046 + 0.0042 / (wavelength_nm / 1000)²`；除以 1000 将 nm 转为 μm。参数来自路线图，仅用于演示，不代表特定真实玻璃。非正、非有限波长或计算溢出返回 `None`。例如 `refractive_index(Some(450.0)).unwrap()` 约为 `1.52534`，650 nm 时约为 `1.51454`；调用 `take_photon(&scene, ray, prism_id, ground_id, Some(波长))` 时，内部按波长计算折射率，同一条从 `(0.25, 0.2, 3)` 向下发射的光线分别落在约 `(-0.73212, 0.2, 0)` 与 `(-0.70696, 0.2, 0)`。
+`refractive_index(None, IorMode::Constant)` 返回 `Some(1.52)`，传入其他波长也不改变该模式的结果；`refractive_index(Some(wavelength_nm), IorMode::Dispersion)` 使用 `n = 1.5046 + 0.0042 / (wavelength_nm / 1000)²`，除以 1000 将 nm 转为 μm。参数来自路线图，仅用于演示，不代表特定真实玻璃。色散模式下缺少波长、波长非正或非有限、计算溢出时返回 `None`。450 nm 时折射率约为 `1.52534`，650 nm 时约为 `1.51454`；同一条从 `(0.25, 0.2, 3)` 向下发射的光线分别落在约 `(-0.73212, 0.2, 0)` 与 `(-0.70696, 0.2, 0)`。调用示例：
+
+```rust
+use spectral_caustics::{
+    iormode::IorMode,
+    scene::{refractive_index, take_photon},
+};
+
+let wavelength_nm = 450.0;
+let mode = IorMode::Dispersion;
+let position = take_photon(&scene, ray, prism_id, ground_id, || {
+    refractive_index(Some(wavelength_nm), mode)
+});
+// 也可以直接提供自定义固定折射率：
+let position = take_photon(&scene, ray, prism_id, ground_id, || Some(1.52));
+```
 
 ## 运行
 
@@ -104,7 +119,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-当前 93 项测试通过，严格 Clippy 通过。新增测试覆盖未指定波长时的默认玻璃折射率、Cauchy 单位换算、可见光区间折射率单调性、非法波长与溢出、两种波长通过双界面后的已知落点，以及传入光子追踪的非法波长。三波长测试检查共享空间采样、完整 XYZ 能量守恒、采样数归一化、丢失通量不重分配、各波长结果与独立单波长追踪一致，以及图像分布不同且可复现。采样测试逐格检查每层恰有一个点、点不越出所属层、两轴随机偏移，以及固定种子下的发射位置和图像完全重复。增加采样数时检查总能量守恒与无玻璃图的噪声降低；两种光路通过同种子对照验证发射位置一致。其余测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。双线性测试覆盖已知小数位置的四点权重、像素中心、权重和、边缘与单像素尺寸、完整 XYZ 总能量守恒及遮挡边缘的平滑分配。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地；`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、编号与添加顺序。
+当前 95 项测试通过，严格 Clippy 通过。测试覆盖固定模式忽略波长、色散模式要求有效波长、闭包只求值一次并复用于两个界面、闭包返回非法折射率时拒绝追踪、Cauchy 单位换算、可见光区间折射率单调性、非法波长与溢出、两种波长通过双界面后的已知落点，以及传入光子追踪的非法波长。三波长测试检查共享空间采样、完整 XYZ 能量守恒、采样数归一化、丢失通量不重分配、各波长结果与独立单波长追踪一致，以及图像分布不同且可复现。采样测试逐格检查每层恰有一个点、点不越出所属层、两轴随机偏移，以及固定种子下的发射位置和图像完全重复。增加采样数时检查总能量守恒与无玻璃图的噪声降低；两种光路通过同种子对照验证发射位置一致。其余测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。双线性测试覆盖已知小数位置的四点权重、像素中心、权重和、边缘与单像素尺寸、完整 XYZ 总能量守恒及遮挡边缘的平滑分配。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地；`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、编号与添加顺序。
 
 7 项三棱镜测试覆盖 8 个面的已知交点和朝外单位法线、最近面选择、棱边命中、内外求交、自相交与非有限光线；场景测试验证同一集合中不同物体的求交，以及改变添加顺序后仍选择最近交点。
 
@@ -124,7 +139,8 @@ PNG 读回测试在独立临时目录中保存一张 3×2 小图，再解码检�
 - `src/object.rs`：返回 `Option<Hit>` 的统一求交接口。
 - `src/triangle.rs`：单三角形、几何法线、Möller–Trumbore 求交及测试。
 - `src/prism.rs`：固定三棱镜的顶点与面定义、最近交点查询及测试。
-- `src/scene.rs`：画面参数、物体集合、物体编号、最近交点、Snell 折射、Cauchy 色散与接收可选波长的 `take_photon` 双界面追踪。
+- `src/iormode.rs`：固定折射率 `Constant` 与 Cauchy 色散 `Dispersion` 模式。
+- `src/scene.rs`：画面参数、物体集合、物体编号、最近交点、Snell 折射、Cauchy 色散与接收折射率闭包的 `take_photon` 双界面追踪。
 - `src/lib.rs`：导出现有模块，供主程序和测试复用。
 - `src/main.rs`：搭建玻璃与无玻璃对照场景，保存两张基准灰度图和三张波长落点调试图。
 - `examples/refract_ray.rs`：单条光线进入三棱镜、内部传播、出射及落地的顺序示例。
@@ -144,6 +160,6 @@ XYZ 转换使用 D65 白点约定，参考白的 Y = 1。矩阵来自 [W3C CSS C
 - 固定折射率对照使用 `1.52`，三波长批量调试使用 Cauchy 色散和等权离散分量。各波长图仍采用 D65 参考白缩放以显示落点密度，尚未按真实光谱颜色匹配函数着色，也未进行连续光谱积分。
 - `take_photon` 最多经过两个玻璃界面；全反射直接终止，不继续内部反射。未计算 Fresnel 反射损失和吸收；超出接收区域的落点不写入图像。
 - 当前光源高度、方向、发射区域和接收区域固定。分层随机采样与双线性 splat 减轻周期性条纹，但有限采样仍产生颗粒噪声，可增加 `samples_per_pixel_axis` 来降低噪声；较亮落点还可能被显示范围裁剪，没有按每张图的最大值自动归一化。
-- 下一阶段可继续 Day 4 的统一固定折射率/色散模式参数，随后进入 Day 5 的可追溯 CIE/D65 数据和真实光谱颜色积分。
+- 下一阶段可将 Day 4 的 `IorMode` 接入批量渲染入口，统一切换固定折射率/色散模式，随后进入 Day 5 的可追溯 CIE/D65 数据和真实光谱颜色积分。
 
 使用 `nalgebra` 进行数学计算，`image` 编解码 PNG，`rand` 提供固定种子的格内随机偏移。`Cargo.lock` 随项目提交；`.gitignore` 仅放行 `output/test.png`、`output/ground_hits.png`、`output/no_prism.png`、`output/refracted_hits.png` 和三张 `output/wavelength_*nm.png` 阶段示例，编译目录 `target/` 和其他生成文件继续忽略。运行默认命令会更新 Day 3 的两张对照图及 Day 4 的三张波长落点图。
