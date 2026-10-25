@@ -61,6 +61,7 @@ pub fn render_ground_hits(
 /// 独立完成分层随机发射、空间通量归一化和双线性 splat，不生成逐波长灰度图。
 /// D65 使用同一个 k；梯形积分两个端点取半宽度，丢失通量不重新分配。
 /// 每条空间光线只查询一次首次交点；直接落地时将完整光谱合成后只 splat 一次。
+/// Constant 的玻璃路径也只追踪和 splat 一次，Dispersion 才逐波长继续追踪。
 pub fn render_spectral_caustics(
     scene: &Scene,
     prism_id: usize,
@@ -107,12 +108,15 @@ pub fn render_spectral_caustics(
     });
     // 归一化只取决于完整发射光谱，在追踪/丢弃光子之前计算。
     let k = d65_normalization(&samples).ok_or("D65 光谱归一化失败")?;
-    // 每项缓存 (玻璃折射率, 单条光线的 XYZ)，不在追踪内重复查表或计算 Cauchy。
-    let mut contributions = [(0.0, Vector3::zeros()); 41];
-    for ((wavelength_nm, delta_lambda_nm), contribution) in
-        samples.into_iter().zip(&mut contributions)
-    {
-        let glass_ior = refractive_index(Some(wavelength_nm), mode).ok_or("折射率计算失败")?;
+    // 固定模式只计算一次折射率；色散模式没有统一的玻璃折射率。
+    let constant_ior = match mode {
+        IorMode::Constant => Some(refractive_index(None, mode).ok_or("折射率计算失败")?),
+        IorMode::Dispersion => None,
+    };
+    // 完整白光只在渲染前积分一次；仅色散模式缓存逐波长的 (折射率, XYZ)。
+    let mut direct_xyz = Vector3::zeros();
+    let mut contributions = Vec::new();
+    for (wavelength_nm, delta_lambda_nm) in samples {
         let spectral_xyz = wavelength_to_xyz(
             wavelength_nm,
             d65_spd(wavelength_nm).ok_or("D65 光谱查询失败")?,
@@ -122,12 +126,13 @@ pub fn render_spectral_caustics(
         .ok_or("波长到 XYZ 转换失败")?;
 
         // spectral_xyz 已含 Δλ，不再除以 41；空间权重只按发射数和像素面积归一化。
-        *contribution = (glass_ior, spectral_xyz * spatial_weight);
+        let xyz = spectral_xyz * spatial_weight;
+        direct_xyz += xyz;
+        if mode == IorMode::Dispersion {
+            let glass_ior = refractive_index(Some(wavelength_nm), mode).ok_or("折射率计算失败")?;
+            contributions.push((glass_ior, xyz));
+        }
     }
-    // 直射路径与波长无关，提前求和保留所有 Δλ 和空间通量权重。
-    let direct_xyz = contributions
-        .iter()
-        .fold(Vector3::zeros(), |sum, &(_, xyz)| sum + xyz);
 
     let mut framebuffer = Framebuffer::new(scene.width, scene.height);
     let mut rng = StdRng::seed_from_u64(SAMPLING_SEED);
@@ -153,6 +158,16 @@ pub fn render_spectral_caustics(
                 continue;
             }
             if first_hit.object_id != Some(prism_id) {
+                continue;
+            }
+
+            if let Some(glass_ior) = constant_ior {
+                // 固定折射率下所有波长光路相同，完整白光沿这一条路径落地。
+                if let Some(position) =
+                    take_photon_from_hit(scene, ray, first_hit, prism_id, ground_id, glass_ior)
+                {
+                    splat_spectral_xyz(&mut framebuffer, position, direct_xyz)?;
+                }
                 continue;
             }
 
@@ -192,6 +207,7 @@ fn splat_spectral_xyz(
 /// 统一追踪固定折射率或 Cauchy 色散，按波长数组顺序返回 N 张灰度落点图。
 /// 固定模式传 [None] 可生成一张图；色散模式要求每项均为 Some(有效波长 nm)。
 /// 同一条空间光线复用于全部波长，每张图分配 1/N 通量；灰色不代表真实光谱颜色。
+/// Constant 只追踪一次路径，再把同一落点交给 N 张图。
 pub fn render_refracted_ground_hits<const N: usize>(
     scene: &Scene,
     prism_id: usize,
@@ -203,9 +219,14 @@ pub fn render_refracted_ground_hits<const N: usize>(
     if prism_id == ground_id || prism_id >= scene.objects.len() {
         return Err("三棱镜编号无效或与地面编号相同".into());
     }
-    if wavelengths_nm
-        .iter()
-        .any(|&wavelength_nm| refractive_index(wavelength_nm, mode).is_none())
+    let constant_ior = match mode {
+        IorMode::Constant => Some(refractive_index(None, mode).ok_or("折射率计算失败")?),
+        IorMode::Dispersion => None,
+    };
+    if mode == IorMode::Dispersion
+        && wavelengths_nm
+            .iter()
+            .any(|&wavelength_nm| refractive_index(wavelength_nm, mode).is_none())
     {
         return Err("色散模式要求每项波长均为正有限值，且折射率计算不能溢出".into());
     }
@@ -219,6 +240,11 @@ pub fn render_refracted_ground_hits<const N: usize>(
         }
         if first_hit.object_id != Some(prism_id) {
             return [None; N];
+        }
+        if let Some(glass_ior) = constant_ior {
+            let position =
+                take_photon_from_hit(scene, ray, first_hit, prism_id, ground_id, glass_ior);
+            return [position; N];
         }
         wavelengths_nm.map(|wavelength_nm| {
             let glass_ior = refractive_index(wavelength_nm, mode)?;
@@ -327,23 +353,22 @@ fn render_landing_point_sets<const N: usize>(
 mod tests {
     use super::*;
     use crate::{ground::Ground, prism::Prism, render::save_png, scene::take_photon};
+    use std::{cell::Cell, rc::Rc};
+
+    struct CountedGround {
+        ground: Ground,
+        calls: Rc<Cell<usize>>,
+    }
+
+    impl crate::object::Hittable for CountedGround {
+        fn intersect(&self, ray: &Ray) -> Option<crate::hit::Hit> {
+            self.calls.set(self.calls.get() + 1);
+            self.ground.intersect(ray)
+        }
+    }
 
     #[test]
     fn direct_blocked_and_missed_rays_query_the_scene_once_per_spatial_sample() {
-        use std::{cell::Cell, rc::Rc};
-
-        struct CountedGround {
-            ground: Ground,
-            calls: Rc<Cell<usize>>,
-        }
-
-        impl crate::object::Hittable for CountedGround {
-            fn intersect(&self, ray: &Ray) -> Option<crate::hit::Hit> {
-                self.calls.set(self.calls.get() + 1);
-                self.ground.intersect(ray)
-            }
-        }
-
         // 三种场景分别覆盖直接落地、其他物体遮挡、所有物体均未命中。
         for case in 0..3 {
             let mut scene = Scene::new(6, 4);
@@ -392,6 +417,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn constant_spectral_and_debug_renders_trace_one_path_per_spatial_sample() {
+        let mut scene = Scene::new(24, 12);
+        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let calls = Rc::new(Cell::new(0));
+        let ground_id = scene.add(Box::new(CountedGround {
+            ground: Ground::new(0.0).unwrap(),
+            calls: calls.clone(),
+        }));
+        // 独立的单路径参考：每条空间光线只调用一次 take_photon。
+        let reference = render_landing_points(&scene, ground_id, 2, |ray| {
+            take_photon(&scene, ray, prism_id, ground_id, || Some(1.52))
+        })
+        .unwrap();
+        let single_path_calls = calls.get();
+        assert!(single_path_calls > scene.width * scene.height * 4);
+
+        calls.set(0);
+        let image =
+            render_spectral_caustics(&scene, prism_id, ground_id, 2, IorMode::Constant).unwrap();
+        assert_eq!(calls.get(), single_path_calls);
+        let white_xyz = Vector3::new(0.9501416822353593, 1.0, 1.087976622255359);
+        for (pixel, gray_pixel) in image.pixels.iter().zip(reference.pixels) {
+            assert!((pixel - white_xyz * gray_pixel.y).norm() < 1e-12);
+        }
+        let repeated =
+            render_spectral_caustics(&scene, prism_id, ground_id, 2, IorMode::Constant).unwrap();
+        assert_eq!(image.pixels, repeated.pixels);
+
+        calls.set(0);
+        let images = render_refracted_ground_hits(
+            &scene,
+            prism_id,
+            ground_id,
+            2,
+            [None, Some(450.0), Some(f64::NAN)],
+            IorMode::Constant,
+        )
+        .unwrap();
+        assert_eq!(calls.get(), single_path_calls);
+        assert_eq!(images[0].pixels, images[1].pixels);
+        assert_eq!(images[1].pixels, images[2].pixels);
+
+        calls.set(0);
+        render_spectral_caustics(&scene, prism_id, ground_id, 2, IorMode::Dispersion).unwrap();
+        assert!(calls.get() > single_path_calls);
     }
 
     #[test]
@@ -444,29 +517,31 @@ mod tests {
             .map(|nm| (nm as f64, if nm == 380 || nm == 780 { 5.0 } else { 10.0 }))
             .collect();
         let k = d65_normalization(&samples).unwrap();
-        let actual =
-            render_spectral_caustics(&scene, prism_id, ground_id, 2, IorMode::Dispersion).unwrap();
-        let mut expected = vec![Vector3::zeros(); scene.width * scene.height];
-        let mut lost_flux = false;
-        for (nm, width_nm) in samples {
-            // 保留每个波长独立首次求交的旧路径，检查合并直射光后 XYZ 仍一致。
-            let single = render_landing_points(&scene, ground_id, 2, |ray| {
-                take_photon(&scene, ray, prism_id, ground_id, || {
-                    refractive_index(Some(nm), IorMode::Dispersion)
+        for mode in [IorMode::Constant, IorMode::Dispersion] {
+            let actual = render_spectral_caustics(&scene, prism_id, ground_id, 2, mode).unwrap();
+            let mut expected = vec![Vector3::zeros(); scene.width * scene.height];
+            let mut lost_flux = false;
+            for &(nm, width_nm) in &samples {
+                // 保留逐波长独立追踪的旧路径，检查合并直射和固定光路后 XYZ 仍一致。
+                let single = render_landing_points(&scene, ground_id, 2, |ray| {
+                    take_photon(&scene, ray, prism_id, ground_id, || {
+                        refractive_index(Some(nm), mode)
+                    })
                 })
-            })
-            .unwrap();
-            let emitted_y = 0.5 * (scene.width * scene.height) as f64;
-            let landed_y: f64 = single.pixels.iter().map(|pixel| pixel.y).sum();
-            lost_flux |= landed_y < emitted_y - 1e-6;
-            let spectral_xyz = wavelength_to_xyz(nm, d65_spd(nm).unwrap(), width_nm, k).unwrap();
-            for (sum, pixel) in expected.iter_mut().zip(single.pixels) {
-                *sum += spectral_xyz * pixel.y;
+                .unwrap();
+                let emitted_y = 0.5 * (scene.width * scene.height) as f64;
+                let landed_y: f64 = single.pixels.iter().map(|pixel| pixel.y).sum();
+                lost_flux |= landed_y < emitted_y - 1e-6;
+                let spectral_xyz =
+                    wavelength_to_xyz(nm, d65_spd(nm).unwrap(), width_nm, k).unwrap();
+                for (sum, pixel) in expected.iter_mut().zip(single.pixels) {
+                    *sum += spectral_xyz * pixel.y;
+                }
             }
-        }
-        assert!(lost_flux, "测试场景必须有未落地或落在接收区外的通量");
-        for (pixel, reference) in actual.pixels.iter().zip(expected) {
-            assert!((pixel - reference).norm() < 1e-12);
+            assert!(lost_flux, "测试场景必须有未落地或落在接收区外的通量");
+            for (pixel, reference) in actual.pixels.iter().zip(expected) {
+                assert!((pixel - reference).norm() < 1e-12);
+            }
         }
     }
 
