@@ -5,7 +5,7 @@ use crate::{
     framebuffer::Framebuffer,
     iormode::IorMode,
     ray::Ray,
-    scene::{Scene, refractive_index, take_photon},
+    scene::{Scene, refractive_index, take_photon_from_hit},
     spectrum::{d65_normalization, d65_spd, wavelength_to_xyz},
     utils::bilinear_weights,
 };
@@ -60,6 +60,7 @@ pub fn render_ground_hits(
 /// 追踪 380–780 nm、每 10 nm 一点的光线，落地后直接累积到同一张线性 XYZ 图。
 /// 独立完成分层随机发射、空间通量归一化和双线性 splat，不生成逐波长灰度图。
 /// D65 使用同一个 k；梯形积分两个端点取半宽度，丢失通量不重新分配。
+/// 每条空间光线只查询一次首次交点；直接落地时将完整光谱合成后只 splat 一次。
 pub fn render_spectral_caustics(
     scene: &Scene,
     prism_id: usize,
@@ -123,6 +124,10 @@ pub fn render_spectral_caustics(
         // spectral_xyz 已含 Δλ，不再除以 41；空间权重只按发射数和像素面积归一化。
         *contribution = (glass_ior, spectral_xyz * spatial_weight);
     }
+    // 直射路径与波长无关，提前求和保留所有 Δλ 和空间通量权重。
+    let direct_xyz = contributions
+        .iter()
+        .fold(Vector3::zeros(), |sum, &(_, xyz)| sum + xyz);
 
     let mut framebuffer = Framebuffer::new(scene.width, scene.height);
     let mut rng = StdRng::seed_from_u64(SAMPLING_SEED);
@@ -140,27 +145,48 @@ pub fn render_spectral_caustics(
             )
             .ok_or("平行光线构造失败")?;
 
+            let Some(first_hit) = scene.intersect(&ray) else {
+                continue;
+            };
+            if first_hit.object_id == Some(ground_id) {
+                splat_spectral_xyz(&mut framebuffer, first_hit.coords, direct_xyz)?;
+                continue;
+            }
+            if first_hit.object_id != Some(prism_id) {
+                continue;
+            }
+
             for &(glass_ior, xyz) in &contributions {
                 let Some(position) =
-                    take_photon(scene, ray, prism_id, ground_id, || Some(glass_ior))
+                    take_photon_from_hit(scene, ray, first_hit, prism_id, ground_id, glass_ior)
                 else {
                     continue;
                 };
-                let Some((x, y)) = ground_to_pixel(position, scene.width, scene.height) else {
-                    continue;
-                };
-                let neighbors = bilinear_weights(x, y, scene.width, scene.height)
-                    .ok_or("双线性权重计算失败")?;
-                // 落地即把当前波长的 XYZ 分配到四邻域；丢失光子不重新分配通量。
-                for (pixel_x, pixel_y, weight) in neighbors {
-                    if weight > 0.0 && !framebuffer.accumulate(pixel_x, pixel_y, xyz * weight) {
-                        return Err("光谱 XYZ 像素累积失败".into());
-                    }
-                }
+                // 落地即累积；丢失光子不重新分配通量。
+                splat_spectral_xyz(&mut framebuffer, position, xyz)?;
             }
         }
     }
     Ok(framebuffer)
+}
+
+/// 把一份线性 XYZ 按地面落点分配到四邻域，接收区域外的通量直接丢弃。
+fn splat_spectral_xyz(
+    framebuffer: &mut Framebuffer,
+    position: Vector3<f64>,
+    xyz: Vector3<f64>,
+) -> Result<(), Box<dyn Error>> {
+    let Some((x, y)) = ground_to_pixel(position, framebuffer.width, framebuffer.height) else {
+        return Ok(());
+    };
+    let neighbors = bilinear_weights(x, y, framebuffer.width, framebuffer.height)
+        .ok_or("双线性权重计算失败")?;
+    for (pixel_x, pixel_y, weight) in neighbors {
+        if weight > 0.0 && !framebuffer.accumulate(pixel_x, pixel_y, xyz * weight) {
+            return Err("光谱 XYZ 像素累积失败".into());
+        }
+    }
+    Ok(())
 }
 
 /// 统一追踪固定折射率或 Cauchy 色散，按波长数组顺序返回 N 张灰度落点图。
@@ -184,10 +210,19 @@ pub fn render_refracted_ground_hits<const N: usize>(
         return Err("色散模式要求每项波长均为正有限值，且折射率计算不能溢出".into());
     }
     render_landing_point_sets(scene, ground_id, samples_per_pixel_axis, |ray| {
+        let Some(first_hit) = scene.intersect(&ray) else {
+            return [None; N];
+        };
+        // N 张调试图复用直射落点，各自仍保留 1/N 通量。
+        if first_hit.object_id == Some(ground_id) {
+            return [Some(first_hit.coords); N];
+        }
+        if first_hit.object_id != Some(prism_id) {
+            return [None; N];
+        }
         wavelengths_nm.map(|wavelength_nm| {
-            take_photon(scene, ray, prism_id, ground_id, || {
-                refractive_index(wavelength_nm, mode)
-            })
+            let glass_ior = refractive_index(wavelength_nm, mode)?;
+            take_photon_from_hit(scene, ray, first_hit, prism_id, ground_id, glass_ior)
         })
     })
 }
@@ -291,7 +326,73 @@ fn render_landing_point_sets<const N: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ground::Ground, prism::Prism, render::save_png};
+    use crate::{ground::Ground, prism::Prism, render::save_png, scene::take_photon};
+
+    #[test]
+    fn direct_blocked_and_missed_rays_query_the_scene_once_per_spatial_sample() {
+        use std::{cell::Cell, rc::Rc};
+
+        struct CountedGround {
+            ground: Ground,
+            calls: Rc<Cell<usize>>,
+        }
+
+        impl crate::object::Hittable for CountedGround {
+            fn intersect(&self, ray: &Ray) -> Option<crate::hit::Hit> {
+                self.calls.set(self.calls.get() + 1);
+                self.ground.intersect(ray)
+            }
+        }
+
+        // 三种场景分别覆盖直接落地、其他物体遮挡、所有物体均未命中。
+        for case in 0..3 {
+            let mut scene = Scene::new(6, 4);
+            let prism_id = if case == 2 {
+                scene.add(Box::new(Ground::new(4.0).unwrap()))
+            } else {
+                scene.add(Box::new(Prism::new().unwrap()))
+            };
+            let calls = Rc::new(Cell::new(0));
+            let ground_id = scene.add(Box::new(CountedGround {
+                ground: Ground::new(if case == 2 { 5.0 } else { 2.0 }).unwrap(),
+                calls: calls.clone(),
+            }));
+            if case == 1 {
+                scene.add(Box::new(Ground::new(2.5).unwrap()));
+            }
+            let samples_per_pixel_axis = 2;
+            let spatial_ray_count =
+                scene.width * scene.height * samples_per_pixel_axis * samples_per_pixel_axis;
+            for mode in [IorMode::Constant, IorMode::Dispersion] {
+                calls.set(0);
+                let image = render_spectral_caustics(
+                    &scene,
+                    prism_id,
+                    ground_id,
+                    samples_per_pixel_axis,
+                    mode,
+                )
+                .unwrap();
+                assert_eq!(calls.get(), spatial_ray_count);
+                assert_eq!(image.pixels.iter().any(|xyz| xyz.y > 0.0), case == 0);
+
+                calls.set(0);
+                let images = render_refracted_ground_hits(
+                    &scene,
+                    prism_id,
+                    ground_id,
+                    samples_per_pixel_axis,
+                    DEBUG_WAVELENGTHS_NM.map(Some),
+                    mode,
+                )
+                .unwrap();
+                assert_eq!(calls.get(), spatial_ray_count);
+                for image in images {
+                    assert_eq!(image.pixels.iter().any(|xyz| xyz.y > 0.0), case == 0);
+                }
+            }
+        }
+    }
 
     #[test]
     fn spectral_unblocked_white_preserves_xyz_flux_across_spatial_sample_counts() {
@@ -348,15 +449,12 @@ mod tests {
         let mut expected = vec![Vector3::zeros(); scene.width * scene.height];
         let mut lost_flux = false;
         for (nm, width_nm) in samples {
-            // N = 1 的独立灰度图记录空间通量，作为直接 XYZ 累积的对照。
-            let [single] = render_refracted_ground_hits(
-                &scene,
-                prism_id,
-                ground_id,
-                2,
-                [Some(nm)],
-                IorMode::Dispersion,
-            )
+            // 保留每个波长独立首次求交的旧路径，检查合并直射光后 XYZ 仍一致。
+            let single = render_landing_points(&scene, ground_id, 2, |ray| {
+                take_photon(&scene, ray, prism_id, ground_id, || {
+                    refractive_index(Some(nm), IorMode::Dispersion)
+                })
+            })
             .unwrap();
             let emitted_y = 0.5 * (scene.width * scene.height) as f64;
             let landed_y: f64 = single.pixels.iter().map(|pixel| pixel.y).sum();

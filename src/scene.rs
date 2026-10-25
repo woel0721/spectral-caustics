@@ -114,9 +114,6 @@ pub fn take_photon(
     ground_id: usize,
     glass_ior: impl FnOnce() -> Option<f64>,
 ) -> Option<Vector3<f64>> {
-    const AIR_IOR: f64 = 1.0;
-    const EPSILON: f64 = 1e-5;
-
     let glass_ior = glass_ior()?;
     if !glass_ior.is_finite() || glass_ior <= 0.0 {
         return None;
@@ -127,6 +124,22 @@ pub fn take_photon(
     }
 
     let first_hit = scene.intersect(&ray)?;
+    take_photon_from_hit(scene, ray, first_hit, prism_id, ground_id, glass_ior)
+}
+
+/// 从已知首次交点继续追踪，供批量波长追踪复用同一份求交结果。
+/// 调用方须校验物体编号和折射率，并传入同一 ray 在该场景中的最近交点。
+pub(crate) fn take_photon_from_hit(
+    scene: &Scene,
+    ray: Ray,
+    first_hit: crate::hit::Hit,
+    prism_id: usize,
+    ground_id: usize,
+    glass_ior: f64,
+) -> Option<Vector3<f64>> {
+    const AIR_IOR: f64 = 1.0;
+    const EPSILON: f64 = 1e-5;
+
     // 没有经过玻璃，直接落地。
     if first_hit.object_id == Some(ground_id) {
         return Some(first_hit.coords);
