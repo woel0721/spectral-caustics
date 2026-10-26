@@ -11,7 +11,9 @@ use crate::{
 };
 use nalgebra::Vector3;
 use rand::{Rng, SeedableRng, rngs::StdRng};
-use std::error::Error;
+use rand_chacha::ChaCha12Rng;
+use rayon::prelude::*;
+use std::{error::Error, ops::Range};
 
 // 第一张验证图使用固定的 4×4 米接收区域与同样大小的发射区域。
 const GROUND_MIN: f64 = -2.0;
@@ -20,6 +22,8 @@ const LIGHT_HEIGHT: f64 = 3.0;
 const UNBLOCKED_BRIGHTNESS: f64 = 0.5;
 // 每次渲染都从同一种子重新开始，两种场景使用相同的发射位置。
 const SAMPLING_SEED: u64 = 42;
+// 分块与线程数无关，固定合并顺序；最多保留 16 张局部 XYZ 图。
+const MAX_SPECTRAL_BLOCKS: usize = 16;
 
 /// 三张落点调试图对应的波长，单位为 nm；每个波长分配 1/3 总通量。
 pub const DEBUG_WAVELENGTHS_NM: [f64; 3] = [450.0, 550.0, 650.0];
@@ -62,6 +66,7 @@ pub fn render_ground_hits(
 /// D65 使用同一个 k；梯形积分两个端点取半宽度，丢失通量不重新分配。
 /// 每条空间光线只查询一次首次交点；直接落地时将完整光谱合成后只 splat 一次。
 /// Constant 的玻璃路径也只追踪和 splat 一次，Dispersion 才逐波长继续追踪。
+/// Rayon 并行追踪固定采样块，各块使用独立缓冲，全部完成后按块顺序合并 XYZ。
 pub fn render_spectral_caustics(
     scene: &Scene,
     prism_id: usize,
@@ -134,55 +139,89 @@ pub fn render_spectral_caustics(
         }
     }
 
-    let mut framebuffer = Framebuffer::new(scene.width, scene.height);
-    let mut rng = StdRng::seed_from_u64(SAMPLING_SEED);
-    for sample_y in 0..samples_y {
-        for sample_x in 0..samples_x {
-            // 同一空间光线的所有波长共享发射位置，每次仅消耗两个随机数。
-            let origin_x =
-                GROUND_MIN + (sample_x as f64 + rng.random::<f64>()) / samples_x as f64 * span;
-            let origin_y =
-                GROUND_MIN + (sample_y as f64 + rng.random::<f64>()) / samples_y as f64 * span;
-            let ray = Ray::new(
-                Vector3::new(origin_x, origin_y, LIGHT_HEIGHT),
-                Vector3::new(0.0, 0.0, -1.0),
-                0.0,
-            )
-            .ok_or("平行光线构造失败")?;
+    let partials: Vec<Result<Framebuffer, &'static str>> =
+        spectral_sample_blocks(samples_x, samples_y)
+            .into_par_iter()
+            .map(|(rows, mut rng)| {
+                let mut framebuffer = Framebuffer::new(scene.width, scene.height);
+                for sample_y in rows {
+                    for sample_x in 0..samples_x {
+                        // 同一空间光线的所有波长共享发射位置，每次仅消耗两个随机数。
+                        let origin_x = GROUND_MIN
+                            + (sample_x as f64 + rng.random::<f64>()) / samples_x as f64 * span;
+                        let origin_y = GROUND_MIN
+                            + (sample_y as f64 + rng.random::<f64>()) / samples_y as f64 * span;
+                        let ray = Ray::new(
+                            Vector3::new(origin_x, origin_y, LIGHT_HEIGHT),
+                            Vector3::new(0.0, 0.0, -1.0),
+                            0.0,
+                        )
+                        .ok_or("平行光线构造失败")?;
 
-            let Some(first_hit) = scene.intersect(&ray) else {
-                continue;
-            };
-            if first_hit.object_id == Some(ground_id) {
-                splat_spectral_xyz(&mut framebuffer, first_hit.coords, direct_xyz)?;
-                continue;
-            }
-            if first_hit.object_id != Some(prism_id) {
-                continue;
-            }
+                        let Some(first_hit) = scene.intersect(&ray) else {
+                            continue;
+                        };
+                        if first_hit.object_id == Some(ground_id) {
+                            splat_spectral_xyz(&mut framebuffer, first_hit.coords, direct_xyz)?;
+                            continue;
+                        }
+                        if first_hit.object_id != Some(prism_id) {
+                            continue;
+                        }
 
-            if let Some(glass_ior) = constant_ior {
-                // 固定折射率下所有波长光路相同，完整白光沿这一条路径落地。
-                if let Some(position) =
-                    take_photon_from_hit(scene, ray, first_hit, prism_id, ground_id, glass_ior)
-                {
-                    splat_spectral_xyz(&mut framebuffer, position, direct_xyz)?;
+                        if let Some(glass_ior) = constant_ior {
+                            // 固定折射率下所有波长光路相同，完整白光沿这一条路径落地。
+                            if let Some(position) = take_photon_from_hit(
+                                scene, ray, first_hit, prism_id, ground_id, glass_ior,
+                            ) {
+                                splat_spectral_xyz(&mut framebuffer, position, direct_xyz)?;
+                            }
+                            continue;
+                        }
+
+                        for &(glass_ior, xyz) in &contributions {
+                            let Some(position) = take_photon_from_hit(
+                                scene, ray, first_hit, prism_id, ground_id, glass_ior,
+                            ) else {
+                                continue;
+                            };
+                            // 落地即累积；丢失光子不重新分配通量。
+                            splat_spectral_xyz(&mut framebuffer, position, xyz)?;
+                        }
+                    }
                 }
-                continue;
-            }
+                Ok(framebuffer)
+            })
+            .collect();
 
-            for &(glass_ior, xyz) in &contributions {
-                let Some(position) =
-                    take_photon_from_hit(scene, ray, first_hit, prism_id, ground_id, glass_ior)
-                else {
-                    continue;
-                };
-                // 落地即累积；丢失光子不重新分配通量。
-                splat_spectral_xyz(&mut framebuffer, position, xyz)?;
+    // Vec 按输入块的顺序收集。所有任务完成后再依次合并，不按线程完成顺序归约。
+    let mut framebuffer = Framebuffer::new(scene.width, scene.height);
+    for partial in partials {
+        for (index, xyz) in partial?.pixels.into_iter().enumerate() {
+            // 各块已经使用全图 ray_count 归一化，这里直接相加，不除以任务或线程数。
+            if !framebuffer.accumulate(index % scene.width, index / scene.width, xyz) {
+                return Err("并行光谱 XYZ 合并失败".into());
             }
         }
     }
     Ok(framebuffer)
+}
+
+/// 直接定位每块在原有随机序列中的起点，不遍历或生成块之前的随机数。
+/// 当前锁定的 rand 0.9.5 的 StdRng 使用 ChaCha12；显式 RNG 提供 set_word_pos。
+fn spectral_sample_blocks(samples_x: usize, samples_y: usize) -> Vec<(Range<usize>, ChaCha12Rng)> {
+    let rows_per_block = samples_y.div_ceil(MAX_SPECTRAL_BLOCKS);
+    let mut blocks = Vec::new();
+    for start in (0..samples_y).step_by(rows_per_block) {
+        let end = start.saturating_add(rows_per_block).min(samples_y);
+        let mut rng = ChaCha12Rng::seed_from_u64(SAMPLING_SEED);
+        // 一个 f64 消耗两个 u32 word，每条光线的 X/Y 两个偏移合计消耗四个。
+        // u128 避免大采样数乘以 4 时在 usize 中溢出。
+        let first_sample = start as u128 * samples_x as u128;
+        rng.set_word_pos(first_sample * 4);
+        blocks.push((start..end, rng));
+    }
+    blocks
 }
 
 /// 把一份线性 XYZ 按地面落点分配到四邻域，接收区域外的通量直接丢弃。
@@ -190,7 +229,7 @@ fn splat_spectral_xyz(
     framebuffer: &mut Framebuffer,
     position: Vector3<f64>,
     xyz: Vector3<f64>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), &'static str> {
     let Some((x, y)) = ground_to_pixel(position, framebuffer.width, framebuffer.height) else {
         return Ok(());
     };
@@ -198,7 +237,7 @@ fn splat_spectral_xyz(
         .ok_or("双线性权重计算失败")?;
     for (pixel_x, pixel_y, weight) in neighbors {
         if weight > 0.0 && !framebuffer.accumulate(pixel_x, pixel_y, xyz * weight) {
-            return Err("光谱 XYZ 像素累积失败".into());
+            return Err("光谱 XYZ 像素累积失败");
         }
     }
     Ok(())
@@ -353,17 +392,68 @@ fn render_landing_point_sets<const N: usize>(
 mod tests {
     use super::*;
     use crate::{ground::Ground, prism::Prism, render::save_png, scene::take_photon};
-    use std::{cell::Cell, rc::Rc};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     struct CountedGround {
         ground: Ground,
-        calls: Rc<Cell<usize>>,
+        calls: Arc<AtomicUsize>,
     }
 
     impl crate::object::Hittable for CountedGround {
         fn intersect(&self, ray: &Ray) -> Option<crate::hit::Hit> {
-            self.calls.set(self.calls.get() + 1);
+            self.calls.fetch_add(1, Ordering::Relaxed);
             self.ground.intersect(ray)
+        }
+    }
+
+    #[test]
+    fn spectral_blocks_cover_every_row_and_replay_the_original_random_sequence() {
+        for (samples_x, samples_y) in [(1, 1), (7, 5), (3, 17), (5, 33)] {
+            let blocks = spectral_sample_blocks(samples_x, samples_y);
+            assert!(blocks.len() <= MAX_SPECTRAL_BLOCKS);
+            let mut serial_rng = StdRng::seed_from_u64(SAMPLING_SEED);
+            let mut next_row = 0;
+            for (rows, mut rng) in blocks {
+                assert_eq!(rows.start, next_row);
+                assert!(rows.end > rows.start);
+                next_row = rows.end;
+                for _ in rows {
+                    for _ in 0..samples_x {
+                        assert_eq!(rng.random::<f64>(), serial_rng.random::<f64>());
+                        assert_eq!(rng.random::<f64>(), serial_rng.random::<f64>());
+                    }
+                }
+            }
+            assert_eq!(next_row, samples_y);
+        }
+    }
+
+    #[test]
+    fn spectral_xyz_is_identical_across_rayon_thread_counts_and_repeated_runs() {
+        let mut scene = Scene::new(19, 17);
+        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        let serial_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        for mode in [IorMode::Constant, IorMode::Dispersion] {
+            let reference = serial_pool.install(|| {
+                render_spectral_caustics(&scene, prism_id, ground_id, 2, mode).unwrap()
+            });
+            for threads in [2, 4, 2] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let image = pool.install(|| {
+                    render_spectral_caustics(&scene, prism_id, ground_id, 2, mode).unwrap()
+                });
+                assert_eq!(image.pixels, reference.pixels);
+            }
         }
     }
 
@@ -377,7 +467,7 @@ mod tests {
             } else {
                 scene.add(Box::new(Prism::new().unwrap()))
             };
-            let calls = Rc::new(Cell::new(0));
+            let calls = Arc::new(AtomicUsize::new(0));
             let ground_id = scene.add(Box::new(CountedGround {
                 ground: Ground::new(if case == 2 { 5.0 } else { 2.0 }).unwrap(),
                 calls: calls.clone(),
@@ -389,7 +479,7 @@ mod tests {
             let spatial_ray_count =
                 scene.width * scene.height * samples_per_pixel_axis * samples_per_pixel_axis;
             for mode in [IorMode::Constant, IorMode::Dispersion] {
-                calls.set(0);
+                calls.store(0, Ordering::Relaxed);
                 let image = render_spectral_caustics(
                     &scene,
                     prism_id,
@@ -398,10 +488,10 @@ mod tests {
                     mode,
                 )
                 .unwrap();
-                assert_eq!(calls.get(), spatial_ray_count);
+                assert_eq!(calls.load(Ordering::Relaxed), spatial_ray_count);
                 assert_eq!(image.pixels.iter().any(|xyz| xyz.y > 0.0), case == 0);
 
-                calls.set(0);
+                calls.store(0, Ordering::Relaxed);
                 let images = render_refracted_ground_hits(
                     &scene,
                     prism_id,
@@ -411,7 +501,7 @@ mod tests {
                     mode,
                 )
                 .unwrap();
-                assert_eq!(calls.get(), spatial_ray_count);
+                assert_eq!(calls.load(Ordering::Relaxed), spatial_ray_count);
                 for image in images {
                     assert_eq!(image.pixels.iter().any(|xyz| xyz.y > 0.0), case == 0);
                 }
@@ -423,7 +513,7 @@ mod tests {
     fn constant_spectral_and_debug_renders_trace_one_path_per_spatial_sample() {
         let mut scene = Scene::new(24, 12);
         let prism_id = scene.add(Box::new(Prism::new().unwrap()));
-        let calls = Rc::new(Cell::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
         let ground_id = scene.add(Box::new(CountedGround {
             ground: Ground::new(0.0).unwrap(),
             calls: calls.clone(),
@@ -433,13 +523,13 @@ mod tests {
             take_photon(&scene, ray, prism_id, ground_id, || Some(1.52))
         })
         .unwrap();
-        let single_path_calls = calls.get();
+        let single_path_calls = calls.load(Ordering::Relaxed);
         assert!(single_path_calls > scene.width * scene.height * 4);
 
-        calls.set(0);
+        calls.store(0, Ordering::Relaxed);
         let image =
             render_spectral_caustics(&scene, prism_id, ground_id, 2, IorMode::Constant).unwrap();
-        assert_eq!(calls.get(), single_path_calls);
+        assert_eq!(calls.load(Ordering::Relaxed), single_path_calls);
         let white_xyz = Vector3::new(0.9501416822353593, 1.0, 1.087976622255359);
         for (pixel, gray_pixel) in image.pixels.iter().zip(reference.pixels) {
             assert!((pixel - white_xyz * gray_pixel.y).norm() < 1e-12);
@@ -448,7 +538,7 @@ mod tests {
             render_spectral_caustics(&scene, prism_id, ground_id, 2, IorMode::Constant).unwrap();
         assert_eq!(image.pixels, repeated.pixels);
 
-        calls.set(0);
+        calls.store(0, Ordering::Relaxed);
         let images = render_refracted_ground_hits(
             &scene,
             prism_id,
@@ -458,13 +548,13 @@ mod tests {
             IorMode::Constant,
         )
         .unwrap();
-        assert_eq!(calls.get(), single_path_calls);
+        assert_eq!(calls.load(Ordering::Relaxed), single_path_calls);
         assert_eq!(images[0].pixels, images[1].pixels);
         assert_eq!(images[1].pixels, images[2].pixels);
 
-        calls.set(0);
+        calls.store(0, Ordering::Relaxed);
         render_spectral_caustics(&scene, prism_id, ground_id, 2, IorMode::Dispersion).unwrap();
-        assert!(calls.get() > single_path_calls);
+        assert!(calls.load(Ordering::Relaxed) > single_path_calls);
     }
 
     #[test]

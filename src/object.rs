@@ -2,8 +2,8 @@
 
 use crate::{hit::Hit, ray::Ray};
 
-/// 实现此 trait 的类型可以接受光线查询，并返回最近的有效交点。
-pub trait Hittable {
+/// 实现此 trait 的类型可以接受光线查询，并允许并行追踪时共享只读引用。
+pub trait Hittable: Send + Sync {
     /// 查找光线正向的最近几何交点。
     ///
     /// - ray 的方向应为单位向量，此时 t 的单位是米。
