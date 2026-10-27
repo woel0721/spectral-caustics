@@ -1,10 +1,97 @@
 //! 图像输出链路：XYZ -> 线性 sRGB -> 显示范围裁剪 -> sRGB8 -> PNG。
-//! 采用固定曝光 1.0，颜色计算与存储使用 f64，导出时才进行 8 位量化。
+//! Render 使用配置中的曝光，颜色计算与存储使用 f64，导出时才进行 8 位量化。
 
-use crate::framebuffer::Framebuffer;
+use crate::{
+    caustics, framebuffer::Framebuffer, iormode::IorMode, rendersetting::RenderSetting,
+    scene::Scene,
+};
 use image::{ImageFormat, Rgb, RgbImage};
 use nalgebra::{Matrix3, Vector3};
 use std::{error::Error, fs, path::Path};
+
+/// 实际运行的渲染器：保存已校验参数和可选的专用 Rayon 线程池。
+/// 场景与配置文件独立，渲染时只借用 Scene 中已建立的物体。
+pub struct Render {
+    settings: RenderSetting,
+    pool: Option<rayon::ThreadPool>,
+}
+
+impl Render {
+    pub fn new(settings: RenderSetting) -> Result<Self, Box<dyn Error>> {
+        settings.validate()?;
+        let pool = settings
+            .thread_count
+            .map(|count| rayon::ThreadPoolBuilder::new().num_threads(count).build())
+            .transpose()?;
+        Ok(Self { settings, pool })
+    }
+
+    pub fn settings(&self) -> &RenderSetting {
+        &self.settings
+    }
+
+    pub fn thread_count(&self) -> usize {
+        self.pool.as_ref().map_or_else(
+            rayon::current_num_threads,
+            rayon::ThreadPool::current_num_threads,
+        )
+    }
+
+    pub fn render(&self, scene: &Scene) -> Result<Framebuffer, Box<dyn Error>> {
+        self.render_mode(scene, self.settings.mode)
+    }
+
+    /// 用相同的其余配置生成另一种折射率模式的对照图。
+    pub fn render_mode(&self, scene: &Scene, mode: IorMode) -> Result<Framebuffer, Box<dyn Error>> {
+        let ground_id = scene.ground_id.ok_or("运行时场景缺少接收地面编号")?;
+        let settings = RenderSetting {
+            mode,
+            ..self.settings.clone()
+        };
+        // install 的返回值跨线程传递，转换为可 Send 的错误文本，再交回公共错误接口。
+        let work = || {
+            caustics::render_spectral_caustics(scene, scene.prism_id, ground_id, &settings)
+                .map_err(|error| error.to_string())
+        };
+        let result = match &self.pool {
+            Some(pool) => pool.install(work),
+            None => work(),
+        };
+        result.map_err(Into::into)
+    }
+
+    pub fn ground_hits(&self, scene: &Scene) -> Result<Framebuffer, Box<dyn Error>> {
+        caustics::render_ground_hits(
+            scene,
+            scene.ground_id.ok_or("场景缺少接收地面")?,
+            &self.settings,
+        )
+    }
+
+    pub fn refracted_hits<const N: usize>(
+        &self,
+        scene: &Scene,
+        wavelengths_nm: [Option<f64>; N],
+        mode: IorMode,
+    ) -> Result<[Framebuffer; N], Box<dyn Error>> {
+        caustics::render_refracted_ground_hits(
+            scene,
+            scene.prism_id,
+            scene.ground_id.ok_or("场景缺少接收地面")?,
+            &self.settings,
+            wavelengths_nm,
+            mode,
+        )
+    }
+
+    pub fn save(
+        &self,
+        framebuffer: &Framebuffer,
+        path: impl AsRef<Path>,
+    ) -> Result<(), Box<dyn Error>> {
+        save_png_with_exposure(framebuffer, path, self.settings.exposure)
+    }
+}
 
 /// 将 D65 白点约定下的 CIE XYZ 转为线性 sRGB，参考白的 Y = 1。
 /// 保留超出 [0, 1] 的结果；save_png 负责显示范围处理和后续编码。
@@ -86,6 +173,18 @@ pub fn linear_rgb_to_srgb8(linear_rgb: Vector3<f64>) -> Option<[u8; 3]> {
 /// 将线性 XYZ 缓冲保存为 8 位 sRGB PNG。
 /// 固定曝光为 1.0，超出显示范围的线性 RGB 采用逐通道裁剪。
 pub fn save_png(framebuffer: &Framebuffer, path: &str) -> Result<(), Box<dyn Error>> {
+    save_png_with_exposure(framebuffer, path, 1.0)
+}
+
+/// 按配置在线性空间施加曝光，再裁剪、sRGB 编码和保存 PNG。
+pub fn save_png_with_exposure(
+    framebuffer: &Framebuffer,
+    path: impl AsRef<Path>,
+    exposure: f64,
+) -> Result<(), Box<dyn Error>> {
+    if !exposure.is_finite() || exposure < 0.0 {
+        return Err("曝光必须有限且非负".into());
+    }
     // image 使用 u32 表示宽高；无法转换时返回错误。
     let width = u32::try_from(framebuffer.width)?;
     let height = u32::try_from(framebuffer.height)?;
@@ -108,7 +207,10 @@ pub fn save_png(framebuffer: &Framebuffer, path: &str) -> Result<(), Box<dyn Err
                 .ok_or("像素坐标越界")?;
 
             // XYZ -> 线性 RGB。
-            let linear_rgb = xyz_to_linear_srgb(xyz).ok_or("XYZ 非法或颜色计算溢出")?;
+            let linear_rgb = xyz_to_linear_srgb(xyz).ok_or("XYZ 非法或颜色计算溢出")? * exposure;
+            if !linear_rgb.iter().all(|v| v.is_finite()) {
+                return Err("曝光计算溢出".into());
+            }
 
             // 对三个通道分别裁剪，满足编码函数的输入要求。
             let bounded_rgb = linear_rgb.map(|v| v.clamp(0.0, 1.0));
@@ -122,7 +224,7 @@ pub fn save_png(framebuffer: &Framebuffer, path: &str) -> Result<(), Box<dyn Err
     }
 
     // 保存 output/test.png 时，自动创建 output 目录。
-    let path = Path::new(path);
+    let path = path.as_ref();
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }

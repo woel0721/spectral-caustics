@@ -4,30 +4,124 @@ use crate::hit::Hit;
 use crate::iormode::IorMode;
 use crate::object::Hittable;
 use crate::ray::Ray;
-use nalgebra::Vector3;
+use crate::{
+    ground::Ground,
+    prism::Prism,
+    sceneconfig::{ObjectConfig, SceneConfig},
+};
+use nalgebra::{Vector2, Vector3};
+use std::error::Error;
 
 pub struct Scene {
-    /// 输出图像的宽、高，单位为像素。
-    pub width: usize,
-    pub height: usize,
     /// 垂直视场角，单位为度；当前只保存参数。
     pub fov: f64,
     /// 线性 RGB 背景色；后续写入 XYZ Framebuffer 前需要转换颜色空间。
     pub background_color: Vector3<f64>,
     /// Box 让大小不同的物体可以放入同一个 Vec；dyn Hittable 提供统一接口。
     pub objects: Vec<Box<dyn Hittable>>,
+    pub light: ParallelLight,
+    pub receiver: GroundReceiver,
+    /// 配置构建时记录的物体编号，手动 add 的场景也可显式传编号给追踪入口。
+    pub prism_id: Option<usize>,
+    pub ground_id: Option<usize>,
+}
+
+/// 运行时光源：使用数学向量，方向已归一化。
+pub struct ParallelLight {
+    pub height_m: f64,
+    pub direction: Vector3<f64>,
+    pub aperture_min_m: Vector2<f64>,
+    pub aperture_max_m: Vector2<f64>,
+    pub total_flux: f64,
+}
+
+pub struct GroundReceiver {
+    pub min_m: Vector2<f64>,
+    pub max_m: Vector2<f64>,
+}
+
+impl GroundReceiver {
+    pub fn area(&self) -> f64 {
+        let span = self.max_m - self.min_m;
+        span.x * span.y
+    }
+}
+
+impl Default for Scene {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Scene {
     /// 创建空场景，默认视场角为 90 度、背景为黑色。
-    pub fn new(width: usize, height: usize) -> Self {
+    pub fn new() -> Self {
+        let config = SceneConfig::default();
         Self {
-            width,
-            height,
             fov: 90.0,
             background_color: Vector3::zeros(),
             objects: Vec::new(),
+            light: ParallelLight {
+                height_m: config.light.height_m,
+                direction: Vector3::from(config.light.direction),
+                aperture_min_m: Vector2::from(config.light.aperture_min_m),
+                aperture_max_m: Vector2::from(config.light.aperture_max_m),
+                total_flux: config.light.total_flux,
+            },
+            receiver: GroundReceiver {
+                min_m: Vector2::from(config.receiver.min_m),
+                max_m: Vector2::from(config.receiver.max_m),
+            },
+            prism_id: None,
+            ground_id: None,
         }
+    }
+
+    /// 从纯数据描述建立真实物体和数学对象；当前支持一个地面、至多一个三棱镜。
+    pub fn from_config(config: &SceneConfig) -> Result<Self, Box<dyn Error>> {
+        config.validate()?;
+        let mut scene = Self::new();
+        scene.fov = config.fov_degrees;
+        scene.background_color = Vector3::from(config.background_linear_rgb);
+        scene.light = ParallelLight {
+            height_m: config.light.height_m,
+            direction: Ray::new(Vector3::zeros(), Vector3::from(config.light.direction), 0.0)
+                .ok_or("光源方向无法归一化")?
+                .direction,
+            aperture_min_m: Vector2::from(config.light.aperture_min_m),
+            aperture_max_m: Vector2::from(config.light.aperture_max_m),
+            total_flux: config.light.total_flux,
+        };
+        scene.receiver = GroundReceiver {
+            min_m: Vector2::from(config.receiver.min_m),
+            max_m: Vector2::from(config.receiver.max_m),
+        };
+        for object in &config.objects {
+            match object {
+                ObjectConfig::Prism { vertices_m } => {
+                    if scene.prism_id.is_some() {
+                        return Err("当前渲染只支持一个三棱镜".into());
+                    }
+                    let prism = Prism::from_vertices(vertices_m.map(Vector3::from))
+                        .ok_or("三棱镜顶点无效：需要按示例顺序描述非退化、朝外法线的凸三棱镜")?;
+                    scene.prism_id = Some(scene.add(Box::new(prism)));
+                }
+                ObjectConfig::Ground { height_m } => {
+                    if scene.ground_id.is_some() {
+                        return Err("当前场景只支持一个接收地面".into());
+                    }
+                    if *height_m >= config.light.height_m {
+                        return Err("光源发射面必须高于接收地面".into());
+                    }
+                    scene.ground_id =
+                        Some(scene.add(Box::new(Ground::new(*height_m).ok_or("地面高度无效")?)));
+                }
+            }
+        }
+        if scene.ground_id.is_none() {
+            return Err("场景必须包含一个 ground 接收地面".into());
+        }
+        Ok(scene)
     }
 
     /// 将物体的所有权交给场景，返回用于 Hit.object_id 的集合下标。
@@ -235,7 +329,7 @@ mod tests {
 
     #[test]
     fn added_objects_keep_their_own_intersection_behavior() {
-        let mut scene = Scene::new(512, 512);
+        let mut scene = Scene::new();
         scene.add(Box::new(Prism::new().unwrap()));
         scene.add(Box::new(Ground::new(0.0).unwrap()));
         let ray = Ray::new(
@@ -256,7 +350,7 @@ mod tests {
     #[test]
     fn scene_returns_nearest_hit_and_object_id_independently_of_order() {
         assert!(
-            Scene::new(8, 4)
+            Scene::new()
                 .intersect(
                     &Ray::new(
                         Vector3::new(0.0, 0.0, 3.0),
@@ -268,7 +362,7 @@ mod tests {
                 .is_none()
         );
         for ground_first in [false, true] {
-            let mut scene = Scene::new(8, 4);
+            let mut scene = Scene::new();
             let (prism_id, ground_id) = if ground_first {
                 let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
                 (scene.add(Box::new(Prism::new().unwrap())), ground_id)
@@ -368,7 +462,7 @@ mod tests {
     }
 
     fn photon_scene() -> (Scene, usize, usize) {
-        let mut scene = Scene::new(16, 8);
+        let mut scene = Scene::new();
         let prism_id = scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         (scene, prism_id, ground_id)
@@ -399,7 +493,7 @@ mod tests {
     #[test]
     fn photon_reaches_expected_refracted_landing_point_in_either_object_order() {
         for ground_first in [false, true] {
-            let mut scene = Scene::new(16, 8);
+            let mut scene = Scene::new();
             let (prism_id, ground_id) = if ground_first {
                 let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
                 (scene.add(Box::new(Prism::new().unwrap())), ground_id)

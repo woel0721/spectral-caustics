@@ -22,7 +22,11 @@ impl Prism {
             Vector3::new(0.5, 1.0, 1.0),   // 4
             Vector3::new(0.0, 1.0, 1.8),   // 5
         ];
+        Self::from_vertices(vertices)
+    }
 
+    /// 按固定面连接方式构建配置中的六顶点凸三棱镜，并校验非退化与朝外法线。
+    pub fn from_vertices(vertices: [Vector3<f64>; 6]) -> Option<Self> {
         // 两个端面各 1 个三角形，三个矩形侧面各拆成 2 个三角形。
         // 顺序保证 (vb - va) × (vc - va) 朝向三棱镜外部。
         let indices = [
@@ -42,6 +46,24 @@ impl Prism {
             .iter()
             .map(|&[a, b, c]| Triangle::new(vertices[a], vertices[b], vertices[c]))
             .collect::<Option<Vec<_>>>()?;
+
+        let center = vertices
+            .iter()
+            .fold(Vector3::zeros(), |sum, v| sum + v / 6.0);
+        for [a, b, c] in indices {
+            let cross = (vertices[b] - vertices[a]).cross(&(vertices[c] - vertices[a]));
+            let normal = cross / cross.norm();
+            let inside = (center - vertices[a]).dot(&normal);
+            if !inside.is_finite() || inside >= -1e-10 {
+                return None;
+            }
+            if vertices.iter().any(|v| {
+                let distance = (v - vertices[a]).dot(&normal);
+                !distance.is_finite() || distance > 1e-8
+            }) {
+                return None;
+            }
+        }
 
         Some(Self { faces })
     }

@@ -1,0 +1,48 @@
+{
+  "render": {
+    "width": 512,
+    "height": 512,
+    "samples_per_pixel_axis": 4,
+    "mode": "dispersion",
+    "wavelength_min_nm": 380.0,
+    "wavelength_max_nm": 780.0,
+    "wavelength_step_nm": 10.0,
+    "exposure": 1.0,
+    "seed": 42,
+    "thread_count": null,
+    "max_spectral_blocks": 16,
+    "output_path": "output/caustics.png"
+  },
+  "scene": {
+    "fov_degrees": 90.0,
+    "background_linear_rgb": [0.0, 0.0, 0.0],
+    "objects": [
+      {
+        "type": "prism",
+        "vertices_m": [
+          [-0.5, -1.0, 1.0],
+          [0.5, -1.0, 1.0],
+          [0.0, -1.0, 1.8],
+          [-0.5, 1.0, 1.0],
+          [0.5, 1.0, 1.0],
+          [0.0, 1.0, 1.8]
+        ]
+      },
+      {
+        "type": "ground",
+        "height_m": 0.0
+      }
+    ],
+    "light": {
+      "height_m": 3.0,
+      "direction": [0.0, 0.0, -1.0],
+      "aperture_min_m": [-2.0, -2.0],
+      "aperture_max_m": [2.0, 2.0],
+      "total_flux": 8.0
+    },
+    "receiver": {
+      "min_m": [-2.0, -2.0],
+      "max_m": [2.0, 2.0]
+    }
+  }
+}
