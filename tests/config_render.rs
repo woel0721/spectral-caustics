@@ -122,7 +122,7 @@ fn runtime_scene_builds_configured_vertices_ground_light_receiver_and_ids() {
     let scene = Scene::from_config(&config).unwrap();
     assert_eq!(scene.ground_id, Some(0));
     assert_eq!(scene.prism_id, Some(1));
-    assert_eq!(scene.camera.fov_y_degrees, 65.0);
+    assert_eq!(scene.camera.fov_y_degrees(), 65.0);
     assert_eq!(scene.background_color, Vector3::new(0.1, 0.2, 0.3));
     assert_eq!(scene.light.height_m, 4.0);
     assert!((scene.light.direction.norm() - 1.0).abs() < 1e-12);
