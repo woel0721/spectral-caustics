@@ -366,15 +366,11 @@ fn executable_reads_json_from_argument_and_respects_output_size_mode_exposure_an
                 .all(|p| p.0 == [0; 3])
         );
     }
-    // 相机调试图使用固定的显示颜色，不随物理渲染曝光变黑。
+    // 地面 +z 法线的显示颜色不随物理渲染曝光变黑。
     let debug = image::open(directory.0.join("nested/camera_debug.png"))
         .unwrap()
         .into_rgb8();
-    assert!(
-        debug
-            .pixels()
-            .all(|p| matches!(p.0, [100, 160, 230] | [190, 190, 190] | [25, 30, 45]))
-    );
+    assert!(debug.pixels().any(|p| p.0 == [128, 128, 255]));
 
     // 主图占用调试图文件名时，调试输出加前缀；向上看的相机应只看见背景。
     config.render.output_path = PathBuf::from("nested/camera_debug.png");
