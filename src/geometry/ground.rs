@@ -1,6 +1,6 @@
 //! 无限水平地面 z = height；几何求交通过 Hittable 返回记录。
 
-use crate::{
+use super::{
     hit::Hit,
     object::Hittable,
     ray::{INTERSECTION_EPSILON, PARALLEL_EPSILON, Ray},

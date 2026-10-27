@@ -14,7 +14,12 @@
     "output_path": "output/caustics.png"
   },
   "scene": {
-    "fov_degrees": 90.0,
+    "camera": {
+      "position": [3.0, -5.0, 3.0],
+      "target": [0.0, 0.0, 1.3],
+      "up": [0.0, 0.0, 1.0],
+      "fov_y_degrees": 45.0
+    },
     "background_linear_rgb": [0.0, 0.0, 0.0],
     "objects": [
       {

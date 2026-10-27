@@ -1,6 +1,6 @@
 //! 固定三角截面沿 y 轴拉伸的封闭三棱镜，共 8 个三角形。
 
-use crate::{hit::Hit, object::Hittable, ray::Ray, triangle::Triangle};
+use super::{hit::Hit, object::Hittable, ray::Ray, triangle::Triangle};
 use nalgebra::Vector3;
 
 #[derive(Debug)]

@@ -1,20 +1,17 @@
 //! 场景参数与物体集合；intersect 查询所有物体中的最近交点。
 
-use crate::hit::Hit;
-use crate::iormode::IorMode;
-use crate::object::Hittable;
-use crate::ray::Ray;
 use crate::{
-    ground::Ground,
-    prism::Prism,
-    sceneconfig::{ObjectConfig, SceneConfig},
+    camera::Camera,
+    config::sceneconfig::{ObjectConfig, SceneConfig},
+    geometry::{ground::Ground, hit::Hit, object::Hittable, prism::Prism, ray::Ray},
+    optics::iormode::IorMode,
 };
 use nalgebra::{Vector2, Vector3};
 use std::error::Error;
 
 pub struct Scene {
-    /// 垂直视场角，单位为度；当前只保存参数。
-    pub fov: f64,
+    /// 用于后续从相机发射主光线；地面焦散累积仍由光源发射光线。
+    pub camera: Camera,
     /// 线性 RGB 背景色；后续写入 XYZ Framebuffer 前需要转换颜色空间。
     pub background_color: Vector3<f64>,
     /// Box 让大小不同的物体可以放入同一个 Vec；dyn Hittable 提供统一接口。
@@ -54,11 +51,11 @@ impl Default for Scene {
 }
 
 impl Scene {
-    /// 创建空场景，默认视场角为 90 度、背景为黑色。
+    /// 创建空场景，使用默认相机、黑色背景。
     pub fn new() -> Self {
         let config = SceneConfig::default();
         Self {
-            fov: 90.0,
+            camera: Camera::from_config(&config.camera).expect("内置默认相机参数必须有效"),
             background_color: Vector3::zeros(),
             objects: Vec::new(),
             light: ParallelLight {
@@ -81,7 +78,7 @@ impl Scene {
     pub fn from_config(config: &SceneConfig) -> Result<Self, Box<dyn Error>> {
         config.validate()?;
         let mut scene = Self::new();
-        scene.fov = config.fov_degrees;
+        scene.camera = Camera::from_config(&config.camera)?;
         scene.background_color = Vector3::from(config.background_linear_rgb);
         scene.light = ParallelLight {
             height_m: config.light.height_m,
@@ -226,7 +223,7 @@ pub fn take_photon(
 pub(crate) fn take_photon_from_hit(
     scene: &Scene,
     ray: Ray,
-    first_hit: crate::hit::Hit,
+    first_hit: Hit,
     prism_id: usize,
     ground_id: usize,
     glass_ior: f64,
@@ -274,7 +271,7 @@ pub(crate) fn take_photon_from_hit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ground::Ground, prism::Prism, ray::Ray};
+    use crate::geometry::{ground::Ground, prism::Prism, ray::Ray};
 
     #[test]
     fn constant_index_ignores_wavelength() {

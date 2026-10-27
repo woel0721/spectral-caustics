@@ -1,6 +1,6 @@
 //! 可求交物体的统一接口；具体的求交算法由各物体实现。
 
-use crate::{hit::Hit, ray::Ray};
+use super::{hit::Hit, ray::Ray};
 
 /// 实现此 trait 的类型可以接受光线查询，并允许并行追踪时共享只读引用。
 pub trait Hittable: Send + Sync {

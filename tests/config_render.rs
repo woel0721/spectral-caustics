@@ -1,13 +1,13 @@
 use nalgebra::Vector3;
 use spectral_caustics::{
-    caustics::ground_to_pixel,
-    config::Config,
-    framebuffer::Framebuffer,
-    iormode::IorMode,
-    ray::Ray,
-    render::Render,
+    config::{
+        Config,
+        sceneconfig::{ObjectConfig, SceneConfig},
+    },
+    geometry::ray::Ray,
+    optics::iormode::IorMode,
+    render::{Render, caustics::ground_to_pixel, framebuffer::Framebuffer},
     scene::Scene,
-    sceneconfig::{ObjectConfig, SceneConfig},
 };
 use std::{
     fs,
@@ -62,6 +62,45 @@ fn total_y(image: &Framebuffer) -> f64 {
 }
 
 #[test]
+fn json_camera_generates_rays_that_hit_the_configured_scene() {
+    let mut config = small_config();
+    config.render.width = 5;
+    config.render.height = 3;
+    // JSON 往返后，由真实的 Scene 构建相机，再用主光线查询现有几何。
+    let loaded = Config::from_json(&config.to_json().unwrap()).unwrap();
+    let scene = Scene::from_config(&loaded.scene).unwrap();
+    let ray = scene
+        .camera
+        .ray_for_pixel(2, 1, loaded.render.width, loaded.render.height)
+        .unwrap();
+    assert_eq!(ray.origin, Vector3::from(loaded.scene.camera.position));
+    assert_eq!(scene.intersect(&ray).unwrap().object_id, scene.prism_id);
+
+    config.scene.camera.target = [1.5, 0.0, 0.0];
+    let loaded = Config::from_json(&config.to_json().unwrap()).unwrap();
+    let ground_view = Scene::from_config(&loaded.scene).unwrap();
+    let ground_ray = ground_view
+        .camera
+        .ray_for_pixel(2, 1, loaded.render.width, loaded.render.height)
+        .unwrap();
+    let hit = ground_view.intersect(&ground_ray).unwrap();
+    assert_eq!(hit.object_id, ground_view.ground_id);
+    assert!((hit.coords - Vector3::new(1.5, 0.0, 0.0)).norm() < 1e-12);
+    assert!((ray.direction - ground_ray.direction).norm() > 0.1);
+    // 保持相机姿态不变，只增大 FOV，边角光线与观察方向的夹角应增大。
+    let narrow = ground_view.camera.ray_for_pixel(0, 0, 5, 3).unwrap();
+    config.scene.camera.fov_y_degrees = 70.0;
+    let loaded = Config::from_json(&config.to_json().unwrap()).unwrap();
+    let wide_view = Scene::from_config(&loaded.scene).unwrap();
+    let wide = wide_view.camera.ray_for_pixel(0, 0, 5, 3).unwrap();
+    assert!(
+        wide.direction.dot(&ground_ray.direction) < narrow.direction.dot(&ground_ray.direction)
+    );
+    let wide_center = wide_view.camera.ray_for_pixel(2, 1, 5, 3).unwrap();
+    assert!((wide_center.direction - ground_ray.direction).norm() < 1e-12);
+}
+
+#[test]
 fn runtime_scene_builds_configured_vertices_ground_light_receiver_and_ids() {
     let mut config = SceneConfig::default();
     if let ObjectConfig::Prism { vertices_m } = &mut config.objects[0] {
@@ -72,7 +111,7 @@ fn runtime_scene_builds_configured_vertices_ground_light_receiver_and_ids() {
     }
     config.objects[1] = ObjectConfig::Ground { height_m: -0.5 };
     config.objects.reverse();
-    config.fov_degrees = 65.0;
+    config.camera.fov_y_degrees = 65.0;
     config.background_linear_rgb = [0.1, 0.2, 0.3];
     config.light.height_m = 4.0;
     config.light.direction = [0.4, 0.0, -2.0];
@@ -83,7 +122,7 @@ fn runtime_scene_builds_configured_vertices_ground_light_receiver_and_ids() {
     let scene = Scene::from_config(&config).unwrap();
     assert_eq!(scene.ground_id, Some(0));
     assert_eq!(scene.prism_id, Some(1));
-    assert_eq!(scene.fov, 65.0);
+    assert_eq!(scene.camera.fov_y_degrees, 65.0);
     assert_eq!(scene.background_color, Vector3::new(0.1, 0.2, 0.3));
     assert_eq!(scene.light.height_m, 4.0);
     assert!((scene.light.direction.norm() - 1.0).abs() < 1e-12);

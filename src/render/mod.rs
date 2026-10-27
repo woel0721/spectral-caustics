@@ -1,10 +1,12 @@
 //! 图像输出链路：XYZ -> 线性 sRGB -> 显示范围裁剪 -> sRGB8 -> PNG。
 //! Render 使用配置中的曝光，颜色计算与存储使用 f64，导出时才进行 8 位量化。
 
-use crate::{
-    caustics, framebuffer::Framebuffer, iormode::IorMode, rendersetting::RenderSetting,
-    scene::Scene,
-};
+pub mod caustics;
+pub mod framebuffer;
+pub mod utils;
+
+use self::framebuffer::Framebuffer;
+use crate::{config::rendersetting::RenderSetting, optics::iormode::IorMode, scene::Scene};
 use image::{ImageFormat, Rgb, RgbImage};
 use nalgebra::{Matrix3, Vector3};
 use std::{error::Error, fs, path::Path};

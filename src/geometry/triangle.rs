@@ -1,6 +1,6 @@
 //! 单个三角形与双面的 Möller–Trumbore 求交。
 
-use crate::{
+use super::{
     hit::Hit,
     object::Hittable,
     ray::{INTERSECTION_EPSILON, PARALLEL_EPSILON, Ray},

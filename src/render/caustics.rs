@@ -1,14 +1,15 @@
 //! 分层随机发射平行光，将地面落点累积为线性 XYZ。
 //! 支持灰度落点调试，以及按 CIE/D65 光谱积分合成的彩色焦散。
 
+use super::{framebuffer::Framebuffer, utils::bilinear_weights};
 use crate::{
-    framebuffer::Framebuffer,
-    iormode::IorMode,
-    ray::Ray,
-    rendersetting::RenderSetting,
+    config::rendersetting::RenderSetting,
+    geometry::ray::Ray,
+    optics::{
+        iormode::IorMode,
+        spectrum::{d65_normalization, d65_spd, wavelength_to_xyz},
+    },
     scene::{GroundReceiver, Scene, refractive_index, take_photon_from_hit},
-    spectrum::{d65_normalization, d65_spd, wavelength_to_xyz},
-    utils::bilinear_weights,
 };
 use nalgebra::Vector3;
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -431,7 +432,11 @@ mod tests {
     }
 
     use super::*;
-    use crate::{ground::Ground, prism::Prism, render::save_png, scene::take_photon};
+    use crate::{
+        geometry::{ground::Ground, prism::Prism},
+        render::save_png,
+        scene::take_photon,
+    };
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -442,8 +447,8 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
-    impl crate::object::Hittable for CountedGround {
-        fn intersect(&self, ray: &Ray) -> Option<crate::hit::Hit> {
+    impl crate::geometry::object::Hittable for CountedGround {
+        fn intersect(&self, ray: &Ray) -> Option<crate::geometry::hit::Hit> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.ground.intersect(ray)
         }
@@ -680,7 +685,7 @@ mod tests {
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         // 在光源与三棱镜之间遮住一部分光，确保真的测试了丢失通量。
         scene.add(Box::new(
-            crate::triangle::Triangle::new(
+            crate::geometry::triangle::Triangle::new(
                 Vector3::new(-2.0, -2.0, 2.0),
                 Vector3::new(0.0, -2.0, 2.0),
                 Vector3::new(-2.0, 2.0, 2.0),

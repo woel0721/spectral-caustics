@@ -1,7 +1,10 @@
 //! 单条光线：空气 -> 玻璃 -> 空气 -> 地面。
 
 use nalgebra::Vector3;
-use spectral_caustics::{ground::Ground, object::Hittable, prism::Prism, ray::Ray, scene::refract};
+use spectral_caustics::{
+    geometry::{ground::Ground, object::Hittable, prism::Prism, ray::Ray},
+    scene::refract,
+};
 use std::error::Error;
 
 fn main() -> Result<(), Box<dyn Error>> {

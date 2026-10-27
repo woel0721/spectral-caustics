@@ -8,9 +8,9 @@ use std::sync::LazyLock;
 use nalgebra::Vector3;
 
 static CIE_CMF: LazyLock<Vec<[f64; 4]>> =
-    LazyLock::new(|| parse_csv(include_str!("../assets/color/CIE_xyz_1931_2deg.csv")));
+    LazyLock::new(|| parse_csv(include_str!("../../assets/color/CIE_xyz_1931_2deg.csv")));
 static D65_SPD: LazyLock<Vec<[f64; 2]>> =
-    LazyLock::new(|| parse_csv(include_str!("../assets/color/CIE_std_illum_D65.csv")));
+    LazyLock::new(|| parse_csv(include_str!("../../assets/color/CIE_std_illum_D65.csv")));
 
 /// CIE 1931 2° 颜色匹配函数 [x̄(λ), ȳ(λ), z̄(λ)]，不是已经积分的 XYZ。
 ///

@@ -1,12 +1,12 @@
 //! 可保存为 JSON 的场景描述；几何数据在运行时再转换为 Hittable 对象。
 
+use super::cameraconfig::CameraConfig;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SceneConfig {
-    /// 沿用已有场景的预留相机参数，当前地面俯视焦散流程尚不使用。
-    pub fov_degrees: f64,
+    pub camera: CameraConfig,
     pub background_linear_rgb: [f64; 3],
     pub objects: Vec<ObjectConfig>,
     pub light: ParallelLightConfig,
@@ -50,7 +50,7 @@ pub struct GroundReceiverConfig {
 impl Default for SceneConfig {
     fn default() -> Self {
         Self {
-            fov_degrees: 90.0,
+            camera: CameraConfig::default(),
             background_linear_rgb: [0.0; 3],
             objects: vec![
                 ObjectConfig::Prism {
@@ -95,12 +95,7 @@ impl Default for GroundReceiverConfig {
 impl SceneConfig {
     /// 校验描述中的数值；几何拓扑和实际求交对象的构建留给运行时 Scene。
     pub fn validate(&self) -> Result<(), String> {
-        if !self.fov_degrees.is_finite()
-            || !(0.0..180.0).contains(&self.fov_degrees)
-            || self.fov_degrees == 0.0
-        {
-            return Err("scene.fov_degrees 必须有限且位于 (0, 180) 度".into());
-        }
+        self.camera.validate()?;
         if self
             .background_linear_rgb
             .iter()

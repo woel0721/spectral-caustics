@@ -1,8 +1,10 @@
 //! 读取 JSON，构建运行时 Scene/Render，输出主图及同配置的对照、调试图。
 
 use spectral_caustics::{
-    caustics::DEBUG_WAVELENGTHS_NM, config::Config, iormode::IorMode, render::Render, scene::Scene,
-    sceneconfig::ObjectConfig,
+    config::{Config, sceneconfig::ObjectConfig},
+    optics::iormode::IorMode,
+    render::{Render, caustics::DEBUG_WAVELENGTHS_NM},
+    scene::Scene,
 };
 use std::{
     error::Error,
@@ -24,7 +26,11 @@ fn auxiliary_path(primary: &Path, name: &str) -> PathBuf {
 fn main() -> Result<(), Box<dyn Error>> {
     let start = Instant::now();
     let mut arguments = std::env::args_os().skip(1);
-    let path = PathBuf::from(arguments.next().unwrap_or_else(|| "src/config.json".into()));
+    let path = PathBuf::from(
+        arguments
+            .next()
+            .unwrap_or_else(|| "configs/default.json".into()),
+    );
     if arguments.next().is_some() {
         return Err("用法：spectral-caustics [config.json 路径]".into());
     }

@@ -1,6 +1,6 @@
 //! 可保存为 JSON 的渲染参数；不包含 Framebuffer、RNG 或线程池。
 
-use crate::iormode::IorMode;
+use crate::optics::iormode::IorMode;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
