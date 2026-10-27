@@ -9,4 +9,5 @@
 !/output/wavelength_650nm.png
 !/output/caustics.png
 !/output/constant_ior.png
+!/output/camera_debug.png
 .DS_Store

@@ -95,6 +95,41 @@ impl Render {
     }
 }
 
+/// 从相机逐像素查询最近物体，使用固定 sRGB8 颜色区分三棱镜、地面和背景。
+/// 此图用于检查相机与几何位置，不应用光谱积分或曝光。
+pub fn render_camera_debug(
+    scene: &Scene,
+    width: usize,
+    height: usize,
+) -> Result<RgbImage, Box<dyn Error>> {
+    if width == 0 || height == 0 {
+        return Err("相机调试图的宽高必须大于零".into());
+    }
+    let image_width = u32::try_from(width)?;
+    let image_height = u32::try_from(height)?;
+    // RGB8 每像素 3 字节，先拒绝字节数溢出或超过 Vec 容量上限的尺寸。
+    width
+        .checked_mul(height)
+        .and_then(|count| count.checked_mul(3))
+        .filter(|&bytes| bytes <= isize::MAX as usize)
+        .ok_or("相机调试图的像素缓冲大小溢出")?;
+    let mut image = RgbImage::new(image_width, image_height);
+
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        let ray = scene
+            .camera
+            .ray_for_pixel(x as usize, y as usize, width, height)
+            .ok_or("无法生成摄像机光线")?;
+        *pixel = match scene.intersect(&ray) {
+            Some(hit) if hit.object_id == scene.prism_id => Rgb([100, 160, 230]),
+            Some(hit) if hit.object_id == scene.ground_id => Rgb([190, 190, 190]),
+            _ => Rgb([25, 30, 45]),
+        };
+    }
+
+    Ok(image)
+}
+
 /// 将 D65 白点约定下的 CIE XYZ 转为线性 sRGB，参考白的 Y = 1。
 /// 保留超出 [0, 1] 的结果；save_png 负责显示范围处理和后续编码。
 /// 输入非有限值或计算溢出时返回 None。
@@ -238,6 +273,43 @@ pub fn save_png_with_exposure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_debug_colors_nearest_objects_and_background_by_id() {
+        let mut config = crate::config::sceneconfig::SceneConfig::default();
+        config.camera.position = [0.0, -4.0, 2.0];
+        config.camera.target = [0.0, 0.0, 1.0];
+        config.camera.fov_y_degrees = 90.0;
+        let scene = Scene::from_config(&config).unwrap();
+        let image = render_camera_debug(&scene, 5, 3).unwrap();
+        assert_eq!(image.dimensions(), (5, 3));
+        assert_eq!(*image.get_pixel(2, 0), Rgb([25, 30, 45]));
+        assert_eq!(*image.get_pixel(2, 1), Rgb([100, 160, 230]));
+        assert_eq!(*image.get_pixel(2, 2), Rgb([190, 190, 190]));
+
+        // 添加顺序改变后物体编号也改变，显示结果应保持一致。
+        config.objects.reverse();
+        let mut reordered = Scene::from_config(&config).unwrap();
+        assert_eq!(render_camera_debug(&reordered, 5, 3).unwrap(), image);
+        // 未登记为三棱镜或地面的命中使用背景色。
+        reordered.prism_id = None;
+        let unknown = render_camera_debug(&reordered, 5, 3).unwrap();
+        assert_eq!(*unknown.get_pixel(2, 1), Rgb([25, 30, 45]));
+    }
+
+    #[test]
+    fn camera_debug_rejects_zero_or_overflowing_dimensions() {
+        let scene = Scene::new();
+        for (width, height) in [
+            (0, 1),
+            (1, 0),
+            (usize::MAX, 1),
+            (1, usize::MAX),
+            (u32::MAX as usize, u32::MAX as usize),
+        ] {
+            assert!(render_camera_debug(&scene, width, height).is_err());
+        }
+    }
 
     // 浮点矩阵计算有舍入误差，使用向量差的长度（欧几里得范数）衡量接近程度。
     // 例如 0.9999999999999993 与 1.0 的差远小于这里使用的 1e-12 容差。

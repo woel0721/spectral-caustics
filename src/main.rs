@@ -3,7 +3,7 @@
 use spectral_caustics::{
     config::{Config, sceneconfig::ObjectConfig},
     optics::iormode::IorMode,
-    render::{Render, caustics::DEBUG_WAVELENGTHS_NM},
+    render::{Render, caustics::DEBUG_WAVELENGTHS_NM, render_camera_debug},
     scene::Scene,
 };
 use std::{
@@ -54,6 +54,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.render.output_path.display()
     );
     drop(framebuffer);
+
+    let path = auxiliary_path(&config.render.output_path, "camera_debug.png");
+    render_camera_debug(&scene, config.render.width, config.render.height)?.save(&path)?;
+    println!("已输出相机调试图：{}", path.display());
 
     let (comparison_mode, filename) = match config.render.mode {
         IorMode::Dispersion => (IorMode::Constant, "constant_ior.png"),
