@@ -2,9 +2,11 @@ use nalgebra::Vector3;
 use spectral_caustics::{
     config::{
         Config,
+        materialconfig::MaterialConfig,
         sceneconfig::{ObjectConfig, SceneConfig},
     },
-    geometry::ray::Ray,
+    geometry::{ground::Ground, ray::Ray},
+    material::Material,
     optics::iormode::IorMode,
     render::{Render, caustics::ground_to_pixel, framebuffer::Framebuffer},
     scene::Scene,
@@ -101,15 +103,104 @@ fn json_camera_generates_rays_that_hit_the_configured_scene() {
 }
 
 #[test]
+fn json_materials_build_runtime_values_and_follow_the_hit_object() {
+    for reverse in [false, true] {
+        let mut config = small_config();
+        if let ObjectConfig::Prism { material, .. } = &mut config.scene.objects[0] {
+            *material = MaterialConfig::Dielectric { ior: 1.33 };
+        }
+        if let ObjectConfig::Ground { material, .. } = &mut config.scene.objects[1] {
+            *material = MaterialConfig::Lambertian {
+                albedo: [0.2, 0.3, 0.4],
+            };
+        }
+        if reverse {
+            config.scene.objects.reverse();
+        }
+        let loaded = Config::from_json(&config.to_json().unwrap()).unwrap();
+        let mut scene = Scene::from_config(&loaded.scene).unwrap();
+        for (x, expected_id, expected_bsdf, expected_ior) in [
+            (0.25, scene.prism_id, Vector3::zeros(), Some(1.33)),
+            (
+                1.5,
+                scene.ground_id,
+                Vector3::new(0.2, 0.3, 0.4) / std::f64::consts::PI,
+                None,
+            ),
+        ] {
+            let ray = Ray::new(Vector3::new(x, 0.2, 3.0), -Vector3::z(), 0.0).unwrap();
+            let hit = scene.intersect(&ray).unwrap();
+            assert_eq!(hit.object_id, expected_id);
+            let material = scene.material(hit.material_id.unwrap()).unwrap();
+            assert_eq!(material.ior(), expected_ior);
+            assert_eq!(material.is_delta(), expected_ior.is_some());
+            // 材质通过 dyn Material 分派；在命中法线的正半球求 BSDF。
+            assert_eq!(
+                material.evaluate(hit.normal, -ray.direction, hit.normal),
+                expected_bsdf
+            );
+            assert_eq!(
+                scene.objects[hit.object_id.unwrap()].material_id(),
+                hit.material_id
+            );
+        }
+        assert!(scene.material(usize::MAX).is_none());
+
+        // 原有 add 接口继续允许只添加几何；未绑定材质时不生成材质编号。
+        let id = scene.add(Box::new(Ground::new(2.5).unwrap()));
+        let ray = Ray::new(Vector3::new(0.25, 0.2, 3.0), -Vector3::z(), 0.0).unwrap();
+        let hit = scene.intersect(&ray).unwrap();
+        assert_eq!(hit.object_id, Some(id));
+        assert_eq!(hit.material_id, None);
+    }
+}
+
+#[test]
+fn scene_accepts_custom_materials_without_changing_geometry_or_a_material_enum() {
+    struct CustomMaterial;
+    impl Material for CustomMaterial {
+        fn evaluate(
+            &self,
+            _wi: Vector3<f64>,
+            _wo: Vector3<f64>,
+            _normal: Vector3<f64>,
+        ) -> Vector3<f64> {
+            Vector3::new(0.1, 0.2, 0.3)
+        }
+    }
+
+    let mut scene = Scene::new();
+    scene.add(Box::new(Ground::new(0.0).unwrap()));
+    let id = scene.add_with_material(
+        Box::new(Ground::new(1.0).unwrap()),
+        Box::new(CustomMaterial),
+    );
+    let ray = Ray::new(Vector3::new(0.0, 0.0, 3.0), -Vector3::z(), 0.0).unwrap();
+    let hit = scene.intersect(&ray).unwrap();
+    assert_eq!(hit.object_id, Some(id));
+    assert_eq!(hit.material_id, Some(0)); // 几何编号与材质表编号可以不同。
+    let material = scene.material(hit.material_id.unwrap()).unwrap();
+    assert_eq!(
+        material.evaluate(-ray.direction, -ray.direction, hit.normal),
+        Vector3::new(0.1, 0.2, 0.3)
+    );
+    assert!(!material.is_delta());
+    assert_eq!(material.ior(), None);
+}
+
+#[test]
 fn runtime_scene_builds_configured_vertices_ground_light_receiver_and_ids() {
     let mut config = SceneConfig::default();
-    if let ObjectConfig::Prism { vertices_m } = &mut config.objects[0] {
+    if let ObjectConfig::Prism { vertices_m, .. } = &mut config.objects[0] {
         for vertex in vertices_m {
             vertex[0] += 0.75;
             vertex[1] += 0.2;
         }
     }
-    config.objects[1] = ObjectConfig::Ground { height_m: -0.5 };
+    config.objects[1] = ObjectConfig::Ground {
+        height_m: -0.5,
+        material: Default::default(),
+    };
     config.objects.reverse();
     config.camera.fov_y_degrees = 65.0;
     config.background_linear_rgb = [0.1, 0.2, 0.3];
@@ -157,7 +248,10 @@ fn runtime_scene_builds_configured_vertices_ground_light_receiver_and_ids() {
 #[test]
 fn aperture_direction_height_flux_receiver_and_sampling_control_energy_and_positions() {
     let mut config = small_config();
-    config.scene.objects = vec![ObjectConfig::Ground { height_m: -0.5 }];
+    config.scene.objects = vec![ObjectConfig::Ground {
+        height_m: -0.5,
+        material: Default::default(),
+    }];
     config.scene.light.height_m = 4.0;
     config.scene.light.direction = [0.2, 0.0, -1.0];
     config.scene.light.aperture_min_m = [-1.0, -0.5];
@@ -220,7 +314,7 @@ fn mode_seed_wavelength_range_and_moved_prism_change_the_computed_image() {
     changed.render.wavelength_step_nm = 17.0;
     assert_ne!(render(&changed).pixels, reference.pixels);
     changed = config.clone();
-    if let ObjectConfig::Prism { vertices_m } = &mut changed.scene.objects[0] {
+    if let ObjectConfig::Prism { vertices_m, .. } = &mut changed.scene.objects[0] {
         for vertex in vertices_m {
             vertex[0] += 6.0;
         }
@@ -267,21 +361,28 @@ fn runtime_rejects_unsupported_counts_and_invalid_prism_geometry() {
     config.objects.push(config.objects[0].clone());
     assert!(Scene::from_config(&config).is_err());
     config = original.clone();
-    config.objects.push(ObjectConfig::Ground { height_m: -1.0 });
+    config.objects.push(ObjectConfig::Ground {
+        height_m: -1.0,
+        material: Default::default(),
+    });
     assert!(Scene::from_config(&config).is_err());
     config = original.clone();
     config.objects[0] = ObjectConfig::Prism {
         vertices_m: [[0.0; 3]; 6],
+        material: Default::default(),
     };
     assert!(config.validate().is_ok()); // 数据校验与几何构建职责分开。
     assert!(Scene::from_config(&config).is_err());
     config = original.clone();
-    if let ObjectConfig::Prism { vertices_m } = &mut config.objects[0] {
+    if let ObjectConfig::Prism { vertices_m, .. } = &mut config.objects[0] {
         vertices_m.swap(0, 1);
     }
     assert!(Scene::from_config(&config).is_err());
     config = original;
-    config.objects[1] = ObjectConfig::Ground { height_m: 3.0 };
+    config.objects[1] = ObjectConfig::Ground {
+        height_m: 3.0,
+        material: Default::default(),
+    };
     assert!(Scene::from_config(&config).is_err());
 }
 

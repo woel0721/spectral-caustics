@@ -44,8 +44,9 @@ spectral-caustics/
 │   ├── lib.rs                 # 模块入口
 │   ├── camera.rs              # 针孔相机与像素主光线
 │   ├── scene.rs               # 场景、求交、Snell/Cauchy 与光子追踪
-│   ├── config/                # JSON 读写、CameraConfig、RenderSetting、SceneConfig
+│   ├── config/                # JSON 读写、CameraConfig、MaterialConfig、渲染/场景描述
 │   ├── geometry/              # Ray、Hit、Hittable、地面、三角形、三棱镜
+│   ├── material/              # Material trait、Lambertian、Dielectric
 │   ├── optics/                # 折射率模式、CIE/D65 与光谱积分
 │   └── render/                # Render、光子累积、Framebuffer、sRGB/PNG
 ├── examples/
@@ -221,6 +222,25 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - [x] x/y/z 分别编码到红/绿/蓝，使用原始世界空间几何法线，不朝相机翻转，不施加曝光或 sRGB 传递函数。
 - **验收：** 六个轴向和斜向法线的颜色正确，向量长度不改变颜色；三棱镜前端面 -y、地面 +z、背景和物体顺序测试通过，从地面上下两侧观察得到相同的 +z 法线颜色，程序输出与曝光/文件名冲突测试继续通过。
 - **范围：** 当前是几何法线调试图，三棱镜仍视为不透明物体。下一阶段可加入基础光照，再接入玻璃材质和路径追踪。
+
+### V0.4 阶段 4 — 材质 JSON 与命中关联
+
+- [x] 接入 Lambertian / Dielectric 材质数据，以独立 `MaterialConfig` 保存普通数值、数组及材质类型；运行时 trait 重构见阶段 5。
+- [x] 每个物体的 JSON 加入 `material`：默认三棱镜为 `dielectric`、`ior = 1.52`，地面为 `lambertian`、线性 RGB `albedo = [0.8, 0.8, 0.8]`；旧 JSON 省略材质时按物体类型补默认值。
+- [x] 校验有限且位于 `[0, 1]` 的反射率、正有限折射率、材质类型和字段；拒绝非有限数值写入或覆盖配置文件。
+- [x] `Scene::from_config` 建立运行时材质和物体关联，`Scene::intersect` 填写 `Hit.material_id`，通过 `Scene::material(id)` 查询；原有仅添加几何的 `add` 接口保持未绑定材质的行为。
+- **验收：** 两种材质的 JSON/文件往返、缺省材质、非法字段/参数与非有限值保护通过；改变物体添加顺序后，最近交点仍关联正确材质，非法材质编号安全返回 `None`。
+- **范围：** 本阶段只接入材质数据和命中关联。法线调试图与已有焦散计算保持不变，材质的 `albedo` / `ior` 尚未参与着色、散射采样或原有光源焦散的折射率计算；下一阶段可实现基础材质着色。
+
+### V0.4 阶段 5 — Material trait 与 BSDF 数值接口
+
+- [x] 按用户指定结构将运行时材质从 `geometry` 拆到 `material/`：`mod.rs` 定义 `Material: Send + Sync`，两个具体材质各自实现 trait；JSON 的 `MaterialConfig` 保留 enum。
+- [x] `Material::evaluate(wi, wo, normal) -> Vector3<f64>` 直接返回线性 RGB 的 BSDF 数值。方向都从交点向外指，归一化并检查非法数值；不包含入射辐亮度、余弦项或 PDF。
+- [x] 单面 Lambertian 在法线正半球内返回 `albedo / π`；背面、切线及非法方向返回零。理想 Dielectric 的普通求值返回零，通过 `is_delta()` 和 `ior()` 表达后续采样所需的信息。
+- [x] `SceneObject` 绑定几何和可选材质编号；场景保存 `Box<dyn Material>`，支持 `add_with_material` 添加自定义材质，最近交点仍通过 `Hit.material_id` 查询。
+- [x] 将现有相机法线调试遍历和对应测试统一移到 `render/camera_debug.rs`，保留原 `render::render_camera_debug` 调用入口；`render/integrator.rs` 专用于后续路径追踪。
+- **验收（已通过）：** BSDF 数值、半球/法线约定、方向归一化、非法输入与漫反射能量积分正确；JSON 构建和物体顺序关联、不同物体/材质编号、自定义 trait 实现通过。141 项单元测试、10 项集成测试、`cargo fmt --check`、严格 Clippy 和 diff 检查通过；默认 release 输出的八张 512×512 PNG 与重构前逐字节相同。
+- **范围：** 只完成材质接口和组织，不接入新的光照积分、Fresnel 采样或路径追踪。理想玻璃的 delta 贡献需要下一阶段的 `sample` / `pdf` 接口；现有光源焦散继续使用固定值/Cauchy 折射率。
 
 ## 6. Codex 执行约定
 

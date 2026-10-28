@@ -55,7 +55,7 @@
 
 `Prism::new()` 使用默认六顶点，`Prism::from_vertices` 使用配置的六顶点并检查凸性、退化和法线方向；均组成 8 个三角形：两个三角形端面，加上三个各拆成两个三角形的矩形侧面。三角截面沿 y 轴从 `-1` 米拉伸至 `1` 米，底面为 `z = 1` 米，顶棱为 `z = 1.8` 米；所有三角形法线朝外。求交遍历所有面并取最近有效交点，支持从内部寻找出射面。
 
-`scene::Scene::new()` 创建空场景，保存真实物体 `objects: Vec<Box<dyn Hittable>>`、运行时相机、光源、地面接收区域与背景色。图片宽高归 `RenderSetting` 和运行时 `Render` 管理。`Scene::from_config(&config.scene)` 根据 JSON 中的类型和顶点构建物体并记录地面/三棱镜编号。`Box<dyn Hittable>` 让不同具体类型的物体保存在同一个集合中，通过 `add` 显式添加；返回的下标用于识别命中物体：
+`scene::Scene::new()` 创建空场景，保存 `objects: Vec<SceneObject>`、运行时相机、光源、地面接收区域与背景色。每个 `SceneObject` 绑定 `geometry: Box<dyn Hittable>` 与可选的材质编号，材质由场景的 `Vec<Box<dyn Material>>` 持有。图片宽高归 `RenderSetting` 和运行时 `Render` 管理。`Scene::from_config(&config.scene)` 根据 JSON 中的类型和顶点构建物体并记录地面/三棱镜编号。`Box<dyn Hittable>` 让不同具体类型的几何保存在同一个集合中，通过 `add` 显式添加；返回的下标用于识别命中物体：
 
 ```rust
 let mut scene = Scene::new();
@@ -63,7 +63,7 @@ let prism_id = scene.add(Box::new(Prism::new().unwrap()));
 let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
 ```
 
-`Scene::intersect(&ray)` 返回最近的 `Option<Hit>`，并填写 `Hit.object_id`；`material_id` 仍为 `None`。物体编号是当前集合下标，查询期间不能重排集合。渲染入口从 `RenderSetting` 获取宽高，`camera` 与 `background_color` 不参与当前光源追踪。
+`Scene::intersect(&ray)` 返回最近的 `Option<Hit>`，并填写 `Hit.object_id`。配置构建的物体还会填写 `Hit.material_id`，通过 `Scene::material(id)` 查询对应材质；手动只调用 `Scene::add` 添加几何时，材质编号仍为 `None`。物体编号是当前集合下标，查询期间不能重排集合。渲染入口从 `RenderSetting` 获取宽高，`camera` 与 `background_color` 不参与当前光源追踪。
 
 `take_photon(&scene, ray, prism_id, ground_id, glass_ior)` 按顺序执行首次求交、空气 → 玻璃折射、内部求交、玻璃 → 空气折射、最后一次地面求交。`glass_ior` 类型为 `impl FnOnce() -> Option<f64>`，通过 `||` 创建无参数闭包，并捕获当前波长和模式。函数只调用一次闭包，将得到的玻璃折射率用于两个界面；闭包返回 `None`、非正或非有限折射率时返回 `None`。空气折射率固定为 `1.0`。界面起点沿法线偏移 `1e-5` 米，后续 Ray 保留原来的 `time`。入射使用朝外法线，出射使用取反后的法线。光线需从空气中出发，不处理已有玻璃内部起点。
 
@@ -149,9 +149,43 @@ renderer.save(&framebuffer, &config.render.output_path)?;
 | 配置 | 主要字段 |
 | --- | --- |
 | `RenderSetting`，JSON 中的 `render` | 图片宽高、空间采样数、折射率模式、波长范围/步长、曝光、种子、线程数、采样块数上限、主图输出路径 |
-| `SceneConfig`，JSON 中的 `scene` | 相机 `camera`、物体描述、平行光源、地面接收范围与背景色 |
+| `SceneConfig`，JSON 中的 `scene` | 相机 `camera`、含材质的物体描述、平行光源、地面接收范围与背景色 |
 
-`ObjectConfig` 用 `type` 区分 `prism` 和 `ground`：三棱镜保存六个原始顶点，地面保存高度；它们不是 `Box<dyn Hittable>`，也不保存法线、求交函数或渲染缓冲。长度以米表示，波长字段显式使用 nm。光源 `total_flux = 8.0` 是原有 `0.5 × 16` 的相对总通量，没有新增瓦特单位约定。
+`ObjectConfig` 用 `type` 区分 `prism` 和 `ground`：三棱镜保存六个原始顶点，地面保存高度，各自在 `material` 中保存材质描述；它们不是 `Box<dyn Hittable>`，也不保存法线、求交函数或渲染缓冲。长度以米表示，波长字段显式使用 nm。光源 `total_flux = 8.0` 是原有 `0.5 × 16` 的相对总通量，没有新增瓦特单位约定。
+
+材质由 `MaterialConfig` 描述，用 `type` 区分 `lambertian` 与 `dielectric`。例如地面的完整描述为：
+
+```json
+{
+  "type": "ground",
+  "height_m": 0.0,
+  "material": {
+    "type": "lambertian",
+    "albedo": [0.8, 0.8, 0.8]
+  }
+}
+```
+
+默认三棱镜使用 `"material": { "type": "dielectric", "ior": 1.52 }`。`albedo` 是线性 RGB 反射率，三个分量必须有限且位于 `[0, 1]`；`ior` 是无量纲折射率，必须有限且大于零。材质类型、字段类型、必需参数与未知字段都会校验，非有限值不能写入 JSON 或覆盖已有文件。旧 JSON 省略整个 `material` 时，三棱镜补默认玻璃材质，地面补 `[0.8, 0.8, 0.8]` 的漫反射材质。
+
+`MaterialConfig` 保留可序列化的 enum；`material::from_config` 将它转换为 `Box<dyn Material>`，具体实现为 `material::lambertian::Lambertian` 或 `material::dielectric::Dielectric`，其中 `albedo` 变为 `Vector3<f64>`。两种运行时材质都使用 `new(...) -> Result<_, String>` 校验参数。最近命中的材质可这样求值：
+
+```rust
+if let Some(hit) = scene.intersect(&ray) {
+    if let Some(material) = hit.material_id.and_then(|id| scene.material(id)) {
+        let wi = -scene.light.direction; // 从交点指向光源
+        let wo = -ray.direction;        // 从交点指向观察者
+        let f = material.evaluate(wi, wo, hit.normal);
+        // f 是 BSDF 数值，后续积分还需乘入射辐亮度、余弦项和采样权重。
+    }
+}
+```
+
+`Material: Send + Sync` 的主要接口为 `evaluate(wi, wo, normal) -> Vector3<f64>`，返回线性 RGB 的 BSDF 值（sr⁻¹），不包含余弦、PDF、曝光或显示编码。`wi` 和 `wo` 都从交点向外指；内部归一化三个向量，零向量、非有限值和模长溢出安全返回零。当前使用 RGB 反射率参数，不将 RGB 插值当作真实反射光谱。
+
+`Lambertian` 是单面漫反射：仅在 `normal · wi > 0` 且 `normal · wo > 0` 时返回 `albedo / π`，背面及切线方向返回零；若希望从背面观察，调用方需先翻转着色法线。公式参考 [PBRT Lambertian Reflection](https://www.pbr-book.org/3ed-2018/Reflection_Models/Lambertian_Reflection)。`Dielectric` 表示理想光滑玻璃，其反射/透射属于 delta 分布，普通方向求值返回零，`is_delta()` 返回 `true`，`ior()` 返回保存的折射率；有效贡献须通过后续散射采样计算，不能直接把这个零值用于生成玻璃画面。这一约定参考 [PBRT Specular Reflection and Transmission](https://www.pbr-book.org/3ed-2018/Reflection_Models/Specular_Reflection_and_Transmission)。
+
+材质编号由场景构建时分配，不写进 JSON；物体编号和材质编号分别索引各自的表。`Scene::add_with_material(geometry, material)` 可添加任意实现 trait 的材质；`Scene::add` 仍只添加几何。当前阶段完成 trait、BSDF 求值和命中关联，散射采样与材质着色留待后续。`render::camera_debug` 统一保存相机法线调试遍历和对应测试，并通过 `render::render_camera_debug` 保留原调用路径；`render::integrator` 留给后续路径追踪。光源焦散的折射率仍由原有 `render.mode` 固定值/Cauchy 模型控制，暂未使用材质中的 `ior` 或 `albedo` 改变光路和亮度。
 
 统一读写入口是 `config::Config`：
 
@@ -279,7 +313,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-当前 133 项单元测试和 8 项集成测试通过，严格 Clippy 通过。彩色合成测试覆盖 XYZ 通量与采样数归一化、独立单波长合成及遮挡丢失通量、固定模式中性白、色散分色与可复现、非法配置以及彩色 PNG 读回。新增光谱测试检查官方表格完整性及列和、已知 CMF/SPD 值、非整数波长插值、端点与表外行为、积分权重、D65 白点、不同积分步长的稳定性，以及非法输入和溢出。统一入口测试覆盖单张固定模式图与多张固定模式图的通量一致性、两模式共享采样、固定模式各波长分布相同而色散模式不同，以及色散波长缺失、非法或溢出时返回错误。测试覆盖固定模式忽略波长、色散模式要求有效波长、闭包只求值一次并复用于两个界面、闭包返回非法折射率时拒绝追踪、Cauchy 单位换算、可见光区间折射率单调性、非法波长与溢出、两种波长通过双界面后的已知落点，以及传入光子追踪的非法波长。三波长测试检查共享空间采样、完整 XYZ 能量守恒、采样数归一化、丢失通量不重分配、各波长结果与独立单波长追踪一致，以及图像分布不同且可复现。采样测试逐格检查每层恰有一个点、点不越出所属层、两轴随机偏移，以及固定种子下的发射位置和图像完全重复。增加采样数时检查总能量守恒与无玻璃图的噪声降低；两种光路通过同种子对照验证发射位置一致。其余测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。双线性测试覆盖已知小数位置的四点权重、像素中心、权重和、边缘与单像素尺寸、完整 XYZ 总能量守恒及遮挡边缘的平滑分配。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地；`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、编号与添加顺序。
+当前 136 项单元测试和 9 项集成测试通过，严格 Clippy 通过。彩色合成测试覆盖 XYZ 通量与采样数归一化、独立单波长合成及遮挡丢失通量、固定模式中性白、色散分色与可复现、非法配置以及彩色 PNG 读回。新增光谱测试检查官方表格完整性及列和、已知 CMF/SPD 值、非整数波长插值、端点与表外行为、积分权重、D65 白点、不同积分步长的稳定性，以及非法输入和溢出。统一入口测试覆盖单张固定模式图与多张固定模式图的通量一致性、两模式共享采样、固定模式各波长分布相同而色散模式不同，以及色散波长缺失、非法或溢出时返回错误。测试覆盖固定模式忽略波长、色散模式要求有效波长、闭包只求值一次并复用于两个界面、闭包返回非法折射率时拒绝追踪、Cauchy 单位换算、可见光区间折射率单调性、非法波长与溢出、两种波长通过双界面后的已知落点，以及传入光子追踪的非法波长。三波长测试检查共享空间采样、完整 XYZ 能量守恒、采样数归一化、丢失通量不重分配、各波长结果与独立单波长追踪一致，以及图像分布不同且可复现。采样测试逐格检查每层恰有一个点、点不越出所属层、两轴随机偏移，以及固定种子下的发射位置和图像完全重复。增加采样数时检查总能量守恒与无玻璃图的噪声降低；两种光路通过同种子对照验证发射位置一致。其余测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。双线性测试覆盖已知小数位置的四点权重、像素中心、权重和、边缘与单像素尺寸、完整 XYZ 总能量守恒及遮挡边缘的平滑分配。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地；`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、编号与添加顺序。
 
 7 项三棱镜测试覆盖 8 个面的已知交点和朝外单位法线、最近面选择、棱边命中、内外求交、自相交与非有限光线；场景测试验证同一集合中不同物体的求交，以及改变添加顺序后仍选择最近交点。
 
@@ -289,7 +323,7 @@ PNG 读回测试在独立临时目录中保存一张 3×2 小图，再解码检�
 
 ## 文件与颜色约定
 
-源码按用途分为四组，`src` 顶层保留程序入口、模块入口、相机和场景：
+源码按用途分为五组，`src` 顶层保留程序入口、模块入口、相机和场景：
 
 ```text
 configs/
@@ -298,10 +332,11 @@ src/
 ├── main.rs                   # 读取配置、渲染并保存对照图
 ├── lib.rs                    # 对外声明模块
 ├── camera.rs                 # 针孔相机与像素主光线
-├── scene.rs                  # 场景集合、最近求交与双界面追踪
+├── scene.rs                  # Scene、SceneObject、最近求交与双界面追踪
 ├── config/
 │   ├── mod.rs                # Config、JSON 读写和校验
 │   ├── cameraconfig.rs        # CameraConfig
+│   ├── materialconfig.rs      # 材质 JSON 描述与数值校验
 │   ├── rendersetting.rs      # RenderSetting
 │   └── sceneconfig.rs        # SceneConfig、物体/光源/接收区域描述
 ├── geometry/
@@ -312,12 +347,18 @@ src/
 │   ├── ground.rs             # 水平地面
 │   ├── triangle.rs           # 三角形求交
 │   └── prism.rs              # 三棱镜及最近交点
+├── material/
+│   ├── mod.rs                # Material trait 与配置到运行时的构建
+│   ├── lambertian.rs         # 漫反射 BSDF 数值求值
+│   └── dielectric.rs         # 理想玻璃、折射率与 delta 标识
 ├── optics/
 │   ├── mod.rs
 │   ├── iormode.rs            # 固定折射率 / 色散模式
 │   └── spectrum.rs           # CIE/D65 插值与光谱积分
 └── render/
-    ├── mod.rs                # Render、相机调试图与 PNG 输出
+    ├── mod.rs                # Render、PNG 输出与相机调试接口导出
+    ├── camera_debug.rs       # 相机法线调试遍历与对应测试
+    ├── integrator.rs         # 路径追踪积分器，待后续里程碑实现
     ├── caustics.rs           # 分层发射、光路追踪与地面累积
     ├── framebuffer.rs        # 线性 XYZ 图像缓冲
     └── utils.rs              # XYZ/sRGB 颜色转换、法线可视化、双线性权重

@@ -2,6 +2,7 @@
 //! 这里只返回配置数据，不创建 Scene、Render 或任何 Hittable 实例。
 
 pub mod cameraconfig;
+pub mod materialconfig;
 pub mod rendersetting;
 pub mod sceneconfig;
 
@@ -50,7 +51,10 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::sceneconfig::ObjectConfig, optics::iormode::IorMode};
+    use crate::{
+        config::{materialconfig::MaterialConfig, sceneconfig::ObjectConfig},
+        optics::iormode::IorMode,
+    };
     use serde_json::json;
     use std::{
         path::PathBuf,
@@ -79,7 +83,10 @@ mod tests {
         ));
         assert_eq!(
             config.scene.objects[1],
-            ObjectConfig::Ground { height_m: 0.0 }
+            ObjectConfig::Ground {
+                height_m: 0.0,
+                material: Default::default()
+            }
         );
         assert_eq!(config.scene.light.total_flux, 8.0);
         assert_eq!(
@@ -99,9 +106,15 @@ mod tests {
             1.0000000000000002,
             f64::MAX,
         ] {
-            config.scene.objects[1] = ObjectConfig::Ground { height_m };
+            config.scene.objects[1] = ObjectConfig::Ground {
+                height_m,
+                material: Default::default(),
+            };
             let loaded = Config::from_json(&config.to_json().unwrap()).unwrap();
-            let ObjectConfig::Ground { height_m: actual } = loaded.scene.objects[1] else {
+            let ObjectConfig::Ground {
+                height_m: actual, ..
+            } = loaded.scene.objects[1]
+            else {
                 panic!("地面类型必须在 JSON 往返后保留");
             };
             assert_eq!(actual.to_bits(), height_m.to_bits());
@@ -122,7 +135,10 @@ mod tests {
         config.scene.camera.position = [-2.0, 3.0, 4.0];
         config.scene.camera.target = [0.0, 0.0, 1.2];
         config.scene.camera.fov_y_degrees = 60.0;
-        config.scene.objects[1] = ObjectConfig::Ground { height_m: -1.0 };
+        config.scene.objects[1] = ObjectConfig::Ground {
+            height_m: -1.0,
+            material: Default::default(),
+        };
         for (mode, name) in [
             (IorMode::Constant, "constant"),
             (IorMode::Dispersion, "dispersion"),
@@ -135,6 +151,71 @@ mod tests {
             assert_eq!(Config::load(&path).unwrap(), config);
         }
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn both_material_variants_survive_json_file_roundtrip() {
+        let path = temporary_path();
+        let mut config = Config::default();
+        if let ObjectConfig::Prism { material, .. } = &mut config.scene.objects[0] {
+            *material = MaterialConfig::Lambertian {
+                albedo: [0.0, 0.5, 1.0],
+            };
+        }
+        if let ObjectConfig::Ground { material, .. } = &mut config.scene.objects[1] {
+            *material = MaterialConfig::Dielectric { ior: 1.33 };
+        }
+        config.save(&path).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            json["scene"]["objects"][0]["material"]["type"],
+            "lambertian"
+        );
+        assert_eq!(
+            json["scene"]["objects"][1]["material"]["type"],
+            "dielectric"
+        );
+        assert_eq!(Config::load(&path).unwrap(), config);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn invalid_material_values_types_and_fields_are_rejected() {
+        let original: serde_json::Value =
+            serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
+        for material in [
+            json!(null),
+            json!({ "type": "metal" }),
+            json!({ "type": "lambertian" }),
+            json!({ "type": "lambertian", "albedo": [0.2, 0.3] }),
+            json!({ "type": "lambertian", "albedo": [-0.1, 0.3, 0.4] }),
+            json!({ "type": "lambertian", "albedo": [0.2, 1.1, 0.4] }),
+            json!({ "type": "lambertian", "albedo": [0.2, null, 0.4] }),
+            json!({ "type": "lambertian", "albedo": [0.2, 0.3, 0.4], "roughness": 0.1 }),
+            json!({ "type": "dielectric" }),
+            json!({ "type": "dielectric", "ior": 0.0 }),
+            json!({ "type": "dielectric", "ior": -1.0 }),
+            json!({ "type": "dielectric", "ior": "glass" }),
+            json!({ "type": "dielectric", "ior": 1.52, "typo": 1 }),
+        ] {
+            let mut invalid = original.clone();
+            invalid["scene"]["objects"][0]["material"] = material;
+            assert!(Config::from_json(&invalid.to_string()).is_err());
+        }
+    }
+
+    #[test]
+    fn missing_materials_use_the_defaults_for_each_object_type() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
+        for object in json["scene"]["objects"].as_array_mut().unwrap() {
+            object.as_object_mut().unwrap().remove("material");
+        }
+        assert_eq!(
+            Config::from_json(&json.to_string()).unwrap(),
+            Config::default()
+        );
     }
 
     #[test]
@@ -268,12 +349,32 @@ mod tests {
             assert_eq!(fs::read_to_string(&path).unwrap(), "keep existing config");
         }
         config = Config::default();
-        config.scene.objects[1] = ObjectConfig::Ground { height_m: f64::NAN };
+        config.scene.objects[1] = ObjectConfig::Ground {
+            height_m: f64::NAN,
+            material: Default::default(),
+        };
         assert!(config.to_json().is_err());
         config.scene.objects[0] = ObjectConfig::Prism {
             vertices_m: [[f64::INFINITY; 3]; 6],
+            material: Default::default(),
         };
         assert!(config.to_json().is_err());
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for material in [
+                MaterialConfig::Lambertian {
+                    albedo: [0.2, value, 0.4],
+                },
+                MaterialConfig::Dielectric { ior: value },
+            ] {
+                let mut config = Config::default();
+                if let ObjectConfig::Prism { material: slot, .. } = &mut config.scene.objects[0] {
+                    *slot = material;
+                }
+                assert!(config.to_json().is_err());
+                assert!(config.save(&path).is_err());
+                assert_eq!(fs::read_to_string(&path).unwrap(), "keep existing config");
+            }
+        }
         for field in ["position", "target", "up", "fov_y_degrees"] {
             for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
                 config = Config::default();

@@ -4,18 +4,33 @@ use crate::{
     camera::Camera,
     config::sceneconfig::{ObjectConfig, SceneConfig},
     geometry::{ground::Ground, hit::Hit, object::Hittable, prism::Prism, ray::Ray},
+    material::{self, Material},
     optics::iormode::IorMode,
 };
 use nalgebra::{Vector2, Vector3};
 use std::error::Error;
+
+/// 几何与场景材质编号的绑定；几何本身不依赖任何材质类型。
+pub struct SceneObject {
+    pub geometry: Box<dyn Hittable>,
+    material_id: Option<usize>,
+}
+
+impl SceneObject {
+    pub fn material_id(&self) -> Option<usize> {
+        self.material_id
+    }
+}
 
 pub struct Scene {
     /// 用于后续从相机发射主光线；地面焦散累积仍由光源发射光线。
     pub camera: Camera,
     /// 线性 RGB 背景色；后续写入 XYZ Framebuffer 前需要转换颜色空间。
     pub background_color: Vector3<f64>,
-    /// Box 让大小不同的物体可以放入同一个 Vec；dyn Hittable 提供统一接口。
-    pub objects: Vec<Box<dyn Hittable>>,
+    /// 每项绑定一个几何和可选材质编号，查询期间不能重排集合。
+    pub objects: Vec<SceneObject>,
+    /// 场景拥有材质，Hit.material_id 只保存本表的下标。
+    materials: Vec<Box<dyn Material>>,
     pub light: ParallelLight,
     pub receiver: GroundReceiver,
     /// 配置构建时记录的物体编号，手动 add 的场景也可显式传编号给追踪入口。
@@ -58,6 +73,7 @@ impl Scene {
             camera: Camera::from_config(&config.camera).expect("内置默认相机参数必须有效"),
             background_color: Vector3::zeros(),
             objects: Vec::new(),
+            materials: Vec::new(),
             light: ParallelLight {
                 height_m: config.light.height_m,
                 direction: Vector3::from(config.light.direction),
@@ -95,23 +111,30 @@ impl Scene {
         };
         for object in &config.objects {
             match object {
-                ObjectConfig::Prism { vertices_m } => {
+                ObjectConfig::Prism {
+                    vertices_m,
+                    material,
+                } => {
                     if scene.prism_id.is_some() {
                         return Err("当前渲染只支持一个三棱镜".into());
                     }
                     let prism = Prism::from_vertices(vertices_m.map(Vector3::from))
                         .ok_or("三棱镜顶点无效：需要按示例顺序描述非退化、朝外法线的凸三棱镜")?;
-                    scene.prism_id = Some(scene.add(Box::new(prism)));
+                    scene.prism_id = Some(
+                        scene.add_with_material(Box::new(prism), material::from_config(material)?),
+                    );
                 }
-                ObjectConfig::Ground { height_m } => {
+                ObjectConfig::Ground { height_m, material } => {
                     if scene.ground_id.is_some() {
                         return Err("当前场景只支持一个接收地面".into());
                     }
                     if *height_m >= config.light.height_m {
                         return Err("光源发射面必须高于接收地面".into());
                     }
-                    scene.ground_id =
-                        Some(scene.add(Box::new(Ground::new(*height_m).ok_or("地面高度无效")?)));
+                    scene.ground_id = Some(scene.add_with_material(
+                        Box::new(Ground::new(*height_m).ok_or("地面高度无效")?),
+                        material::from_config(material)?,
+                    ));
                 }
             }
         }
@@ -124,18 +147,40 @@ impl Scene {
     /// 将物体的所有权交给场景，返回用于 Hit.object_id 的集合下标。
     pub fn add(&mut self, object: Box<dyn Hittable>) -> usize {
         let id = self.objects.len();
-        self.objects.push(object);
+        self.objects.push(SceneObject {
+            geometry: object,
+            material_id: None,
+        });
         id
     }
 
-    /// 返回最近的命中记录，并将场景中的物体下标写入 object_id。
+    /// 添加带材质的物体；接受任意实现 Material 的具体类型。
+    pub fn add_with_material(
+        &mut self,
+        object: Box<dyn Hittable>,
+        material: Box<dyn Material>,
+    ) -> usize {
+        let object_id = self.add(object);
+        let material_id = self.materials.len();
+        self.materials.push(material);
+        self.objects[object_id].material_id = Some(material_id);
+        object_id
+    }
+
+    /// 通过 Hit.material_id 查询配置构建的运行时材质；非法编号返回 None。
+    pub fn material(&self, material_id: usize) -> Option<&dyn Material> {
+        self.materials.get(material_id).map(Box::as_ref)
+    }
+
+    /// 返回最近命中，并填写 object_id 与可选的 material_id。
     pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
         self.objects
             .iter()
             .enumerate()
             .filter_map(|(id, object)| {
-                object.intersect(ray).map(|mut hit| {
+                object.geometry.intersect(ray).map(|mut hit| {
                     hit.object_id = Some(id);
+                    hit.material_id = object.material_id;
                     hit
                 })
             })
@@ -338,8 +383,8 @@ mod tests {
 
         // 这里只验证同一集合中的不同物体仍调用各自的求交算法。
         // 场景级的遍历、最近命中选择由 Scene::intersect 负责。
-        let prism_hit = scene.objects[0].intersect(&ray).unwrap();
-        let ground_hit = scene.objects[1].intersect(&ray).unwrap();
+        let prism_hit = scene.objects[0].geometry.intersect(&ray).unwrap();
+        let ground_hit = scene.objects[1].geometry.intersect(&ray).unwrap();
         assert!((prism_hit.coords - Vector3::new(0.25, 0.2, 1.4)).norm() < 1e-12);
         assert!((ground_hit.coords - Vector3::new(0.25, 0.2, 0.0)).norm() < 1e-12);
     }

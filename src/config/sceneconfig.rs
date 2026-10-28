@@ -1,6 +1,6 @@
 //! 可保存为 JSON 的场景描述；几何数据在运行时再转换为 Hittable 对象。
 
-use super::cameraconfig::CameraConfig;
+use super::{cameraconfig::CameraConfig, materialconfig::MaterialConfig};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -20,9 +20,13 @@ pub enum ObjectConfig {
     /// 与 Prism 当前默认顶点顺序一致，长度单位为米；面连接方式由运行时 Prism 定义。
     Prism {
         vertices_m: [[f64; 3]; 6],
+        #[serde(default = "MaterialConfig::default_glass")]
+        material: MaterialConfig,
     },
     Ground {
         height_m: f64,
+        #[serde(default)]
+        material: MaterialConfig,
     },
 }
 
@@ -62,8 +66,12 @@ impl Default for SceneConfig {
                         [0.5, 1.0, 1.0],
                         [0.0, 1.0, 1.8],
                     ],
+                    material: MaterialConfig::default_glass(),
                 },
-                ObjectConfig::Ground { height_m: 0.0 },
+                ObjectConfig::Ground {
+                    height_m: 0.0,
+                    material: MaterialConfig::default(),
+                },
             ],
             light: ParallelLightConfig::default(),
             receiver: GroundReceiverConfig::default(),
@@ -103,14 +111,23 @@ impl SceneConfig {
         {
             return Err("scene.background_linear_rgb 必须有限且非负".into());
         }
-        for object in &self.objects {
+        for (index, object) in self.objects.iter().enumerate() {
             match object {
-                ObjectConfig::Prism { vertices_m } => {
+                ObjectConfig::Prism {
+                    vertices_m,
+                    material,
+                } => {
+                    material
+                        .validate()
+                        .map_err(|message| format!("scene.objects[{index}].{message}"))?;
                     if vertices_m.iter().flatten().any(|v| !v.is_finite()) {
                         return Err("scene 三棱镜顶点必须为有限坐标".into());
                     }
                 }
-                ObjectConfig::Ground { height_m } => {
+                ObjectConfig::Ground { height_m, material } => {
+                    material
+                        .validate()
+                        .map_err(|message| format!("scene.objects[{index}].{message}"))?;
                     if !height_m.is_finite() {
                         return Err("scene 地面高度必须有限".into());
                     }

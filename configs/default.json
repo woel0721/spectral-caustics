@@ -24,6 +24,7 @@
     "objects": [
       {
         "type": "prism",
+        "material": { "type": "dielectric", "ior": 1.52 },
         "vertices_m": [
           [-0.5, -1.0, 1.0],
           [0.5, -1.0, 1.0],
@@ -35,7 +36,8 @@
       },
       {
         "type": "ground",
-        "height_m": 0.0
+        "height_m": 0.0,
+        "material": { "type": "lambertian", "albedo": [0.8, 0.8, 0.8] }
       }
     ],
     "light": {
