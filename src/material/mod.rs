@@ -16,9 +16,29 @@ pub trait Material: Send + Sync {
     /// normal 是世界空间表面法线；调用方可按需要先将它朝向 wo。
     /// 输入方向会归一化；零向量、非有限值或模长溢出返回零。
     /// 此值不含入射辐亮度、余弦项、PDF、曝光或 sRGB 编码。
-    /// 理想镜面/透射的 delta 分布不能用普通数值表示，evaluate 返回零；
+    /// 理想镜面/透射的 delta 分布不能用普通数值表示，evaluate_rgb 返回零；
     /// 它们的贡献需要后续通过散射采样接口计算。
-    fn evaluate(&self, wi: Vector3<f64>, wo: Vector3<f64>, normal: Vector3<f64>) -> Vector3<f64>;
+    fn evaluate_rgb(
+        &self,
+        wi: Vector3<f64>,
+        wo: Vector3<f64>,
+        normal: Vector3<f64>,
+    ) -> Vector3<f64>;
+
+    /// 返回单个波长的 XYZ 响应 f(λ) × [x̄(λ), ȳ(λ), z̄(λ)]。
+    ///
+    /// wavelength_nm 的单位为 nm，必须为正有限值；方向约定同 evaluate_rgb。
+    /// 非法输入或 CIE 360–830 nm 表外返回零；理想 delta 材质也返回零。
+    /// 这不是已经积分的 XYZ，不含光源 SPD、余弦、Δλ 或 1/p(λ) 权重。
+    /// 调用方应乘同一波长的标量光谱辐亮度后积分；不能将 XYZ 响应逐分量相乘
+    /// 作为多次反射的光谱吞吐量。RGB 与光谱接口分别由具体材质实现。
+    fn evaluate_xyz(
+        &self,
+        wi: Vector3<f64>,
+        wo: Vector3<f64>,
+        normal: Vector3<f64>,
+        wavelength_nm: f64,
+    ) -> Vector3<f64>;
 
     /// 是否只有理想镜面/透射分量，需通过采样而非普通方向求值。
     fn is_delta(&self) -> bool {

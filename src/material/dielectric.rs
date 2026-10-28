@@ -19,7 +19,7 @@ impl Dielectric {
 }
 
 impl Material for Dielectric {
-    fn evaluate(
+    fn evaluate_rgb(
         &self,
         _wi: Vector3<f64>,
         _wo: Vector3<f64>,
@@ -27,6 +27,16 @@ impl Material for Dielectric {
     ) -> Vector3<f64> {
         // Dirac delta 不能在镜面方向返回一个人为的有限值。
         // 与 PBRT 的理想 SpecularReflection/SpecularTransmission::f 一致。
+        Vector3::zeros()
+    }
+
+    fn evaluate_xyz(
+        &self,
+        _wi: Vector3<f64>,
+        _wo: Vector3<f64>,
+        _normal: Vector3<f64>,
+        _wavelength_nm: f64,
+    ) -> Vector3<f64> {
         Vector3::zeros()
     }
 
@@ -50,9 +60,15 @@ mod tests {
         assert!(glass.is_delta());
         for wi in [Vector3::z(), -Vector3::z(), Vector3::repeat(f64::NAN)] {
             assert_eq!(
-                glass.evaluate(wi, Vector3::z(), Vector3::z()),
+                glass.evaluate_rgb(wi, Vector3::z(), Vector3::z()),
                 Vector3::zeros()
             );
+            for nm in [450.0, 550.0, 650.0, f64::NAN] {
+                assert_eq!(
+                    glass.evaluate_xyz(wi, Vector3::z(), Vector3::z(), nm),
+                    Vector3::zeros()
+                );
+            }
         }
     }
 

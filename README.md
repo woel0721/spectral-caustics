@@ -175,13 +175,19 @@ if let Some(hit) = scene.intersect(&ray) {
     if let Some(material) = hit.material_id.and_then(|id| scene.material(id)) {
         let wi = -scene.light.direction; // 从交点指向光源
         let wo = -ray.direction;        // 从交点指向观察者
-        let f = material.evaluate(wi, wo, hit.normal);
-        // f 是 BSDF 数值，后续积分还需乘入射辐亮度、余弦项和采样权重。
+        let f_rgb = material.evaluate_rgb(wi, wo, hit.normal);
+        let f_xyz = material.evaluate_xyz(wi, wo, hit.normal, 550.0); // 波长单位 nm
+        // f_rgb 是线性 RGB BSDF；f_xyz 是 550 nm 的 BSDF × CIE 匹配函数。
+        // 光照积分仍需乘该波长的入射辐亮度、余弦项和采样权重。
     }
 }
 ```
 
-`Material: Send + Sync` 的主要接口为 `evaluate(wi, wo, normal) -> Vector3<f64>`，返回线性 RGB 的 BSDF 值（sr⁻¹），不包含余弦、PDF、曝光或显示编码。`wi` 和 `wo` 都从交点向外指；内部归一化三个向量，零向量、非有限值和模长溢出安全返回零。当前使用 RGB 反射率参数，不将 RGB 插值当作真实反射光谱。
+`Material: Send + Sync` 的 `evaluate_rgb(wi, wo, normal) -> Vector3<f64>`（原 `evaluate`）返回线性 RGB 的 BSDF 值（sr⁻¹），不包含余弦、PDF、曝光或显示编码。`wi` 和 `wo` 都从交点向外指；内部归一化三个向量，零向量、非有限值和模长溢出安全返回零。
+
+`evaluate_xyz(wi, wo, normal, wavelength_nm) -> Vector3<f64>` 返回单个波长的 XYZ 响应 `f(λ) × CMF(λ)`。Lambertian 先使用 [PBRT 的 Smits 七基谱近似](https://pbr-book.org/3ed-2018/Color_and_Radiometry/The_SampledSpectrum_Class) 将线性 RGB albedo 重建为反射率 `rho(λ)`，再计算 `rho(λ) / π × [x̄(λ), ȳ(λ), z̄(λ)]`。因此波长既影响材质反射率，也影响 CIE 响应。接口不含 D65/其他光源 SPD、归一化因子 k 或波长积分权重；离散积分需乘 `k × L_i(λ) × cosθ × Δλ`，随机波长采样则使用相应的 `1/p(λ)` 权重。多次反射应保持标量光谱吞吐量，最终转为 XYZ，不能逐分量连乘这些 XYZ 响应。波长非正、非有限或超出 CIE 的 360–830 nm 范围时返回零；理想 Dielectric 的光谱普通求值也为零。
+
+RGB 不能唯一确定真实反射光谱；当前是有来源的近似模型，不是实测数据，也不保证在 D65 下积分后精确恢复原始 sRGB。七条基谱来自 PBRT 的 380–720 nm、32 个原始节点，节点间线性插值，表外延用最近端点，组合后按 PBRT 乘 0.94，并将反射率裁剪到 `[0, 1]`。数据与许可证见 `assets/color/README.md`。`render::utils::linear_srgb_to_xyz` 使用 [W3C 的 D65 矩阵](https://www.w3.org/TR/css-color-4/#color-conversion-code) 做普通线性 sRGB→XYZ 转换，和已有 `xyz_to_linear_srgb` 互逆；它不重建光谱，也不需要波长，不施加 gamma、裁剪或曝光，非法数值/溢出返回 `None`。
 
 `Lambertian` 是单面漫反射：仅在 `normal · wi > 0` 且 `normal · wo > 0` 时返回 `albedo / π`，背面及切线方向返回零；若希望从背面观察，调用方需先翻转着色法线。公式参考 [PBRT Lambertian Reflection](https://www.pbr-book.org/3ed-2018/Reflection_Models/Lambertian_Reflection)。`Dielectric` 表示理想光滑玻璃，其反射/透射属于 delta 分布，普通方向求值返回零，`is_delta()` 返回 `true`，`ior()` 返回保存的折射率；有效贡献须通过后续散射采样计算，不能直接把这个零值用于生成玻璃画面。这一约定参考 [PBRT Specular Reflection and Transmission](https://www.pbr-book.org/3ed-2018/Reflection_Models/Specular_Reflection_and_Transmission)。
 
@@ -313,7 +319,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-当前 136 项单元测试和 9 项集成测试通过，严格 Clippy 通过。彩色合成测试覆盖 XYZ 通量与采样数归一化、独立单波长合成及遮挡丢失通量、固定模式中性白、色散分色与可复现、非法配置以及彩色 PNG 读回。新增光谱测试检查官方表格完整性及列和、已知 CMF/SPD 值、非整数波长插值、端点与表外行为、积分权重、D65 白点、不同积分步长的稳定性，以及非法输入和溢出。统一入口测试覆盖单张固定模式图与多张固定模式图的通量一致性、两模式共享采样、固定模式各波长分布相同而色散模式不同，以及色散波长缺失、非法或溢出时返回错误。测试覆盖固定模式忽略波长、色散模式要求有效波长、闭包只求值一次并复用于两个界面、闭包返回非法折射率时拒绝追踪、Cauchy 单位换算、可见光区间折射率单调性、非法波长与溢出、两种波长通过双界面后的已知落点，以及传入光子追踪的非法波长。三波长测试检查共享空间采样、完整 XYZ 能量守恒、采样数归一化、丢失通量不重分配、各波长结果与独立单波长追踪一致，以及图像分布不同且可复现。采样测试逐格检查每层恰有一个点、点不越出所属层、两轴随机偏移，以及固定种子下的发射位置和图像完全重复。增加采样数时检查总能量守恒与无玻璃图的噪声降低；两种光路通过同种子对照验证发射位置一致。其余测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。双线性测试覆盖已知小数位置的四点权重、像素中心、权重和、边缘与单像素尺寸、完整 XYZ 总能量守恒及遮挡边缘的平滑分配。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地；`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、编号与添加顺序。
+当前 148 项单元测试和 10 项集成测试通过，严格 Clippy 通过。新增材质测试覆盖 RGB/XYZ 两个接口、PBRT 反射基谱参考值与波长响应、非法输入和能量上限；颜色工具测试覆盖线性 sRGB→XYZ 的 D65 白点、三原色和往返转换。彩色合成测试覆盖 XYZ 通量与采样数归一化、独立单波长合成及遮挡丢失通量、固定模式中性白、色散分色与可复现、非法配置以及彩色 PNG 读回。新增光谱测试检查官方表格完整性及列和、已知 CMF/SPD 值、非整数波长插值、端点与表外行为、积分权重、D65 白点、不同积分步长的稳定性，以及非法输入和溢出。统一入口测试覆盖单张固定模式图与多张固定模式图的通量一致性、两模式共享采样、固定模式各波长分布相同而色散模式不同，以及色散波长缺失、非法或溢出时返回错误。测试覆盖固定模式忽略波长、色散模式要求有效波长、闭包只求值一次并复用于两个界面、闭包返回非法折射率时拒绝追踪、Cauchy 单位换算、可见光区间折射率单调性、非法波长与溢出、两种波长通过双界面后的已知落点，以及传入光子追踪的非法波长。三波长测试检查共享空间采样、完整 XYZ 能量守恒、采样数归一化、丢失通量不重分配、各波长结果与独立单波长追踪一致，以及图像分布不同且可复现。采样测试逐格检查每层恰有一个点、点不越出所属层、两轴随机偏移，以及固定种子下的发射位置和图像完全重复。增加采样数时检查总能量守恒与无玻璃图的噪声降低；两种光路通过同种子对照验证发射位置一致。其余测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。双线性测试覆盖已知小数位置的四点权重、像素中心、权重和、边缘与单像素尺寸、完整 XYZ 总能量守恒及遮挡边缘的平滑分配。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地；`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、编号与添加顺序。
 
 7 项三棱镜测试覆盖 8 个面的已知交点和朝外单位法线、最近面选择、棱边命中、内外求交、自相交与非有限光线；场景测试验证同一集合中不同物体的求交，以及改变添加顺序后仍选择最近交点。
 
@@ -354,7 +360,7 @@ src/
 ├── optics/
 │   ├── mod.rs
 │   ├── iormode.rs            # 固定折射率 / 色散模式
-│   └── spectrum.rs           # CIE/D65 插值与光谱积分
+│   └── spectrum.rs           # RGB 反射基谱、CIE/D65 插值与光谱积分
 └── render/
     ├── mod.rs                # Render、PNG 输出与相机调试接口导出
     ├── camera_debug.rs       # 相机法线调试遍历与对应测试

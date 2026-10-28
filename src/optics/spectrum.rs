@@ -1,4 +1,4 @@
-//! 波长（nm）到线性 CIE XYZ 的单个积分贡献。
+//! RGB 反射光谱近似与波长（nm）到线性 CIE XYZ 的单个积分贡献。
 //!
 //! 使用 CIE 官方 1 nm 数据表，非整数波长做线性插值；来源与许可见
 //! `assets/color/README.md`。数据通过 include_str! 随程序编译，运行时无需读文件。
@@ -11,6 +11,65 @@ static CIE_CMF: LazyLock<Vec<[f64; 4]>> =
     LazyLock::new(|| parse_csv(include_str!("../../assets/color/CIE_xyz_1931_2deg.csv")));
 static D65_SPD: LazyLock<Vec<[f64; 2]>> =
     LazyLock::new(|| parse_csv(include_str!("../../assets/color/CIE_std_illum_D65.csv")));
+
+// PBRT/Smits 的七条 RGB 反射基谱，第一列保存原始节点波长（nm）。
+// CSV 首行为列名；来源与 BSD 许可见 assets/color/README.md。
+static RGB_REFLECTANCE_BASIS: LazyLock<Vec<[f64; 8]>> = LazyLock::new(|| {
+    let csv = include_str!("../../assets/color/pbrt_rgb_reflectance.csv");
+    parse_csv(csv.split_once('\n').expect("RGB 基谱缺少表头").1)
+});
+
+/// 用 PBRT 的 Smits 七基谱近似，从线性 RGB 反射率重建 rho(λ)。
+///
+/// RGB 各分量必须有限且位于 [0, 1]，波长必须为正有限的 nm。
+/// 在原始 380–720 nm 节点间线性插值，表外延用最近端点值。
+/// 按 PBRT 乘 0.94，并将最终反射率限制到 [0, 1] 以保持能量约束。
+/// 这是 RGB 到光谱的近似，不是实测材质数据，也不保证 D65 下精确还原 RGB。
+/// 来源：https://github.com/mmp/pbrt-v3/blob/master/src/core/spectrum.cpp
+pub fn rgb_reflectance(linear_rgb: Vector3<f64>, wavelength_nm: f64) -> Option<f64> {
+    if !wavelength_nm.is_finite()
+        || wavelength_nm <= 0.0
+        || linear_rgb
+            .iter()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+    {
+        return None;
+    }
+
+    let table = &*RGB_REFLECTANCE_BASIS;
+    let wavelength_nm = wavelength_nm.clamp(table[0][0], table[table.len() - 1][0]);
+    let right = table.partition_point(|row| row[0] < wavelength_nm).max(1);
+    let left = right - 1;
+    let t = (wavelength_nm - table[left][0]) / (table[right][0] - table[left][0]);
+    let [white, cyan, magenta, yellow, red, green, blue] = std::array::from_fn(|index| {
+        table[left][index + 1] * (1.0 - t) + table[right][index + 1] * t
+    });
+
+    let (r, g, b) = (linear_rgb.x, linear_rgb.y, linear_rgb.z);
+    let reflectance = if r <= g && r <= b {
+        r * white
+            + if g <= b {
+                (g - r) * cyan + (b - g) * blue
+            } else {
+                (b - r) * cyan + (g - b) * green
+            }
+    } else if g <= r && g <= b {
+        g * white
+            + if r <= b {
+                (r - g) * magenta + (b - r) * blue
+            } else {
+                (b - g) * magenta + (r - b) * red
+            }
+    } else {
+        b * white
+            + if r <= g {
+                (r - b) * yellow + (g - r) * green
+            } else {
+                (g - b) * yellow + (r - g) * red
+            }
+    };
+    Some((0.94 * reflectance).clamp(0.0, 1.0))
+}
 
 /// CIE 1931 2° 颜色匹配函数 [x̄(λ), ȳ(λ), z̄(λ)]，不是已经积分的 XYZ。
 ///
@@ -118,6 +177,76 @@ fn interpolate<const N: usize>(table: &[[f64; N]], wavelength_nm: f64) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rgb_reflectance_matches_pbrt_samples_and_interpolates_with_endpoint_extension() {
+        assert_eq!(RGB_REFLECTANCE_BASIS.len(), 32);
+        // 独立锚点来自 PBRT 的 RGBRefl2SpectRed/Blue，而非 CIE 颜色表。
+        let red_at_380 = 0.94 * 1.657_560_486_708_618e-1;
+        let red_at_next = 0.94 * 1.1846442802747797e-1;
+        assert!((rgb_reflectance(Vector3::x(), 380.0).unwrap() - red_at_380).abs() < 1e-14);
+        assert!(
+            (rgb_reflectance(Vector3::z(), 380.0).unwrap() - 0.94 * 9.920_977_146_972_068e-1).abs()
+                < 1e-14
+        );
+        let midpoint = (380.0 + 390.967743) / 2.0;
+        assert!(
+            (rgb_reflectance(Vector3::x(), midpoint).unwrap() - (red_at_380 + red_at_next) / 2.0)
+                .abs()
+                < 1e-14
+        );
+        assert_eq!(
+            rgb_reflectance(Vector3::x(), 360.0),
+            rgb_reflectance(Vector3::x(), 380.0)
+        );
+        assert_eq!(
+            rgb_reflectance(Vector3::x(), 780.0),
+            rgb_reflectance(Vector3::x(), 720.0)
+        );
+        assert!(rgb_reflectance(Vector3::x(), 650.0).unwrap() > 0.8);
+        assert!(rgb_reflectance(Vector3::x(), 450.0).unwrap() < 0.05);
+        assert!(rgb_reflectance(Vector3::z(), 450.0).unwrap() > 0.8);
+        assert!(rgb_reflectance(Vector3::z(), 650.0).unwrap() < 0.1);
+        // PBRT 七基谱组合的六种 RGB 排序，固定参考值检查二次色和通道差值。
+        for (rgb, expected) in [
+            (Vector3::new(0.2, 0.5, 0.8), 0.7731004868887764),
+            (Vector3::new(0.2, 0.8, 0.5), 0.4940760664753345),
+            (Vector3::new(0.5, 0.2, 0.8), 0.7597784062710301),
+            (Vector3::new(0.8, 0.2, 0.5), 0.5267500564516008),
+            (Vector3::new(0.5, 0.8, 0.2), 0.20195544183758296),
+            (Vector3::new(0.8, 0.5, 0.2), 0.24795151243159563),
+        ] {
+            assert!((rgb_reflectance(rgb, 380.0).unwrap() - expected).abs() < 1e-14);
+        }
+    }
+
+    #[test]
+    fn rgb_reflectance_is_bounded_for_all_channel_orderings_and_rejects_invalid_input() {
+        for r in [0.0, 0.2, 0.5, 0.8, 1.0] {
+            for g in [0.0, 0.2, 0.5, 0.8, 1.0] {
+                for b in [0.0, 0.2, 0.5, 0.8, 1.0] {
+                    for nm in 360..=830 {
+                        let reflectance =
+                            rgb_reflectance(Vector3::new(r, g, b), f64::from(nm)).unwrap();
+                        assert!((0.0..=1.0).contains(&reflectance));
+                        if r == 0.0 && g == 0.0 && b == 0.0 {
+                            assert_eq!(reflectance, 0.0);
+                        }
+                    }
+                }
+            }
+        }
+        for value in [-0.1, 1.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for channel in 0..3 {
+                let mut rgb = Vector3::repeat(0.5);
+                rgb[channel] = value;
+                assert_eq!(rgb_reflectance(rgb, 550.0), None);
+            }
+        }
+        for nm in [0.0, -550.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(rgb_reflectance(Vector3::repeat(0.5), nm), None);
+        }
+    }
 
     fn assert_xyz(actual: Vector3<f64>, expected: Vector3<f64>, tolerance: f64) {
         assert!(

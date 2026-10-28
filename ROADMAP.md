@@ -235,11 +235,14 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 ### V0.4 阶段 5 — Material trait 与 BSDF 数值接口
 
 - [x] 按用户指定结构将运行时材质从 `geometry` 拆到 `material/`：`mod.rs` 定义 `Material: Send + Sync`，两个具体材质各自实现 trait；JSON 的 `MaterialConfig` 保留 enum。
-- [x] `Material::evaluate(wi, wo, normal) -> Vector3<f64>` 直接返回线性 RGB 的 BSDF 数值。方向都从交点向外指，归一化并检查非法数值；不包含入射辐亮度、余弦项或 PDF。
+- [x] `Material::evaluate_rgb(wi, wo, normal) -> Vector3<f64>` 直接返回线性 RGB 的 BSDF 数值。方向都从交点向外指，归一化并检查非法数值；不包含入射辐亮度、余弦项或 PDF。
+- [x] 按用户追加要求将原 `evaluate` 改名为 `evaluate_rgb`，增加 `evaluate_xyz(wi, wo, normal, wavelength_nm)`：Lambertian 用 PBRT/Smits 反射基谱重建 `rho(λ)`，返回 `rho(λ) / π × CIE CMF(λ)`，不含光源/波长积分权重；理想玻璃仍返回零。RGB→光谱是近似，数据来源、许可证、插值/端点延拓与能量裁剪见 `assets/color/README.md`。
+- [x] `render::utils::linear_srgb_to_xyz` 使用 W3C D65 矩阵转换线性 sRGB，保留显示范围外值并拒绝非法输入/溢出；与单波长光谱响应区分。
 - [x] 单面 Lambertian 在法线正半球内返回 `albedo / π`；背面、切线及非法方向返回零。理想 Dielectric 的普通求值返回零，通过 `is_delta()` 和 `ior()` 表达后续采样所需的信息。
 - [x] `SceneObject` 绑定几何和可选材质编号；场景保存 `Box<dyn Material>`，支持 `add_with_material` 添加自定义材质，最近交点仍通过 `Hit.material_id` 查询。
 - [x] 将现有相机法线调试遍历和对应测试统一移到 `render/camera_debug.rs`，保留原 `render::render_camera_debug` 调用入口；`render/integrator.rs` 专用于后续路径追踪。
 - **验收（已通过）：** BSDF 数值、半球/法线约定、方向归一化、非法输入与漫反射能量积分正确；JSON 构建和物体顺序关联、不同物体/材质编号、自定义 trait 实现通过。141 项单元测试、10 项集成测试、`cargo fmt --check`、严格 Clippy 和 diff 检查通过；默认 release 输出的八张 512×512 PNG 与重构前逐字节相同。
+- **光谱接口追加验收：** 148 项单元测试和 10 项集成测试通过；新增基谱锚点/插值/端点延拓、六种通道排序、红蓝材质波长响应、反射率能量上限、非法输入和线性 sRGB↔XYZ 往返检查。`cargo fmt --check`、严格 Clippy 和 diff 检查通过。上传前运行默认 `cargo run --release --locked`，重新生成八张默认 512×512 PNG；全部十张已保存阶段 PNG 的 SHA-256 与运行前一致。现有渲染仍未调用材质 BSDF。
 - **范围：** 只完成材质接口和组织，不接入新的光照积分、Fresnel 采样或路径追踪。理想玻璃的 delta 贡献需要下一阶段的 `sample` / `pdf` 接口；现有光源焦散继续使用固定值/Cauchy 折射率。
 
 ## 6. Codex 执行约定

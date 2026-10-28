@@ -2,6 +2,31 @@
 
 use nalgebra::{Matrix3, Vector3};
 
+/// 将线性 sRGB 转为 D65 白点下的 CIE XYZ，参考白的 Y = 1。
+/// 只做颜色空间转换，不施加 sRGB 解码、曝光或裁剪，也不重建反射光谱。
+/// 输入非有限值或计算溢出时返回 None。
+///
+/// 矩阵来源：W3C CSS Color 4 的 lin_sRGB_to_XYZ：
+/// https://www.w3.org/TR/css-color-4/#color-conversion-code
+pub fn linear_srgb_to_xyz(linear_rgb: Vector3<f64>) -> Option<Vector3<f64>> {
+    if !linear_rgb.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    let matrix = Matrix3::new(
+        506752.0 / 1228815.0,
+        87881.0 / 245763.0,
+        12673.0 / 70218.0,
+        87098.0 / 409605.0,
+        175762.0 / 245763.0,
+        12673.0 / 175545.0,
+        7918.0 / 409605.0,
+        87881.0 / 737289.0,
+        1001167.0 / 1053270.0,
+    );
+    let xyz = matrix * linear_rgb;
+    xyz.iter().all(|value| value.is_finite()).then_some(xyz)
+}
+
 /// 将 D65 白点约定下的 CIE XYZ 转为线性 sRGB，参考白的 Y = 1。
 /// 保留超出 [0, 1] 的结果；save_png 负责显示范围处理和后续编码。
 /// 输入非有限值或计算溢出时返回 None。
@@ -178,6 +203,54 @@ mod tests {
     fn black_stays_black() {
         // 没有颜色贡献的像素经过转换后仍应为黑色。
         assert_eq!(xyz_to_linear_srgb(Vector3::zeros()), Some(Vector3::zeros()));
+        assert_eq!(linear_srgb_to_xyz(Vector3::zeros()), Some(Vector3::zeros()));
+    }
+
+    #[test]
+    fn linear_srgb_white_and_primaries_become_d65_xyz() {
+        let white_xyz = Vector3::new(0.3127 / 0.3290, 1.0, (1.0 - 0.3127 - 0.3290) / 0.3290);
+        assert_rgb_near(linear_srgb_to_xyz(Vector3::repeat(1.0)).unwrap(), white_xyz);
+        for (rgb, expected) in [
+            (
+                Vector3::x(),
+                Vector3::new(0.4123907992659595, 0.2126390058715104, 0.0193308187155919),
+            ),
+            (
+                Vector3::y(),
+                Vector3::new(0.357584339383878, 0.715168678767756, 0.119194779794626),
+            ),
+            (
+                Vector3::z(),
+                Vector3::new(0.1804807884018343, 0.0721923153607337, 0.9505321522496606),
+            ),
+        ] {
+            assert_rgb_near(linear_srgb_to_xyz(rgb).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn linear_srgb_conversion_preserves_linear_values_without_clamping_or_gamma() {
+        for rgb in [Vector3::repeat(0.5), Vector3::new(-0.2, 1.5, 0.4)] {
+            let xyz = linear_srgb_to_xyz(rgb).unwrap();
+            assert_rgb_near(xyz_to_linear_srgb(xyz).unwrap(), rgb);
+        }
+        let white = linear_srgb_to_xyz(Vector3::repeat(1.0)).unwrap();
+        assert_rgb_near(
+            linear_srgb_to_xyz(Vector3::repeat(0.5)).unwrap(),
+            white * 0.5,
+        );
+    }
+
+    #[test]
+    fn linear_srgb_conversion_rejects_non_finite_values_and_overflow() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for channel in 0..3 {
+                let mut rgb = Vector3::repeat(0.5);
+                rgb[channel] = value;
+                assert_eq!(linear_srgb_to_xyz(rgb), None);
+            }
+        }
+        assert_eq!(linear_srgb_to_xyz(Vector3::repeat(f64::MAX)), None);
     }
 
     #[test]

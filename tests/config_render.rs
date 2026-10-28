@@ -136,7 +136,7 @@ fn json_materials_build_runtime_values_and_follow_the_hit_object() {
             assert_eq!(material.is_delta(), expected_ior.is_some());
             // 材质通过 dyn Material 分派；在命中法线的正半球求 BSDF。
             assert_eq!(
-                material.evaluate(hit.normal, -ray.direction, hit.normal),
+                material.evaluate_rgb(hit.normal, -ray.direction, hit.normal),
                 expected_bsdf
             );
             assert_eq!(
@@ -159,13 +159,24 @@ fn json_materials_build_runtime_values_and_follow_the_hit_object() {
 fn scene_accepts_custom_materials_without_changing_geometry_or_a_material_enum() {
     struct CustomMaterial;
     impl Material for CustomMaterial {
-        fn evaluate(
+        fn evaluate_rgb(
             &self,
             _wi: Vector3<f64>,
             _wo: Vector3<f64>,
             _normal: Vector3<f64>,
         ) -> Vector3<f64> {
             Vector3::new(0.1, 0.2, 0.3)
+        }
+
+        fn evaluate_xyz(
+            &self,
+            _wi: Vector3<f64>,
+            _wo: Vector3<f64>,
+            _normal: Vector3<f64>,
+            wavelength_nm: f64,
+        ) -> Vector3<f64> {
+            // 自定义材质也可直接提供光谱 BSDF；这里设为常数 0.2 sr⁻¹。
+            spectral_caustics::optics::spectrum::cie_xyz(wavelength_nm).unwrap_or_default() * 0.2
         }
     }
 
@@ -181,9 +192,12 @@ fn scene_accepts_custom_materials_without_changing_geometry_or_a_material_enum()
     assert_eq!(hit.material_id, Some(0)); // 几何编号与材质表编号可以不同。
     let material = scene.material(hit.material_id.unwrap()).unwrap();
     assert_eq!(
-        material.evaluate(-ray.direction, -ray.direction, hit.normal),
+        material.evaluate_rgb(-ray.direction, -ray.direction, hit.normal),
         Vector3::new(0.1, 0.2, 0.3)
     );
+    let xyz = material.evaluate_xyz(-ray.direction, -ray.direction, hit.normal, 550.0);
+    // CIE 官方 550 nm 表值，验证光谱接口经 trait object 分派。
+    assert!((xyz - Vector3::new(0.4334499, 0.9949501, 0.008749999) * 0.2).norm() < 1e-12);
     assert!(!material.is_delta());
     assert_eq!(material.ior(), None);
 }
