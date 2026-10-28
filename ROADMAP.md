@@ -235,17 +235,18 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 ### V0.4 阶段 5 — Material trait 与 BSDF 数值接口
 
 - [x] 按用户指定结构将运行时材质从 `geometry` 拆到 `material/`：`mod.rs` 定义 `Material: Send + Sync`，两个具体材质各自实现 trait；JSON 的 `MaterialConfig` 保留 enum。
-- [x] `Material::evaluate_rgb(wi, wo, normal) -> Vector3<f64>` 直接返回线性 RGB 的 BSDF 数值。方向都从交点向外指，归一化并检查非法数值；不包含入射辐亮度、余弦项或 PDF。
-- [x] 按用户追加要求将原 `evaluate` 改名为 `evaluate_rgb`，光谱接口为 `evaluate_spectral(wi, wo, normal, wavelength_nm) -> f64`：Lambertian 用 PBRT/Smits 反射基谱重建 `rho(λ)`，只返回 `rho(λ) / π`；CIE 匹配函数、光源和积分权重由积分器处理，理想玻璃普通求值返回 `0.0`。RGB→光谱是近似，数据来源、许可证、插值/端点延拓与能量裁剪见 `assets/color/README.md`。
+- [x] `Material::evaluate(wi, wo, normal, mode) -> BsdfValue` 统一 BSDF 求值：`EvaluateMode::Rgb` 返回 `BsdfValue::Rgb(Vector3<f64>)`，`EvaluateMode::Spectral { wavelength_nm }` 返回 `BsdfValue::Spectral(f64)`，波长单位 nm。方向都从交点向外指，归一化并检查非法数值；不包含入射辐亮度、余弦项或 PDF。按用户要求将原有 RGB/光谱两个方法合并，并保持 trait object 可用。
+- [x] 光谱模式下 Lambertian 用 PBRT/Smits 反射基谱重建 `rho(λ)`，只返回 `rho(λ) / π`；CIE 匹配函数、光源和积分权重由积分器处理，理想玻璃普通求值返回所选模式的零值。RGB→光谱是近似，数据来源、许可证、插值/端点延拓与能量裁剪见 `assets/color/README.md`。
 - [x] `render::utils::linear_srgb_to_xyz` 使用 W3C D65 矩阵转换线性 sRGB，保留显示范围外值并拒绝非法输入/溢出；与标量光谱 BSDF 区分。
 - [x] `material::to_world(local, normal)` 以法线为局部 +Z 构造右手正交基，将局部方向变换到世界空间，保留向量长度；拒绝非法法线、非有限分量与计算溢出。
 - [x] 单面 Lambertian 在法线正半球内返回 `albedo / π`；背面、切线及非法方向返回零。理想 Dielectric 的普通求值返回零，通过 `is_delta()` 和 `ior()` 表达后续采样所需的信息。
 - [x] `SceneObject` 绑定几何和可选材质编号；场景保存 `Box<dyn Material>`，支持 `add_with_material` 添加自定义材质，最近交点仍通过 `Hit.material_id` 查询。
 - [x] 将现有相机法线调试遍历和对应测试统一移到 `render/camera_debug.rs`，保留原 `render::render_camera_debug` 调用入口；`render/integrator.rs` 专用于后续路径追踪。
 - **验收（已通过）：** BSDF 数值、半球/法线约定、方向归一化、非法输入与漫反射能量积分正确；JSON 构建和物体顺序关联、不同物体/材质编号、自定义 trait 实现通过。141 项单元测试、10 项集成测试、`cargo fmt --check`、严格 Clippy 和 diff 检查通过；默认 release 输出的八张 512×512 PNG 与重构前逐字节相同。
-- **光谱接口追加验收：** 148 项单元测试和 10 项集成测试通过；覆盖基谱锚点/插值/端点延拓、六种通道排序、红蓝材质波长响应、标量 `rho(λ) / π` 数值与半球能量积分、非法输入和线性 sRGB↔XYZ 往返检查。标量接口不受 CIE 表范围限制；材质自定义实现与 trait object 分派返回 `f64`。`cargo fmt --check`、严格 Clippy 和 diff 检查通过。现有渲染仍未调用材质 BSDF。
+- **光谱接口追加验收：** 148 项单元测试和 10 项集成测试通过；覆盖基谱锚点/插值/端点延拓、六种通道排序、红蓝材质波长响应、标量 `rho(λ) / π` 数值与半球能量积分、非法输入和线性 sRGB↔XYZ 往返检查。光谱求值不受 CIE 表范围限制；材质自定义实现与 trait object 分派的光谱结果保持标量。`cargo fmt --check`、严格 Clippy 和 diff 检查通过。现有渲染仍未调用材质 BSDF。
 - **范围：** 只完成材质接口和组织，不接入新的光照积分、Fresnel 采样或路径追踪。理想玻璃的 delta 贡献需要后续的离散事件采样；现有光源焦散继续使用固定值/Cauchy 折射率。
 - **局部方向转换验收：** 151 项单元测试和 10 项集成测试通过；新增测试覆盖局部 +Z 与世界法线对齐、法线缩放、右手性、正交单位基、向量长度与半球方向保持、接近坐标轴的法线、零局部向量、非法输入与溢出。格式、严格 Clippy 和 diff 检查通过。
+- **统一求值模式验收：** 155 项单元测试和 10 项集成测试通过；RGB/光谱模式共用方向校验，返回变体与所选模式对应，保留原有 BSDF 数值和非法输入的零值行为。JSON 材质及自定义材质通过同一 trait object 选择模式，采样的 RGB/光谱权重分别恢复反射率。`cargo fmt --check`、严格 `cargo clippy --locked --all-targets -- -D warnings` 和 diff 检查通过。
 
 ### V0.4 阶段 6 — Lambertian 方向采样与 PDF
 
@@ -255,6 +256,16 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - [x] RNG 由调用方持有和设置种子；固定种子可复现，采样分布与 albedo 无关。验证 PDF 归一化、分布矩、单位长度、正半球、`f_r cosθ / pdf` 恢复反射率以及 JSON 材质经 trait object 分派。
 - **验收：** 155 项单元测试、10 项集成测试、`cargo fmt --check`、严格 `cargo clippy --locked --all-targets -- -D warnings` 和 diff 检查通过。上传前运行 `cargo run --release --locked`，八张默认 512×512 PNG 生成成功，全部十张已保存 PNG 的 SHA-256 与运行前一致。
 - **范围：** 按用户选择仅实现 Lambertian 连续方向采样；Dielectric 仍为 delta 材质，`sample = None`、普通方向 `pdf = 0.0`，后续再实现 Fresnel 离散事件采样。现有焦散追踪、相机法线图和光照积分保持当前阶段的行为。
+
+### V0.4 阶段 7 — 相机单次直接光照
+
+- [x] 在 `render/integrator.rs` 中实现并导出 `render_camera_lit(scene, width, height) -> Result<Framebuffer, _>`：每像素生成中心主光线，最近求交后按 `Hit.material_id` 查询材质。
+- [x] 通过统一接口 `material.evaluate(wi, wo, normal, EvaluateMode::Rgb)` 读取 RGB BSDF；`wi` 指向光源，`wo` 指向相机，归一化法线并保留几何朝向，计算 `L_o = f_r L_light max(n · wi, 0)`。
+- [x] 复用 `linear_srgb_to_xyz` 和 `framebuffer.set` 写入未曝光的线性 XYZ；未命中使用配置的线性 RGB 背景，未绑定材质与理想 delta 玻璃命中为黑色。
+- [x] `main` 新增主图同目录的 `camera_lit.png`，默认路径为 `output/camera_lit.png`，复用 `Render::save` 施加曝光和 sRGB 编码；与主图同名时使用 `debug_camera_lit.png`，加入默认输出示例。
+- **光源约定：** 以 `total_flux / 水平孔径面积` 作为白色平行光的相对方向光强度（默认 `0.5`）。本阶段不校准绝对辐射度，也不进行斜射孔径投影校正、有限孔径覆盖裁切或阴影查询。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked`（159 项单元测试、10 项集成测试）、严格 `cargo clippy --locked --all-targets -- -D warnings` 和 diff 检查通过。测试覆盖材质/光强/一个余弦项、法线朝向、背景和最近命中、非法输入、PNG 尺寸/曝光/sRGB 及文件名冲突。`cargo run --release --locked` 实际输出九张默认图，新增 `camera_lit.png` 为 512×512 RGB8，已查看其黑色玻璃轮廓与灰色地面；运行前已有的十张 PNG 的 SHA-256 全部保持一致。
+- **范围：** 仅完成一次确定的 RGB 直接光照，不使用方向采样/PDF，不实现递归反射/折射、间接光或焦散叠加。默认玻璃仍为黑色；后续可先加阴影查询，再实现玻璃采样。
 
 ## 6. Codex 执行约定
 

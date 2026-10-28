@@ -7,8 +7,8 @@ use spectral_caustics::{
         sceneconfig::{ObjectConfig, SceneConfig},
     },
     geometry::{ground::Ground, ray::Ray},
-    material::Material,
-    optics::iormode::IorMode,
+    material::{BsdfValue, EvaluateMode, Material},
+    optics::{iormode::IorMode, spectrum::rgb_reflectance},
     render::{Render, caustics::ground_to_pixel, framebuffer::Framebuffer},
     scene::Scene,
 };
@@ -137,9 +137,26 @@ fn json_materials_build_runtime_values_and_follow_the_hit_object() {
             assert_eq!(material.is_delta(), expected_ior.is_some());
             // 材质通过 dyn Material 分派；在命中法线的正半球求 BSDF。
             assert_eq!(
-                material.evaluate_rgb(hit.normal, -ray.direction, hit.normal),
-                expected_bsdf
+                material.evaluate(hit.normal, -ray.direction, hit.normal, EvaluateMode::Rgb),
+                BsdfValue::Rgb(expected_bsdf)
             );
+            for wavelength_nm in [450.0, 550.0, 650.0] {
+                let expected_spectral = if material.is_delta() {
+                    0.0
+                } else {
+                    rgb_reflectance(Vector3::new(0.2, 0.3, 0.4), wavelength_nm).unwrap()
+                        / std::f64::consts::PI
+                };
+                assert_eq!(
+                    material.evaluate(
+                        hit.normal,
+                        -ray.direction,
+                        hit.normal,
+                        EvaluateMode::Spectral { wavelength_nm },
+                    ),
+                    BsdfValue::Spectral(expected_spectral)
+                );
+            }
             let mut rng = StdRng::seed_from_u64(42);
             if material.is_delta() {
                 assert_eq!(material.sample(hit.normal, hit.normal, &mut rng), None);
@@ -150,7 +167,12 @@ fn json_materials_build_runtime_values_and_follow_the_hit_object() {
                 let cosine = hit.normal.dot(&wi);
                 let pdf = material.pdf(wi, hit.normal, hit.normal);
                 assert!(cosine > 0.0 && pdf > 0.0);
-                let weight = material.evaluate_rgb(wi, hit.normal, hit.normal) * (cosine / pdf);
+                let BsdfValue::Rgb(f) =
+                    material.evaluate(wi, hit.normal, hit.normal, EvaluateMode::Rgb)
+                else {
+                    panic!("RGB 模式必须返回 RGB BSDF");
+                };
+                let weight = f * (cosine / pdf);
                 assert!((weight - Vector3::new(0.2, 0.3, 0.4)).norm() < 1e-12);
             }
             assert_eq!(
@@ -173,27 +195,23 @@ fn json_materials_build_runtime_values_and_follow_the_hit_object() {
 fn scene_accepts_custom_materials_without_changing_geometry_or_a_material_enum() {
     struct CustomMaterial;
     impl Material for CustomMaterial {
-        fn evaluate_rgb(
+        fn evaluate(
             &self,
             _wi: Vector3<f64>,
             _wo: Vector3<f64>,
             _normal: Vector3<f64>,
-        ) -> Vector3<f64> {
-            Vector3::new(0.1, 0.2, 0.3)
-        }
-
-        fn evaluate_spectral(
-            &self,
-            _wi: Vector3<f64>,
-            _wo: Vector3<f64>,
-            _normal: Vector3<f64>,
-            wavelength_nm: f64,
-        ) -> f64 {
-            // 自定义材质也可直接提供光谱 BSDF；这里设为常数 0.2 sr⁻¹。
-            if wavelength_nm.is_finite() && wavelength_nm > 0.0 {
-                0.2
-            } else {
-                0.0
+            mode: EvaluateMode,
+        ) -> BsdfValue {
+            match mode {
+                EvaluateMode::Rgb => BsdfValue::Rgb(Vector3::new(0.1, 0.2, 0.3)),
+                EvaluateMode::Spectral { wavelength_nm } => {
+                    // 自定义材质也可直接提供光谱 BSDF；这里设为常数 0.2 sr⁻¹。
+                    BsdfValue::Spectral(if wavelength_nm.is_finite() && wavelength_nm > 0.0 {
+                        0.2
+                    } else {
+                        0.0
+                    })
+                }
             }
         }
     }
@@ -210,13 +228,25 @@ fn scene_accepts_custom_materials_without_changing_geometry_or_a_material_enum()
     assert_eq!(hit.material_id, Some(0)); // 几何编号与材质表编号可以不同。
     let material = scene.material(hit.material_id.unwrap()).unwrap();
     assert_eq!(
-        material.evaluate_rgb(-ray.direction, -ray.direction, hit.normal),
-        Vector3::new(0.1, 0.2, 0.3)
+        material.evaluate(
+            -ray.direction,
+            -ray.direction,
+            hit.normal,
+            EvaluateMode::Rgb
+        ),
+        BsdfValue::Rgb(Vector3::new(0.1, 0.2, 0.3))
     );
-    // 验证光谱接口经 trait object 分派，并直接返回标量 BSDF。
+    // 同一个 trait object 按 mode 分派，光谱变体保留标量 BSDF。
     assert_eq!(
-        material.evaluate_spectral(-ray.direction, -ray.direction, hit.normal, 550.0),
-        0.2
+        material.evaluate(
+            -ray.direction,
+            -ray.direction,
+            hit.normal,
+            EvaluateMode::Spectral {
+                wavelength_nm: 550.0
+            },
+        ),
+        BsdfValue::Spectral(0.2)
     );
     // 只提供 BSDF 求值的自定义材质可保留默认的“无采样器”行为。
     let mut rng = StdRng::seed_from_u64(42);
@@ -481,6 +511,7 @@ fn executable_reads_json_from_argument_and_respects_output_size_mode_exposure_an
         "wavelength_650nm.png",
         "no_prism.png",
         "camera_debug.png",
+        "camera_lit.png",
     ];
     for name in names {
         assert_eq!(
@@ -496,7 +527,12 @@ fn executable_reads_json_from_argument_and_respects_output_size_mode_exposure_an
     config.save(&path).unwrap();
     let output = run();
     assert!(output.status.success(), "{:?}", output);
-    for name in ["no_prism.png", "debug_no_prism.png", "dispersion.png"] {
+    for name in [
+        "no_prism.png",
+        "debug_no_prism.png",
+        "dispersion.png",
+        "camera_lit.png",
+    ] {
         assert!(
             image::open(directory.0.join("nested").join(name))
                 .unwrap()
@@ -528,6 +564,44 @@ fn executable_reads_json_from_argument_and_respects_output_size_mode_exposure_an
         .into_rgb8();
     assert_eq!(debug.dimensions(), (12, 8));
     assert!(debug.pixels().all(|p| p.0 == [25, 30, 45]));
+
+    // 同名主图不能被相机光照图覆盖；背景按线性颜色和配置曝光输出。
+    config.render.output_path = PathBuf::from("nested/camera_lit.png");
+    config.render.exposure = 1.0;
+    config.scene.background_linear_rgb = [0.0, 0.5, 0.0];
+    config.save(&path).unwrap();
+    let output = run();
+    assert!(output.status.success(), "{:?}", output);
+    let lit = image::open(directory.0.join("nested/debug_camera_lit.png"))
+        .unwrap()
+        .into_rgb8();
+    assert_eq!(lit.dimensions(), (12, 8));
+    assert!(lit.pixels().all(|p| p.0 == [0, 188, 0]));
+    let primary = image::open(directory.0.join("nested/camera_lit.png"))
+        .unwrap()
+        .into_rgb8();
+    assert!(primary.pixels().any(|p| p.0 != [0, 188, 0]));
+
+    // 看向地面，用已知 albedo/光强/曝光验证完整 RGB→XYZ→sRGB PNG 链路。
+    config.render.output_path = PathBuf::from("nested/custom.png");
+    config.render.exposure = std::f64::consts::PI / 2.0;
+    config.scene.camera.position = [1.5, 0.0, 2.0];
+    config.scene.camera.target = [1.5, 0.0, 0.0];
+    config.scene.camera.fov_y_degrees = 5.0;
+    config.scene.light.total_flux = 16.0; // L_light = 16 / 16 = 1。
+    if let ObjectConfig::Ground { material, .. } = &mut config.scene.objects[1] {
+        *material = MaterialConfig::Lambertian {
+            albedo: [1.0, 0.0, 0.0],
+        };
+    }
+    config.save(&path).unwrap();
+    let output = run();
+    assert!(output.status.success(), "{:?}", output);
+    let lit = image::open(directory.0.join("nested/camera_lit.png"))
+        .unwrap()
+        .into_rgb8();
+    // (1/π) × 1 × cos(0) × (π/2) = 0.5，sRGB 编码为 188。
+    assert!(lit.pixels().all(|p| p.0 == [188, 0, 0]));
 
     fs::write(&path, "{").unwrap();
     let output = run();

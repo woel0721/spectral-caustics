@@ -1,6 +1,6 @@
 //! 单面 Lambertian 漫反射，正半球内 f_r = albedo / π。
 
-use super::{Material, to_world, unit_vector};
+use super::{BsdfValue, EvaluateMode, Material, to_world, unit_vector};
 use crate::optics::spectrum::rgb_reflectance;
 use nalgebra::Vector3;
 use rand::{Rng, RngCore};
@@ -29,35 +29,27 @@ impl Lambertian {
 }
 
 impl Material for Lambertian {
-    fn evaluate_rgb(
+    fn evaluate(
         &self,
         wi: Vector3<f64>,
         wo: Vector3<f64>,
         normal: Vector3<f64>,
-    ) -> Vector3<f64> {
+        mode: EvaluateMode,
+    ) -> BsdfValue {
         let (Some(wi), Some(wo), Some(normal)) =
             (unit_vector(wi), unit_vector(wo), unit_vector(normal))
         else {
-            return Vector3::zeros();
+            return BsdfValue::zero(mode);
         };
         if normal.dot(&wi) <= 0.0 || normal.dot(&wo) <= 0.0 {
-            return Vector3::zeros();
+            return BsdfValue::zero(mode);
         }
-        self.albedo / PI
-    }
-
-    fn evaluate_spectral(
-        &self,
-        wi: Vector3<f64>,
-        wo: Vector3<f64>,
-        normal: Vector3<f64>,
-        wavelength_nm: f64,
-    ) -> f64 {
-        // 复用 RGB 接口的方向校验；黑色和无效反射方向都没有贡献。
-        if self.evaluate_rgb(wi, wo, normal) == Vector3::zeros() {
-            return 0.0;
+        match mode {
+            EvaluateMode::Rgb => BsdfValue::Rgb(self.albedo / PI),
+            EvaluateMode::Spectral { wavelength_nm } => {
+                BsdfValue::Spectral(rgb_reflectance(self.albedo, wavelength_nm).unwrap_or(0.0) / PI)
+            }
         }
-        rgb_reflectance(self.albedo, wavelength_nm).unwrap_or(0.0) / PI
     }
 
     fn sample(
@@ -98,6 +90,33 @@ mod tests {
     use super::*;
     use rand::{SeedableRng, rngs::StdRng};
 
+    fn rgb_bsdf(
+        material: &dyn Material,
+        wi: Vector3<f64>,
+        wo: Vector3<f64>,
+        normal: Vector3<f64>,
+    ) -> Vector3<f64> {
+        let BsdfValue::Rgb(value) = material.evaluate(wi, wo, normal, EvaluateMode::Rgb) else {
+            panic!("RGB 模式必须返回 RGB BSDF");
+        };
+        value
+    }
+
+    fn spectral_bsdf(
+        material: &dyn Material,
+        wi: Vector3<f64>,
+        wo: Vector3<f64>,
+        normal: Vector3<f64>,
+        wavelength_nm: f64,
+    ) -> f64 {
+        let BsdfValue::Spectral(value) =
+            material.evaluate(wi, wo, normal, EvaluateMode::Spectral { wavelength_nm })
+        else {
+            panic!("光谱模式必须返回标量 BSDF");
+        };
+        value
+    }
+
     #[test]
     fn cosine_pdf_matches_known_directions_and_integrates_to_one() {
         let material = Lambertian::new(Vector3::repeat(0.8)).unwrap();
@@ -136,8 +155,10 @@ mod tests {
             assert!(cos_theta > 0.0 && pdf > 0.0);
             assert!((pdf - cos_theta / PI).abs() < 1e-14);
             // 正确的 Lambertian 重要性采样权重 f_r cosθ / p 应恰好恢复 albedo。
-            let weight = material.evaluate_rgb(wi, wo, n) * (cos_theta / pdf);
+            let weight = rgb_bsdf(&material, wi, wo, n) * (cos_theta / pdf);
             assert!((weight - albedo).norm() < 1e-12);
+            let spectral_weight = spectral_bsdf(&material, wi, wo, n, 550.0) * (cos_theta / pdf);
+            assert!((spectral_weight - rgb_reflectance(albedo, 550.0).unwrap()).abs() < 1e-12);
             mean += wi;
             mean_cos_squared += cos_theta * cos_theta;
         }
@@ -198,17 +219,17 @@ mod tests {
         let material = Lambertian::new(albedo).unwrap();
         assert_eq!(material.albedo(), albedo);
         for wi in [Vector3::z(), Vector3::new(3.0, 0.0, 4.0)] {
-            let value = material.evaluate_rgb(wi, Vector3::z() * 2.0, Vector3::z() * 3.0);
+            let value = rgb_bsdf(&material, wi, Vector3::z() * 2.0, Vector3::z() * 3.0);
             assert!((value - albedo / PI).norm() < 1e-14);
         }
         // 求值跟随传入的世界空间法线，不能硬编码为 +z 半球。
         let normal = Vector3::new(1.0, 2.0, 3.0);
         assert_eq!(
-            material.evaluate_rgb(normal, normal * 2.0, normal),
+            rgb_bsdf(&material, normal, normal * 2.0, normal),
             albedo / PI
         );
         assert_eq!(
-            material.evaluate_rgb(-normal, normal, normal),
+            rgb_bsdf(&material, -normal, normal, normal),
             Vector3::zeros()
         );
 
@@ -218,7 +239,7 @@ mod tests {
         for index in 0..steps {
             let cos_theta = (f64::from(index) + 0.5) / f64::from(steps);
             let wi = Vector3::new((1.0 - cos_theta * cos_theta).sqrt(), 0.0, cos_theta);
-            reflected += material.evaluate_rgb(wi, Vector3::z(), Vector3::z())
+            reflected += rgb_bsdf(&material, wi, Vector3::z(), Vector3::z())
                 * cos_theta
                 * (2.0 * PI / f64::from(steps));
         }
@@ -240,7 +261,7 @@ mod tests {
                 (Vector3::z(), invalid, Vector3::z()),
                 (Vector3::z(), Vector3::z(), invalid),
             ] {
-                assert_eq!(material.evaluate_rgb(wi, wo, normal), Vector3::zeros());
+                assert_eq!(rgb_bsdf(&material, wi, wo, normal), Vector3::zeros());
             }
         }
         for (wi, wo) in [
@@ -250,14 +271,11 @@ mod tests {
             (Vector3::x(), Vector3::z()),
             (Vector3::z(), Vector3::x()),
         ] {
-            assert_eq!(
-                material.evaluate_rgb(wi, wo, Vector3::z()),
-                Vector3::zeros()
-            );
+            assert_eq!(rgb_bsdf(&material, wi, wo, Vector3::z()), Vector3::zeros());
         }
         // 从背面观察时，调用方可显式翻转着色法线。
         assert_eq!(
-            material.evaluate_rgb(-Vector3::z(), -Vector3::z(), -Vector3::z()),
+            rgb_bsdf(&material, -Vector3::z(), -Vector3::z(), -Vector3::z()),
             Vector3::repeat(0.8 / PI)
         );
     }
@@ -268,7 +286,7 @@ mod tests {
         let blue = Lambertian::new(Vector3::z()).unwrap();
         let n = Vector3::z();
         let bsdf =
-            |material: &dyn Material, nm| material.evaluate_spectral(n * 2.0, n * 3.0, n * 4.0, nm);
+            |material: &dyn Material, nm| spectral_bsdf(material, n * 2.0, n * 3.0, n * 4.0, nm);
         assert!(bsdf(&red, 650.0) > 8.0 * bsdf(&blue, 650.0));
         assert!(bsdf(&blue, 450.0) > 16.0 * bsdf(&red, 450.0));
         let red_at_380 = 0.94 * 1.657_560_486_708_618e-1 / PI;
@@ -276,12 +294,12 @@ mod tests {
 
         // 正入射与斜入射 BSDF 一样；余弦项不能在材质接口中重复计算。
         assert_eq!(
-            red.evaluate_spectral(Vector3::new(3.0, 0.0, 4.0), n, n, 650.0),
+            spectral_bsdf(&red, Vector3::new(3.0, 0.0, 4.0), n, n, 650.0),
             bsdf(&red, 650.0)
         );
         let normal = Vector3::x();
         assert_eq!(
-            red.evaluate_spectral(normal, normal, normal, 650.0),
+            spectral_bsdf(&red, normal, normal, normal, 650.0),
             bsdf(&red, 650.0)
         );
 
@@ -294,7 +312,7 @@ mod tests {
         for index in 0..64 {
             let cos_theta = (f64::from(index) + 0.5) / 64.0;
             let wi = Vector3::new((1.0 - cos_theta * cos_theta).sqrt(), 0.0, cos_theta);
-            reflected += red.evaluate_spectral(wi, n, n, 380.0) * cos_theta * (2.0 * PI / 64.0);
+            reflected += spectral_bsdf(&red, wi, n, n, 380.0) * cos_theta * (2.0 * PI / 64.0);
         }
         assert!((reflected - red_at_380 * PI).abs() < 1e-14);
         assert!((0.0..=1.0).contains(&reflected));
@@ -309,19 +327,20 @@ mod tests {
             Vector3::repeat(f64::NAN),
             Vector3::repeat(f64::INFINITY),
             Vector3::repeat(f64::MAX),
+            Vector3::repeat(f64::from_bits(1)),
         ] {
             for (wi, wo, normal) in [(invalid, n, n), (n, invalid, n), (n, n, invalid)] {
-                assert_eq!(material.evaluate_spectral(wi, wo, normal, 550.0), 0.0);
+                assert_eq!(spectral_bsdf(&material, wi, wo, normal, 550.0), 0.0);
             }
         }
         for (wi, wo) in [(-n, n), (n, -n), (Vector3::x(), n), (n, Vector3::x())] {
-            assert_eq!(material.evaluate_spectral(wi, wo, n, 550.0), 0.0);
+            assert_eq!(spectral_bsdf(&material, wi, wo, n, 550.0), 0.0);
         }
         for nm in [0.0, -550.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert_eq!(material.evaluate_spectral(n, n, n, nm), 0.0);
+            assert_eq!(spectral_bsdf(&material, n, n, n, nm), 0.0);
         }
         let black = Lambertian::new(Vector3::zeros()).unwrap();
-        assert_eq!(black.evaluate_spectral(n, n, n, 550.0), 0.0);
+        assert_eq!(spectral_bsdf(&black, n, n, n, 550.0), 0.0);
     }
 
     #[test]

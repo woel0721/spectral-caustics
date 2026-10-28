@@ -10,4 +10,5 @@
 !/output/caustics.png
 !/output/constant_ior.png
 !/output/camera_debug.png
+!/output/camera_lit.png
 .DS_Store

@@ -38,4 +38,4 @@ PBRT 代码和基谱的版权为 Matt Pharr、Greg Humphreys 和 Wenzel Jakob，
 - 方法说明：[PBRT — The SampledSpectrum Class](https://pbr-book.org/3ed-2018/Color_and_Radiometry/The_SampledSpectrum_Class)，以及 Brian Smits, *An RGB-to-Spectrum Conversion for Reflectances* (1999)，[DOI](https://doi.org/10.1080/10867651.1999.10487511)。
 - 数据 SHA-256：`bc785beefb8dd372b94d9f9092790fe18a9aeb43064d6defd6639dcafdd6d1c7`。
 - 实现：`src/optics/spectrum.rs::rgb_reflectance` 按 RGB 通道排序组合白、二次色和原色基谱，沿波长线性插值并在表外延用最近端点。使用 PBRT 的 0.94 反射率缩放；本项目额外将最终反射率上限设为 1（PBRT 原实现仅将负值裁为零），保证各波长 Lambertian 反射能量不超过入射能量。
-- 本实现直接查询原始分段线性基谱，没有经过 PBRT 内部 400–700 nm 的分桶平均；RGB→光谱不唯一，D65 下的 RGB 还原不保证精确。材质的 `evaluate_spectral` 仅返回标量光谱 BSDF；CIE 匹配函数在积分器转换为 XYZ 时使用，表外的 XYZ 响应为零。
+- 本实现直接查询原始分段线性基谱，没有经过 PBRT 内部 400–700 nm 的分桶平均；RGB→光谱不唯一，D65 下的 RGB 还原不保证精确。材质的 `evaluate` 在 `EvaluateMode::Spectral { wavelength_nm }` 模式下返回 `BsdfValue::Spectral(f64)`，仅保存标量光谱 BSDF；CIE 匹配函数在积分器转换为 XYZ 时使用，表外的 XYZ 响应为零。

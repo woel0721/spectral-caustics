@@ -21,6 +21,8 @@
 
 **Day 5 已完成：光谱积分与彩色 PNG 输出。** `spectrum` 导入可追溯的 CIE 1931 2° CMF 和 D65 相对 SPD，支持非整数波长的线性插值，按 `k × S(λ) × CMF(λ) × Δλ` 返回单个波长的线性 XYZ。`render_spectral_caustics` 独立发射与追踪光线，将 41 个波长的光子贡献直接双线性累积到一张 XYZ 图。`main` 以相同采样和曝光输出彩色 `output/caustics.png` 及固定折射率白光对照 `output/constant_ior.png`。数据、许可和校验和见 [assets/color/README.md](assets/color/README.md)。
 
+**V0.4 已接入相机单次直接光照。** `render_camera_lit` 从相机生成主光线，按最近命中的材质计算 `L_o = f_r L_light max(n · wi, 0)`，经线性 RGB→XYZ 写入 Framebuffer，再复用曝光和 sRGB 输出 `output/camera_lit.png`。玻璃的反射/透射采样留待后续。
+
 **已接入双线性光子累积。** `render::utils::bilinear_weights` 根据落点的小数位置计算四个邻近像素及其权重，`caustics.rs` 将线性 XYZ 能量按权重分配；接收区域内的边缘落点也保留全部能量。这对应 Day 6 中的双线性 splat 子项。
 
 **发射采用分层随机采样。** 每个小格各发射一条光线，x、y 分别使用独立的随机偏移。`StdRng` 使用固定种子 `42`；每次渲染都重新初始化，因此无三棱镜和折射图共享同一组发射位置，命中或丢弃光线不会改变后续采样序列。
@@ -171,19 +173,24 @@ renderer.save(&framebuffer, &config.render.output_path)?;
 `MaterialConfig` 保留可序列化的 enum；`material::from_config` 将它转换为 `Box<dyn Material>`，具体实现为 `material::lambertian::Lambertian` 或 `material::dielectric::Dielectric`，其中 `albedo` 变为 `Vector3<f64>`。两种运行时材质都使用 `new(...) -> Result<_, String>` 校验参数。最近命中的材质可这样求值：
 
 ```rust
+use spectral_caustics::material::{BsdfValue, EvaluateMode};
+
 if let Some(hit) = scene.intersect(&ray) {
     if let Some(material) = hit.material_id.and_then(|id| scene.material(id)) {
         let wi = -scene.light.direction; // 从交点指向光源
         let wo = -ray.direction;        // 从交点指向观察者
-        let f_rgb = material.evaluate_rgb(wi, wo, hit.normal);
-        let f_spectral = material.evaluate_spectral(wi, wo, hit.normal, 550.0); // 波长单位 nm
-        // f_rgb 是线性 RGB BSDF；f_spectral 是 550 nm 的标量 BSDF rho(λ) / π。
+        let f_rgb = material.evaluate(wi, wo, hit.normal, EvaluateMode::Rgb);
+        let f_spectral = material.evaluate(
+            wi, wo, hit.normal, EvaluateMode::Spectral { wavelength_nm: 550.0 },
+        );
+        // f_rgb 为 BsdfValue::Rgb(线性 RGB 向量)。
+        // f_spectral 为 BsdfValue::Spectral(550 nm 的标量 BSDF rho(λ) / π)。
         // 光照积分仍需乘该波长的入射辐亮度、余弦项和采样权重。
     }
 }
 ```
 
-`Material: Send + Sync` 的 `evaluate_rgb(wi, wo, normal) -> Vector3<f64>`（原 `evaluate`）返回线性 RGB 的 BSDF 值（sr⁻¹），不包含余弦、PDF、曝光或显示编码。`wi` 和 `wo` 都从交点向外指；内部归一化三个向量，零向量、非有限值和模长溢出安全返回零。
+`Material: Send + Sync` 统一使用 `evaluate(wi, wo, normal, mode) -> BsdfValue`。`EvaluateMode::Rgb` 返回 `BsdfValue::Rgb(Vector3<f64>)`，保存线性 RGB 的 BSDF 值（sr⁻¹）；`EvaluateMode::Spectral { wavelength_nm }` 返回 `BsdfValue::Spectral(f64)`，保存单波长标量。波长只随光谱模式传入，调用方通过 `match` 或 `if let` 取出对应数值；原有两个求值方法已合并。结果不包含余弦、PDF、曝光或显示编码。`wi` 和 `wo` 都从交点向外指；内部归一化三个向量，零向量、非有限值和模长溢出安全返回对应模式的零值。
 
 `material::to_world(local, normal) -> Option<Vector3<f64>>` 将局部方向转换为世界方向。局部 +Z 对应归一化后的法线 n，局部 X/Y 对应函数构造的切线 t 和副切线 b，满足 `t × b = n`；结果为 `local.x × t + local.y × b + local.z × n`。仅给定法线时，绕法线的切线朝向由辅助坐标轴确定；法线为世界 +Z 时变换为恒等映射。函数保留向量长度和局部 z 的正负，零局部向量映射为零，不加交点位置，也不额外归一化局部方向。非有限局部分量、无法归一化的法线或计算溢出返回 `None`。例如：
 
@@ -194,7 +201,7 @@ let world_direction = spectral_caustics::material::to_world(
 ); // Some(归一化后的 hit.normal)
 ```
 
-`evaluate_spectral(wi, wo, normal, wavelength_nm) -> f64` 返回单个波长的标量 BSDF（sr⁻¹）。Lambertian 使用已有的 PBRT/Smits 反射基谱将线性 RGB albedo 重建为 `rho(λ)`，仅返回 `f_r(λ) = rho(λ) / π`。它不乘 CIE 匹配函数、光源 SPD、余弦、PDF、归一化因子 k 或波长积分权重。积分器保持标量光谱吞吐量，在最终转换为 XYZ 时再乘 `CMF(λ)`；离散积分还需乘 `k × L_i(λ) × cosθ × Δλ`，随机波长采样则使用相应的 `1/p(λ)` 权重。非法方向、背面、切线，以及非正或非有限波长返回 `0.0`；理想 Dielectric 的光谱普通求值也返回 `0.0`。该接口独立于 CIE 表的波长范围，有效波长沿用反射基谱的端点延拓。
+光谱模式下，Lambertian 使用已有的 PBRT/Smits 反射基谱将线性 RGB albedo 重建为 `rho(λ)`，仅返回 `f_r(λ) = rho(λ) / π`。它不乘 CIE 匹配函数、光源 SPD、余弦、PDF、归一化因子 k 或波长积分权重。积分器保持标量光谱吞吐量，在最终转换为 XYZ 时再乘 `CMF(λ)`；离散积分还需乘 `k × L_i(λ) × cosθ × Δλ`，随机波长采样则使用相应的 `1/p(λ)` 权重。非法方向、背面、切线，以及非正或非有限波长返回 `BsdfValue::Spectral(0.0)`；理想 Dielectric 的光谱普通求值也返回该零值。该模式独立于 CIE 表的波长范围，有效波长沿用反射基谱的端点延拓。
 
 `Material` 的方向采样接口为：
 
@@ -210,13 +217,17 @@ fn pdf(&self, wi: Vector3<f64>, wo: Vector3<f64>, normal: Vector3<f64>) -> f64;
 
 ```rust
 use rand::{SeedableRng, rngs::StdRng};
+use spectral_caustics::material::{BsdfValue, EvaluateMode};
 
 let mut rng = StdRng::seed_from_u64(42); // 每条路径/工作线程持有并持续使用自己的 RNG
 let wo = -ray.direction;
 if let Some(wi) = material.sample(wo, hit.normal, &mut rng) {
     let p = material.pdf(wi, wo, hit.normal);
-    let f = material.evaluate_spectral(wi, wo, hit.normal, 550.0);
-    // 积分器使用 f × cosθ / p 更新吞吐量，再负责射线起点偏移和下一次求交。
+    if let BsdfValue::Spectral(f) = material.evaluate(
+        wi, wo, hit.normal, EvaluateMode::Spectral { wavelength_nm: 550.0 },
+    ) {
+        // 积分器使用 f × cosθ / p 更新吞吐量，再负责射线起点偏移和下一次求交。
+    }
 }
 ```
 
@@ -226,7 +237,7 @@ RGB 不能唯一确定真实反射光谱；当前是有来源的近似模型，�
 
 `Lambertian` 是单面漫反射：仅在 `normal · wi > 0` 且 `normal · wo > 0` 时返回 `albedo / π`，背面及切线方向返回零；若希望从背面观察，调用方需先翻转着色法线。公式参考 [PBRT Lambertian Reflection](https://www.pbr-book.org/3ed-2018/Reflection_Models/Lambertian_Reflection)。`Dielectric` 表示理想光滑玻璃，其反射/透射属于 delta 分布，普通方向求值返回零，`is_delta()` 返回 `true`，`ior()` 返回保存的折射率；有效贡献须通过后续散射采样计算，不能直接把这个零值用于生成玻璃画面。这一约定参考 [PBRT Specular Reflection and Transmission](https://www.pbr-book.org/3ed-2018/Reflection_Models/Specular_Reflection_and_Transmission)。
 
-材质编号由场景构建时分配，不写进 JSON；物体编号和材质编号分别索引各自的表。`Scene::add_with_material(geometry, material)` 可添加任意实现 trait 的材质；`Scene::add` 仍只添加几何。当前阶段完成 trait、BSDF 求值、Lambertian 方向采样/PDF 和命中关联，光照积分与材质着色留待后续。`render::camera_debug` 统一保存相机法线调试遍历和对应测试，并通过 `render::render_camera_debug` 保留原调用路径；`render::integrator` 留给后续路径追踪。光源焦散的折射率仍由原有 `render.mode` 固定值/Cauchy 模型控制，暂未使用材质中的 `ior` 或 `albedo` 改变光路和亮度。
+材质编号由场景构建时分配，不写进 JSON；物体编号和材质编号分别索引各自的表。`Scene::add_with_material(geometry, material)` 可添加任意实现 trait 的材质；`Scene::add` 仍只添加几何。当前阶段完成 trait、BSDF 求值、Lambertian 方向采样/PDF、命中关联和相机单次直接光照。`render::camera_debug` 保存相机法线调试遍历和对应测试；`render::integrator` 实现 `render_camera_lit`，后续可扩展路径追踪。相机光照现已使用材质 `albedo`；光源焦散仍由原有 `render.mode` 固定值/Cauchy 折射率模型控制。
 
 统一读写入口是 `config::Config`：
 
@@ -279,9 +290,33 @@ let hit = scene.intersect(&ray);
 
 地面法线 +z 显示为 `[128, 128, 255]`，三棱镜前端面的 -y 法线显示为 `[128, 0, 128]`，斜面根据朝向显示不同颜色。保留几何法线的世界坐标方向，从背面观察也不朝相机翻转。`render::utils::normal_to_rgb8` 拒绝零向量、非有限法线与模长溢出；法线是调试数据，直接映射为 RGB8，不施加曝光或 sRGB 传递函数。
 
-`main` 在主图目录额外保存 `camera_debug.png`，宽高使用 JSON 中的 `render.width/height`，视角来自 `scene.camera`。调试图中的三棱镜按不透明物体显示，尚未进行材质着色、玻璃透射或路径追踪；下一步可加入基础光照。
+`main` 在主图目录额外保存 `camera_debug.png`，宽高使用 JSON 中的 `render.width/height`，视角来自 `scene.camera`。法线调试图按最近表面显示几何法线，材质着色由独立的 `camera_lit.png` 展示。
 
 ![相机视角的世界空间法线可视化](output/camera_debug.png)
+
+`render::render_camera_lit(&scene, width, height)` 返回未经曝光的 XYZ `Framebuffer`，每像素仅追踪一条中心主光线。数据流为：
+
+```text
+camera.ray_for_pixel → scene.intersect → scene.material
+→ material.evaluate(wi, wo, normal, EvaluateMode::Rgb)
+→ L_o = f_r × L_light × max(n · wi, 0)
+→ linear_srgb_to_xyz → framebuffer.set → Render::save
+```
+
+`wi = -normalize(scene.light.direction)` 指向光源，`wo = -ray.direction` 指向相机，保留原始几何法线朝向。Lambertian 返回 `albedo / π`，由积分器乘光照与一个余弦项；这是确定的方向光求值，不调用随机采样，也不除以 PDF、像素数或光子发射数。
+
+现有光源只有相对总通量，本阶段约定 `L_light = total_flux / 水平发射孔径面积` 为白色平行光的相对方向光强度，默认 `8 / 16 = 0.5`。这是供基础着色使用的相对标尺，不做斜射孔径投影校正，也不声明绝对辐射度单位。例如默认地面反射率为 `0.8`、正入射时，线性 RGB 为 `0.8 × 0.5 / π ≈ 0.1273`，曝光 1 时编码为约 `[100, 100, 100]`。
+
+未命中时使用 `scene.background_linear_rgb`；命中未绑定材质的物体时为黑色。理想玻璃的普通 BSDF 为零，所以默认三棱镜暂为黑色轮廓；本阶段不进行阴影遮挡查询、有限孔径裁切、反射/折射、间接光或焦散叠加。相机光照使用配置曝光，法线调试图继续使用直接 RGB8 法线编码。
+
+```rust
+use spectral_caustics::render::render_camera_lit;
+
+let framebuffer = render_camera_lit(&scene, config.render.width, config.render.height)?;
+renderer.save(&framebuffer, "output/camera_lit.png")?;
+```
+
+![相机视角的单次直接光照](output/camera_lit.png)
 
 ## 运行
 
@@ -305,18 +340,19 @@ RAYON_NUM_THREADS=4 cargo run --release --locked
 
 若 `thread_count` 为正整数，`Render` 创建指定线程数的专用池，此设置优先于环境变量。线程数只控制执行任务的工作线程数量；固定分块和种子下，线程数改变不会改变结果。
 
-默认配置输出八张 512×512 PNG：
+默认配置输出九张 512×512 PNG：
 
 | 文件 | 内容 |
 | --- | --- |
 | `output/caustics.png` | 41 点 D65/CIE 光谱积分，Cauchy 色散彩色焦散 |
 | `output/constant_ior.png` | 同样的光谱、采样和曝光，玻璃固定 n = 1.52 的白光对照 |
 | `output/camera_debug.png` | 相机视角下的世界空间几何法线可视化 |
+| `output/camera_lit.png` | RGB 材质单次直接光照，复用 XYZ 与曝光/sRGB 输出 |
 | `output/no_prism.png` | 无三棱镜的灰度对照 |
 | `output/refracted_hits.png` | 固定折射率玻璃的灰度地面分布 |
 | `output/wavelength_450nm.png`、`output/wavelength_550nm.png`、`output/wavelength_650nm.png` | 三个波长各自的灰度落点调试图 |
 
-主图使用 JSON 中的 `render.mode` 和 `output_path`；其余七张图保存到主图目录。主图为 `dispersion` 时，对照为 `constant_ior.png`；主图为 `constant` 时，对照为 `dispersion.png`。光谱及灰度图共用配置曝光，相机调试图按法线数据直接编码显示颜色；450/550/650 nm 三张灰度图是固定波长调试，不随主积分范围改名。主图名称与辅助图冲突时，辅助图加 `debug_` 前缀，例如主图为 `camera_debug.png` 时，相机调试图保存为 `debug_camera_debug.png`。
+主图使用 JSON 中的 `render.mode` 和 `output_path`；其余八张图保存到主图目录。主图为 `dispersion` 时，对照为 `constant_ior.png`；主图为 `constant` 时，对照为 `dispersion.png`。光谱、灰度图和相机光照图共用配置曝光，相机法线调试图按法线数据直接编码显示颜色；450/550/650 nm 三张灰度图是固定波长调试，不随主积分范围改名。主图名称与辅助图冲突时，辅助图加 `debug_` 前缀，例如主图为 `camera_lit.png` 时，相机光照图保存为 `debug_camera_lit.png`。
 
 默认从 `z = 3` 米的 4×4 米区域发射向下的平行光，方向为 `(0, 0, -1)`。每个发射小格分为 4×4 层，每层随机取一点，共 4,194,304 个空间发射位置。每张光谱积分图使用 380–780 nm、10 nm 间隔的 41 个波长，对应 171,966,464 份波长贡献；直接落地的 41 份合并计算，只有色散模式下首先命中三棱镜的光线才执行 41 条折射路径，固定模式每个位置始终最多追踪一条路径。两个端点的积分宽度为 5 nm，其余为 10 nm。两种折射率模式都重新从种子 42 开始，逐张渲染并保存。
 
@@ -399,7 +435,7 @@ src/
 └── render/
     ├── mod.rs                # Render、PNG 输出与相机调试接口导出
     ├── camera_debug.rs       # 相机法线调试遍历与对应测试
-    ├── integrator.rs         # 路径追踪积分器，待后续里程碑实现
+    ├── integrator.rs         # 相机单次直接光照与对应测试
     ├── caustics.rs           # 分层发射、光路追踪与地面累积
     ├── framebuffer.rs        # 线性 XYZ 图像缓冲
     └── utils.rs              # XYZ/sRGB 颜色转换、法线可视化、双线性权重
@@ -423,6 +459,7 @@ src/
 - 求交忽略 `t <= 1e-6` 米的交点，以防止自相交；单位方向的 `|direction.z| <= 1e-12` 时视为平行。两个阈值分别作用于距离和方向分量。
 - 三角形复用 `1e-6` 米的距离阈值；平行判断使用单位方向与单位法线的点积绝对值，阈值为 `1e-12`，与三角形面积独立。三棱镜采用固定顶点，棱边处返回最近面之一的法线；棱边没有唯一的几何法线。
 - 曝光由 `render.exposure` 控制，在线性颜色空间施加；不会根据每张图片的最大值自动归一化。
+- 相机光照目前只进行一次 RGB 直接光照求值；未计算阴影、有限孔径光束覆盖、玻璃反射/透射或间接光。`total_flux / 孔径面积` 作为相对方向光强度，没有斜射孔径投影校正。
 - 显示范围采用逐通道裁剪，可能丢失高亮和色域外的颜色细节；Framebuffer 中的线性 XYZ 数据保留原值。
 - 固定折射率对照使用 `1.52`，三波长批量调试使用 Cauchy 色散和等权离散分量。各波长图仍采用 D65 参考白缩放以显示落点密度，尚未按真实光谱颜色匹配函数着色，也未进行连续光谱积分。
 - 彩色合成支持 JSON 中的波长范围/步长（当前限定 380–780 nm），采用含右端点的梯形积分；每个 Rayon 采样块直接累积所有波长到自己的 XYZ 图，全部完成后顺序合并，512×512 时像素缓冲峰值约 102 MiB。有限波长范围与积分步长使 D65 白点略有误差，固定模式 PNG 允许 RGB 通道相差 1 个字节。
@@ -430,4 +467,4 @@ src/
 - 光源高度、方向、发射孔径、总通量和地面接收范围均可由 `scene` 配置；光源仍是从水平矩形发射窗口出发的平行光。分层随机采样与双线性 splat 减轻周期性条纹，但有限采样仍产生颗粒噪声，可增加 `samples_per_pixel_axis` 来降低噪声；较亮落点还可能被显示范围裁剪，没有按每张图的最大值自动归一化。
 - Day 6 的 JSON 参数入口已接入；后续仍可补充成功落地、全反射和丢弃光子统计。
 
-使用 `nalgebra` 进行数学计算，`image` 编解码 PNG，`rand` 提供固定种子的格内随机偏移，`rand_chacha` 提供随机序列的直接定位接口，`rayon` 并行执行光谱采样块。`Cargo.lock` 随项目提交；`.gitignore` 放行上述八张默认输出，以及 Day 1 的 `output/test.png`、Day 2 的 `output/ground_hits.png` 阶段示例，编译目录 `target/` 和其他生成文件继续忽略。
+使用 `nalgebra` 进行数学计算，`image` 编解码 PNG，`rand` 提供固定种子的格内随机偏移，`rand_chacha` 提供随机序列的直接定位接口，`rayon` 并行执行光谱采样块。`Cargo.lock` 随项目提交；`.gitignore` 放行上述九张默认输出，以及 Day 1 的 `output/test.png`、Day 2 的 `output/ground_hits.png` 阶段示例，编译目录 `target/` 和其他生成文件继续忽略。

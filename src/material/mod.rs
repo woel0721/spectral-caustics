@@ -9,41 +9,55 @@ use lambertian::Lambertian;
 use nalgebra::Vector3;
 use rand::RngCore;
 
+/// BSDF 求值模式；光谱模式携带要查询的波长（nm）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EvaluateMode {
+    Rgb,
+    Spectral { wavelength_nm: f64 },
+}
+
+/// BSDF 数值（sr⁻¹），变体与传入的 EvaluateMode 对应。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BsdfValue {
+    /// 三通道线性 RGB BSDF。
+    Rgb(Vector3<f64>),
+    /// 单个波长的标量 BSDF，不含 CIE 或波长积分权重。
+    Spectral(f64),
+}
+
+impl BsdfValue {
+    fn zero(mode: EvaluateMode) -> Self {
+        match mode {
+            EvaluateMode::Rgb => Self::Rgb(Vector3::zeros()),
+            EvaluateMode::Spectral { .. } => Self::Spectral(0.0),
+        }
+    }
+}
+
 /// 可通过 `Box<dyn Material>` 保存和并行只读访问的运行时材质。
 pub trait Material: Send + Sync {
-    /// 返回给定方向的 BSDF 值，三个分量为线性 RGB，单位为 sr⁻¹。
+    /// 按 mode 返回给定方向的 BSDF 值，单位为 sr⁻¹。
     ///
     /// wi、wo 均从交点向外指：wi 指向光源，wo 指向观察者。
     /// normal 是世界空间表面法线；调用方可按需要先将它朝向 wo。
     /// 输入方向会归一化；零向量、非有限值或模长溢出返回零。
-    /// 此值不含入射辐亮度、余弦项、PDF、曝光或 sRGB 编码。
-    /// 理想镜面/透射的 delta 分布不能用普通数值表示，evaluate_rgb 返回零；
-    /// 它们的贡献需要后续通过散射采样接口计算。
-    fn evaluate_rgb(
+    /// Rgb 返回 BsdfValue::Rgb；Lambertian 为 albedo / π。
+    /// Spectral 返回 BsdfValue::Spectral；Lambertian 为 rho(λ) / π。
+    /// wavelength_nm 必须为正有限值，否则返回光谱标量零。
+    /// 此值不含入射辐亮度、CIE、余弦项、PDF、波长积分权重、曝光或 sRGB 编码。
+    /// 非法输入、无效反射方向及理想 delta 材质返回对应 mode 的零值；
+    /// delta 贡献需要后续通过散射采样计算，XYZ 转换由积分器处理。
+    fn evaluate(
         &self,
         wi: Vector3<f64>,
         wo: Vector3<f64>,
         normal: Vector3<f64>,
-    ) -> Vector3<f64>;
-
-    /// 返回给定波长的标量 BSDF 值，单位为 sr⁻¹。
-    ///
-    /// wavelength_nm 的单位为 nm，必须为正有限值；方向约定同 evaluate_rgb。
-    /// Lambertian 仅返回 rho(λ) / π；非法输入或无效反射方向返回 0.0。
-    /// 理想 delta 材质的普通求值也返回 0.0，其贡献需通过采样计算。
-    /// 不含 CIE 匹配函数、光源 SPD、余弦、PDF 或波长积分权重。
-    /// 光谱吞吐量和 XYZ 转换由调用方的积分器处理。
-    fn evaluate_spectral(
-        &self,
-        wi: Vector3<f64>,
-        wo: Vector3<f64>,
-        normal: Vector3<f64>,
-        wavelength_nm: f64,
-    ) -> f64;
+        mode: EvaluateMode,
+    ) -> BsdfValue;
 
     /// 给定已知的世界方向 wo，随机生成新的单位世界方向 wi。
     ///
-    /// wi、wo 都从交点向外指，约定同 evaluate_rgb。
+    /// wi、wo 都从交点向外指，约定同 evaluate。
     /// rng 由调用方持有和设种子；Lambertian 使用法线正半球的余弦加权采样。
     /// 非法 wo/normal 或 wo 位于背面/切线时返回 None，且不消耗随机数。
     /// 默认没有方向采样实现；理想 Dielectric 暂沿用此行为。

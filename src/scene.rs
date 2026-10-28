@@ -23,9 +23,9 @@ impl SceneObject {
 }
 
 pub struct Scene {
-    /// 用于后续从相机发射主光线；地面焦散累积仍由光源发射光线。
+    /// 相机法线调试与直接光照使用的主光线相机；地面焦散仍从光源发射光线。
     pub camera: Camera,
-    /// 线性 RGB 背景色；后续写入 XYZ Framebuffer 前需要转换颜色空间。
+    /// 相机光照使用的线性 RGB 背景色，写入 XYZ Framebuffer 前转换颜色空间。
     pub background_color: Vector3<f64>,
     /// 每项绑定一个几何和可选材质编号，查询期间不能重排集合。
     pub objects: Vec<SceneObject>,

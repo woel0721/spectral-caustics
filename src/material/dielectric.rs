@@ -1,6 +1,6 @@
 //! 理想光滑介质：普通方向的 BSDF 求值为零，delta 贡献留给后续散射采样。
 
-use super::Material;
+use super::{BsdfValue, EvaluateMode, Material};
 use nalgebra::Vector3;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -19,25 +19,16 @@ impl Dielectric {
 }
 
 impl Material for Dielectric {
-    fn evaluate_rgb(
+    fn evaluate(
         &self,
         _wi: Vector3<f64>,
         _wo: Vector3<f64>,
         _normal: Vector3<f64>,
-    ) -> Vector3<f64> {
+        mode: EvaluateMode,
+    ) -> BsdfValue {
         // Dirac delta 不能在镜面方向返回一个人为的有限值。
         // 与 PBRT 的理想 SpecularReflection/SpecularTransmission::f 一致。
-        Vector3::zeros()
-    }
-
-    fn evaluate_spectral(
-        &self,
-        _wi: Vector3<f64>,
-        _wo: Vector3<f64>,
-        _normal: Vector3<f64>,
-        _wavelength_nm: f64,
-    ) -> f64 {
-        0.0
+        BsdfValue::zero(mode)
     }
 
     fn is_delta(&self) -> bool {
@@ -63,15 +54,20 @@ mod tests {
         let mut untouched = rng.clone();
         for wi in [Vector3::z(), -Vector3::z(), Vector3::repeat(f64::NAN)] {
             assert_eq!(
-                glass.evaluate_rgb(wi, Vector3::z(), Vector3::z()),
-                Vector3::zeros()
+                glass.evaluate(wi, Vector3::z(), Vector3::z(), EvaluateMode::Rgb),
+                BsdfValue::Rgb(Vector3::zeros())
             );
             assert_eq!(glass.sample(wi, Vector3::z(), &mut rng), None);
             assert_eq!(glass.pdf(wi, Vector3::z(), Vector3::z()), 0.0);
-            for nm in [450.0, 550.0, 650.0, f64::NAN] {
+            for wavelength_nm in [450.0, 550.0, 650.0, 0.0, -1.0, f64::NAN, f64::INFINITY] {
                 assert_eq!(
-                    glass.evaluate_spectral(wi, Vector3::z(), Vector3::z(), nm),
-                    0.0
+                    glass.evaluate(
+                        wi,
+                        Vector3::z(),
+                        Vector3::z(),
+                        EvaluateMode::Spectral { wavelength_nm },
+                    ),
+                    BsdfValue::Spectral(0.0)
                 );
             }
         }
