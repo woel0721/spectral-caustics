@@ -105,7 +105,7 @@ mod tests {
         ];
 
         for (point, normal) in cases {
-            let ray = Ray::new(center, point - center, 0.0).unwrap();
+            let ray = Ray::new(center, point - center).unwrap();
             let hit = prism.intersect(&ray).unwrap();
 
             assert!((hit.coords - point).norm() < 1e-12);
@@ -117,12 +117,7 @@ mod tests {
 
     #[test]
     fn nearest_surface_is_selected_instead_of_first_face() {
-        let ray = Ray::new(
-            Vector3::new(0.0, 3.0, 1.2),
-            Vector3::new(0.0, -1.0, 0.0),
-            0.0,
-        )
-        .unwrap();
+        let ray = Ray::new(Vector3::new(0.0, 3.0, 1.2), Vector3::new(0.0, -1.0, 0.0)).unwrap();
         let hit = Prism::new().unwrap().intersect(&ray).unwrap();
 
         // 索引中的前端面更早被遍历，但后端面才是距离为 2 米的入口。
@@ -135,12 +130,7 @@ mod tests {
 
     #[test]
     fn downward_ray_hits_sloping_face_before_bottom() {
-        let ray = Ray::new(
-            Vector3::new(0.25, 0.2, 3.0),
-            Vector3::new(0.0, 0.0, -1.0),
-            0.0,
-        )
-        .unwrap();
+        let ray = Ray::new(Vector3::new(0.25, 0.2, 3.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
         let hit = Prism::new().unwrap().intersect(&ray).unwrap();
 
         assert!((hit.distance - 1.6).abs() < 1e-12);
@@ -152,7 +142,7 @@ mod tests {
     fn ridge_and_shared_edges_are_not_holes() {
         let prism = Prism::new().unwrap();
         for (x, y, expected_z) in [(0.0, 0.0, 1.8), (0.5, 0.0, 1.0), (0.0, -1.0, 1.8)] {
-            let ray = Ray::new(Vector3::new(x, y, 3.0), Vector3::new(0.0, 0.0, -1.0), 0.0).unwrap();
+            let ray = Ray::new(Vector3::new(x, y, 3.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
             let hit = prism.intersect(&ray).unwrap();
             assert!((hit.coords - Vector3::new(x, y, expected_z)).norm() < 1e-12);
         }
@@ -162,8 +152,8 @@ mod tests {
     fn surface_start_skips_self_hit_and_can_reach_opposite_face() {
         let prism = Prism::new().unwrap();
         let origin = Vector3::new(0.0, -1.0, 1.2);
-        let outward = Ray::new(origin, Vector3::new(0.0, -1.0, 0.0), 0.0).unwrap();
-        let inward = Ray::new(origin, Vector3::new(0.0, 1.0, 0.0), 0.0).unwrap();
+        let outward = Ray::new(origin, Vector3::new(0.0, -1.0, 0.0)).unwrap();
+        let inward = Ray::new(origin, Vector3::new(0.0, 1.0, 0.0)).unwrap();
 
         assert!(prism.intersect(&outward).is_none());
         let exit = prism.intersect(&inward).unwrap();
@@ -179,7 +169,7 @@ mod tests {
             (Vector3::new(2.0, 0.0, 1.2), Vector3::new(0.0, 1.0, 0.0)),
             (Vector3::new(0.0, 0.0, 3.0), Vector3::new(0.0, 0.0, 1.0)),
         ] {
-            let ray = Ray::new(origin, direction, 0.0).unwrap();
+            let ray = Ray::new(origin, direction).unwrap();
             assert!(prism.intersect(&ray).is_none());
         }
     }
@@ -187,12 +177,7 @@ mod tests {
     #[test]
     fn non_finite_ray_is_rejected() {
         let prism = Prism::new().unwrap();
-        let ray = Ray::new(
-            Vector3::new(0.25, 0.2, 3.0),
-            Vector3::new(0.0, 0.0, -1.0),
-            0.0,
-        )
-        .unwrap();
+        let ray = Ray::new(Vector3::new(0.25, 0.2, 3.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let mut bad_origin = ray;
             bad_origin.origin.x = value;

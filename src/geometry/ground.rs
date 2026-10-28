@@ -62,7 +62,7 @@ mod tests {
     use super::*;
 
     fn downward_ray(origin: Vector3<f64>) -> Ray {
-        Ray::new(origin, Vector3::new(0.0, 0.0, -5.0), 0.0).unwrap()
+        Ray::new(origin, Vector3::new(0.0, 0.0, -5.0)).unwrap()
     }
 
     #[test]
@@ -79,28 +79,17 @@ mod tests {
     #[test]
     fn oblique_ray_hits_configured_height_at_expected_position() {
         let ground = Ground::new(1.0).unwrap();
-        let ray = Ray::new(
-            Vector3::new(1.0, 2.0, 3.0),
-            Vector3::new(1.0, 0.0, -1.0),
-            0.25,
-        )
-        .unwrap();
+        let ray = Ray::new(Vector3::new(1.0, 2.0, 3.0), Vector3::new(1.0, 0.0, -1.0)).unwrap();
         let hit = ground.intersect(&ray).unwrap();
 
         assert!((hit.distance - 2.0 * 2.0_f64.sqrt()).abs() < 1e-12);
         assert!((hit.coords - Vector3::new(3.0, 2.0, 1.0)).norm() < 1e-12);
-        assert_eq!(ray.time, 0.25);
     }
 
     #[test]
     fn upward_ray_from_below_preserves_geometric_normal() {
         let ground = Ground::new(-1.0).unwrap();
-        let ray = Ray::new(
-            Vector3::new(0.0, 0.0, -2.0),
-            Vector3::new(0.0, 0.0, 1.0),
-            0.0,
-        )
-        .unwrap();
+        let ray = Ray::new(Vector3::new(0.0, 0.0, -2.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
         let hit = ground.intersect(&ray).unwrap();
 
         assert_eq!(hit.distance, 1.0);
@@ -120,7 +109,6 @@ mod tests {
             let ray = Ray::new(
                 Vector3::new(0.0, 0.0, height),
                 Vector3::new(1.0, 0.0, direction_z),
-                0.0,
             )
             .unwrap();
             assert!(ground.intersect(&ray).is_none());
@@ -134,7 +122,6 @@ mod tests {
             let ray = Ray::new(
                 Vector3::new(0.0, 0.0, height),
                 Vector3::new(0.0, 0.0, direction_z),
-                0.0,
             )
             .unwrap();
             assert!(ground.intersect(&ray).is_none());
@@ -211,7 +198,6 @@ mod tests {
         let ray = Ray::new(
             Vector3::new(0.0, 0.0, -f64::MAX),
             Vector3::new(0.0, 0.0, 1.0),
-            0.0,
         )
         .unwrap();
         assert!(ground.intersect(&ray).is_none());
@@ -220,7 +206,6 @@ mod tests {
         let ray = Ray::new(
             Vector3::new(0.0, 0.0, f64::MAX),
             Vector3::new(1.0, 0.0, -1e-10),
-            0.0,
         )
         .unwrap();
         assert!(ground.intersect(&ray).is_none());
@@ -232,7 +217,6 @@ mod tests {
         let ray = Ray::new(
             Vector3::new(f64::MAX, 0.0, f64::MAX / 2.0),
             Vector3::new(1.0, 0.0, -1.0),
-            0.0,
         )
         .unwrap();
         assert!(ground.intersect(&ray).is_none());

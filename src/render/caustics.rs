@@ -148,7 +148,6 @@ pub fn render_spectral_caustics(
                 let ray = Ray::new(
                     Vector3::new(origin_x, origin_y, scene.light.height_m),
                     scene.light.direction,
-                    0.0,
                 )
                 .ok_or("平行光线构造失败")?;
 
@@ -378,7 +377,6 @@ fn render_landing_point_sets<const N: usize>(
             let ray = Ray::new(
                 Vector3::new(origin_x, origin_y, scene.light.height_m),
                 scene.light.direction,
-                0.0,
             )
             .ok_or("平行光线构造失败")?;
 

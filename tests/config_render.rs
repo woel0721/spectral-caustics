@@ -129,7 +129,7 @@ fn json_materials_build_runtime_values_and_follow_the_hit_object() {
                 None,
             ),
         ] {
-            let ray = Ray::new(Vector3::new(x, 0.2, 3.0), -Vector3::z(), 0.0).unwrap();
+            let ray = Ray::new(Vector3::new(x, 0.2, 3.0), -Vector3::z()).unwrap();
             let hit = scene.intersect(&ray).unwrap();
             assert_eq!(hit.object_id, expected_id);
             let material = scene.material(hit.material_id.unwrap()).unwrap();
@@ -184,7 +184,7 @@ fn json_materials_build_runtime_values_and_follow_the_hit_object() {
 
         // 原有 add 接口继续允许只添加几何；未绑定材质时不生成材质编号。
         let id = scene.add(Box::new(Ground::new(2.5).unwrap()));
-        let ray = Ray::new(Vector3::new(0.25, 0.2, 3.0), -Vector3::z(), 0.0).unwrap();
+        let ray = Ray::new(Vector3::new(0.25, 0.2, 3.0), -Vector3::z()).unwrap();
         let hit = scene.intersect(&ray).unwrap();
         assert_eq!(hit.object_id, Some(id));
         assert_eq!(hit.material_id, None);
@@ -222,7 +222,7 @@ fn scene_accepts_custom_materials_without_changing_geometry_or_a_material_enum()
         Box::new(Ground::new(1.0).unwrap()),
         Box::new(CustomMaterial),
     );
-    let ray = Ray::new(Vector3::new(0.0, 0.0, 3.0), -Vector3::z(), 0.0).unwrap();
+    let ray = Ray::new(Vector3::new(0.0, 0.0, 3.0), -Vector3::z()).unwrap();
     let hit = scene.intersect(&ray).unwrap();
     assert_eq!(hit.object_id, Some(id));
     assert_eq!(hit.material_id, Some(0)); // 几何编号与材质表编号可以不同。
@@ -286,21 +286,11 @@ fn runtime_scene_builds_configured_vertices_ground_light_receiver_and_ids() {
     assert_eq!(scene.light.height_m, 4.0);
     assert!((scene.light.direction.norm() - 1.0).abs() < 1e-12);
     assert_eq!(scene.light.aperture_min_m.x, -1.0);
-    let ray = Ray::new(
-        Vector3::new(1.0, 0.4, 4.0),
-        Vector3::new(0.0, 0.0, -1.0),
-        0.0,
-    )
-    .unwrap();
+    let ray = Ray::new(Vector3::new(1.0, 0.4, 4.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
     let hit = scene.intersect(&ray).unwrap();
     assert_eq!(hit.object_id, scene.prism_id);
     assert!((hit.coords - Vector3::new(1.0, 0.4, 1.4)).norm() < 1e-12);
-    let outside = Ray::new(
-        Vector3::new(-1.5, 0.0, 4.0),
-        Vector3::new(0.0, 0.0, -1.0),
-        0.0,
-    )
-    .unwrap();
+    let outside = Ray::new(Vector3::new(-1.5, 0.0, 4.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
     assert_eq!(scene.intersect(&outside).unwrap().coords.z, -0.5);
     assert_eq!(scene.receiver.area(), 24.0);
     assert_eq!(
@@ -602,6 +592,18 @@ fn executable_reads_json_from_argument_and_respects_output_size_mode_exposure_an
         .into_rgb8();
     // (1/π) × 1 × cos(0) × (π/2) = 0.5，sRGB 编码为 188。
     assert!(lit.pixels().all(|p| p.0 == [188, 0, 0]));
+
+    // 从侧面看玻璃下方的红色地面：主光线不经过玻璃，shadow ray 被玻璃挡住。
+    config.scene.camera.position = [3.0, 0.0, 2.0];
+    config.scene.camera.target = [0.25, 0.0, 0.0];
+    config.scene.camera.fov_y_degrees = 1.0;
+    config.save(&path).unwrap();
+    let output = run();
+    assert!(output.status.success(), "{:?}", output);
+    let lit = image::open(directory.0.join("nested/camera_lit.png"))
+        .unwrap()
+        .into_rgb8();
+    assert!(lit.pixels().all(|p| p.0 == [0; 3]));
 
     fs::write(&path, "{").unwrap();
     let output = run();

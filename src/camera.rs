@@ -31,10 +31,10 @@ impl Camera {
         if !fov_y_degrees.is_finite() || fov_y_degrees <= 0.0 || fov_y_degrees >= 180.0 {
             return Err("scene.camera.fov_y_degrees 必须有限且位于 (0, 180) 度".into());
         }
-        let forward = Ray::new(position, target - position, 0.0)
+        let forward = Ray::new(position, target - position)
             .ok_or("scene.camera 的 position/target 必须有限、不同，且方向长度不能溢出")?
             .direction;
-        let normalized_up = Ray::new(Vector3::zeros(), up, 0.0)
+        let normalized_up = Ray::new(Vector3::zeros(), up)
             .ok_or("scene.camera.up 必须有限、非零，且长度不能溢出")?
             .direction;
         let right = forward.cross(&normalized_up);
@@ -79,7 +79,7 @@ impl Camera {
 
     /// (x, y) 是从零开始的像素下标；图片原点在左上，x 向右、y 向下。
     /// 宽高由 RenderSetting 提供，画面宽高比为 width / height。
-    /// 光线起点为 position，穿过像素中心，方向由 Ray::new 归一化，time 为 0。
+    /// 光线起点为 position，穿过像素中心，方向由 Ray::new 归一化。
     /// 使用构建时缓存的坐标系与半高；越界或零尺寸返回 None。
     pub fn ray_for_pixel(&self, x: usize, y: usize, width: usize, height: usize) -> Option<Ray> {
         if width == 0 || height == 0 || x >= width || y >= height {
@@ -92,7 +92,7 @@ impl Camera {
         let image_y = (1.0 - 2.0 * (y as f64 + 0.5) / height as f64) * self.half_height;
         // 平面上的点为 position + forward + image_x * right + image_y * camera_up。
         let direction = self.forward + image_x * self.right + image_y * self.camera_up;
-        Ray::new(self.position, direction, 0.0)
+        Ray::new(self.position, direction)
     }
 }
 
@@ -123,7 +123,6 @@ mod tests {
             assert_eq!(ray.origin, camera.position());
             assert!((ray.direction + Vector3::z()).norm() < 1e-12);
             assert!((ray.direction.norm() - 1.0).abs() < 1e-12);
-            assert_eq!(ray.time, 0.0);
         }
     }
 

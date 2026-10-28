@@ -14,8 +14,6 @@ pub struct Ray {
     /// 单位方向各分量的倒数；零分量的倒数为带符号的无穷大。
     /// 此缓存供后续包围盒求交使用，不能要求所有分量都有限。
     pub direction_inv: Vector3<f64>,
-    /// 光线携带的时间参数；目前仅保存，不参与距离或交点计算。
-    pub time: f64,
     /// 预留的查询距离下限（米）；当前几何 intersect 不读取此字段。
     pub t_min: f64,
     /// 预留的查询距离上限（米）；当前几何 intersect 不读取此字段。
@@ -23,15 +21,11 @@ pub struct Ray {
 }
 
 impl Ray {
-    /// 创建带时间参数的光线，自动归一化方向；非法输入返回 None。
-    /// 不需要时间变化时，显式传入 time = 0.0。
+    /// 由起点和方向创建光线，自动归一化方向；非法输入返回 None。
     /// 预留查询范围初始值为 (0, f64::MAX)，当前几何求交不使用。
-    pub fn new(origin: Vector3<f64>, direction: Vector3<f64>, time: f64) -> Option<Self> {
-        // 起点、方向和时间都必须是有限值。
-        if !origin.iter().all(|v| v.is_finite())
-            || !direction.iter().all(|v| v.is_finite())
-            || !time.is_finite()
-        {
+    pub fn new(origin: Vector3<f64>, direction: Vector3<f64>) -> Option<Self> {
+        // 起点和方向都必须是有限值。
+        if !origin.iter().all(|v| v.is_finite()) || !direction.iter().all(|v| v.is_finite()) {
             return None;
         }
 
@@ -51,13 +45,12 @@ impl Ray {
             origin,
             direction,
             direction_inv,
-            time,
             t_min: 0.0,
             t_max: f64::MAX,
         })
     }
 
-    /// 计算 origin + distance * direction；distance 是距离，与时间字段 time 独立。
+    /// 计算 origin + distance * direction；单位方向使 distance 表示距离（米）。
     /// 调用者应提供有限且不会使计算溢出的 distance。
     pub fn at(&self, distance: f64) -> Vector3<f64> {
         self.origin + self.direction * distance
@@ -70,7 +63,7 @@ mod tests {
 
     #[test]
     fn direction_is_normalized() {
-        let ray = Ray::new(Vector3::zeros(), Vector3::new(3.0, 4.0, 0.0), 0.0).unwrap();
+        let ray = Ray::new(Vector3::zeros(), Vector3::new(3.0, 4.0, 0.0)).unwrap();
         let expected = Vector3::new(0.6, 0.8, 0.0);
 
         assert!((ray.direction - expected).norm() < 1e-12);
@@ -78,17 +71,16 @@ mod tests {
     }
 
     #[test]
-    fn constructor_initializes_time_and_distance_limits() {
-        let ray = Ray::new(Vector3::zeros(), Vector3::new(1.0, 0.0, 0.0), 0.0).unwrap();
+    fn constructor_initializes_distance_limits() {
+        let ray = Ray::new(Vector3::zeros(), Vector3::new(1.0, 0.0, 0.0)).unwrap();
 
-        assert_eq!(ray.time, 0.0);
         assert_eq!(ray.t_min, 0.0);
         assert_eq!(ray.t_max, f64::MAX);
     }
 
     #[test]
     fn inverse_direction_matches_normalized_direction() {
-        let ray = Ray::new(Vector3::zeros(), Vector3::new(2.0, -3.0, 6.0), 0.0).unwrap();
+        let ray = Ray::new(Vector3::zeros(), Vector3::new(2.0, -3.0, 6.0)).unwrap();
 
         for axis in 0..3 {
             assert!((ray.direction[axis] * ray.direction_inv[axis] - 1.0).abs() < 1e-12);
@@ -97,7 +89,7 @@ mod tests {
 
     #[test]
     fn zero_direction_components_have_signed_infinite_inverses() {
-        let ray = Ray::new(Vector3::zeros(), Vector3::new(0.0, -0.0, -5.0), 0.0).unwrap();
+        let ray = Ray::new(Vector3::zeros(), Vector3::new(0.0, -0.0, -5.0)).unwrap();
 
         assert_eq!(ray.direction_inv.x, f64::INFINITY);
         assert_eq!(ray.direction_inv.y, f64::NEG_INFINITY);
@@ -110,33 +102,27 @@ mod tests {
     }
 
     #[test]
-    fn time_is_independent_of_position() {
-        let ray = Ray::new(
-            Vector3::new(0.0, 0.0, 2.0),
-            Vector3::new(0.0, 0.0, -5.0),
-            0.25,
-        )
-        .unwrap();
-
-        assert_eq!(ray.time, 0.25);
-        assert_eq!(ray.at(2.0), Vector3::zeros());
-    }
-
-    #[test]
-    fn non_finite_time_is_rejected() {
-        for time in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(Ray::new(Vector3::zeros(), Vector3::new(0.0, 0.0, -1.0), time).is_none());
+    fn invalid_origins_and_directions_are_rejected() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for axis in 0..3 {
+                let mut invalid = Vector3::zeros();
+                invalid[axis] = value;
+                assert!(Ray::new(invalid, Vector3::z()).is_none());
+                assert!(Ray::new(Vector3::zeros(), invalid).is_none());
+            }
+        }
+        for direction in [
+            Vector3::zeros(),
+            Vector3::repeat(f64::MAX),
+            Vector3::repeat(f64::from_bits(1)),
+        ] {
+            assert!(Ray::new(Vector3::zeros(), direction).is_none());
         }
     }
 
     #[test]
     fn at_returns_expected_position() {
-        let ray = Ray::new(
-            Vector3::new(0.0, 0.0, 2.0),
-            Vector3::new(0.0, 0.0, -5.0),
-            0.0,
-        )
-        .unwrap();
+        let ray = Ray::new(Vector3::new(0.0, 0.0, 2.0), Vector3::new(0.0, 0.0, -5.0)).unwrap();
 
         assert_eq!(ray.at(0.0), ray.origin);
         assert_eq!(ray.at(1.0), Vector3::new(0.0, 0.0, 1.0));

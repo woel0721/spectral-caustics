@@ -2,17 +2,20 @@
 
 use super::{framebuffer::Framebuffer, utils::linear_srgb_to_xyz};
 use crate::{
+    geometry::ray::{INTERSECTION_EPSILON, Ray},
     material::{BsdfValue, EvaluateMode},
     scene::Scene,
 };
 use nalgebra::Vector3;
 use std::{error::Error, mem::size_of};
 
-/// 每像素从相机发射一条主光线，计算 L_o = f_r L_light max(n · wi, 0)。
+/// 每像素从相机发射一条主光线，计算 L_o = V f_r L_light max(n · wi, 0)。
 ///
 /// wi 指向光源（光源传播方向的反向），wo 指向相机；保留几何法线朝向。
 /// 将 total_flux / 水平孔径面积作为白色方向光的相对强度 L_light，
-/// 不做有限孔径裁切、方向投影校正或阴影查询；这不是绝对辐射度标定。
+/// 不做有限孔径裁切或方向投影校正；这不是绝对辐射度标定。
+/// 对有直接光贡献的命中，沿法线偏移起点后向 wi 发射 shadow ray；
+/// 平行光位于无穷远，沿途任意表面（包括玻璃）均令可见性 V = 0。
 /// 未命中使用场景线性 RGB 背景；未绑定材质的命中和理想玻璃为黑色。
 /// 本阶段不追踪反射/折射或间接光，也不叠加地面焦散。
 /// 返回未经曝光的线性 XYZ，交给 Render::save 统一曝光和 sRGB 编码。
@@ -76,7 +79,19 @@ pub fn render_camera_lit(
                         return Err("材质 RGB 求值必须返回 RGB BSDF".into());
                     };
                     let cosine = normal.dot(&wi).clamp(0.0, 1.0);
-                    f_r * (light * cosine)
+                    let direct_rgb = f_r * (light * cosine);
+                    if !direct_rgb.iter().all(|v| v.is_finite()) {
+                        return Err("直接光照颜色非法或计算溢出".into());
+                    }
+                    if direct_rgb != Vector3::zeros() {
+                        // 偏移大于几何求交的自相交阈值；只在受光半球内发射。
+                        let origin = hit.coords + normal * (10.0 * INTERSECTION_EPSILON);
+                        let shadow_ray = Ray::new(origin, wi).ok_or("阴影光线起点或方向无效")?;
+                        if scene.intersect(&shadow_ray).is_some() {
+                            continue; // V = 0，保留黑色；不把背景色当作环境光。
+                        }
+                    }
+                    direct_rgb
                 }
             };
             let xyz = linear_srgb_to_xyz(linear_rgb).ok_or("直接光照颜色非法或计算溢出")?;
@@ -98,7 +113,7 @@ mod tests {
             materialconfig::MaterialConfig,
             sceneconfig::{ObjectConfig, SceneConfig},
         },
-        geometry::{ground::Ground, hit::Hit, object::Hittable, ray::Ray},
+        geometry::{ground::Ground, hit::Hit, object::Hittable, prism::Prism},
         material::{Material, lambertian::Lambertian},
         render::utils::xyz_to_linear_srgb,
     };
@@ -151,6 +166,76 @@ mod tests {
         let image = render_camera_lit(&scene, 1, 1).unwrap();
         let rgb = xyz_to_linear_srgb(*image.get(0, 0).unwrap()).unwrap();
         assert!((rgb - Vector3::new(0.2, 0.5, 0.8) / PI).norm() < 1e-12);
+    }
+
+    #[test]
+    fn shadow_ray_blocks_light_through_glass_without_hiding_the_ground_from_camera() {
+        let mut config = SceneConfig::default();
+        // 相机从侧面看到三棱镜正下方的地面，只有向上的 shadow ray 命中玻璃。
+        config.camera.position = [3.0, 0.0, 2.0];
+        config.camera.target = [0.25, 0.0, 0.0];
+        config.camera.up = [0.0, 1.0, 0.0];
+        config.background_linear_rgb = [0.2, 0.3, 0.4];
+        for reverse in [false, true] {
+            if reverse {
+                config.objects.reverse();
+            }
+            let scene = Scene::from_config(&config).unwrap();
+            let ray = scene.camera.ray_for_pixel(0, 0, 1, 1).unwrap();
+            let hit = scene.intersect(&ray).unwrap();
+            assert_eq!(hit.object_id, scene.ground_id);
+            assert!((hit.coords - Vector3::new(0.25, 0.0, 0.0)).norm() < 1e-12);
+            assert_eq!(
+                render_camera_lit(&scene, 1, 1).unwrap().pixels,
+                vec![Vector3::zeros()]
+            );
+        }
+        // 同样的受光地面移出玻璃投影，恢复原有直接光照。
+        config.camera.target = [1.5, 0.0, 0.0];
+        let scene = Scene::from_config(&config).unwrap();
+        let image = render_camera_lit(&scene, 1, 1).unwrap();
+        let rgb = xyz_to_linear_srgb(*image.get(0, 0).unwrap()).unwrap();
+        assert!((rgb - Vector3::repeat(0.4 / PI)).norm() < 1e-12);
+    }
+
+    #[test]
+    fn shadow_ray_ignores_surfaces_behind_it_and_checks_directional_light_to_infinity() {
+        let mut scene = ground_scene();
+        scene.camera = Camera::from_config(&CameraConfig {
+            position: [3.0, 0.0, 2.0],
+            target: [0.25, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+            fov_y_degrees: 45.0,
+        })
+        .unwrap();
+        let reference = render_camera_lit(&scene, 1, 1).unwrap();
+        assert!(reference.pixels[0].norm() > 0.0);
+        scene.add(Box::new(Ground::new(-1.0).unwrap()));
+        assert_eq!(
+            render_camera_lit(&scene, 1, 1).unwrap().pixels,
+            reference.pixels
+        );
+
+        // 遮挡物在配置的发射高度以上，方向光仍需检测它；无材质也会遮光。
+        let mut vertices = SceneConfig::default()
+            .objects
+            .into_iter()
+            .find_map(|object| {
+                if let ObjectConfig::Prism { vertices_m, .. } = object {
+                    Some(vertices_m.map(Vector3::from))
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        for vertex in &mut vertices {
+            vertex.z += 3.0;
+        }
+        scene.add(Box::new(Prism::from_vertices(vertices).unwrap()));
+        assert_eq!(
+            render_camera_lit(&scene, 1, 1).unwrap().pixels,
+            vec![Vector3::zeros()]
+        );
     }
 
     #[test]

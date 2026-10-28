@@ -21,7 +21,7 @@
 
 **Day 5 已完成：光谱积分与彩色 PNG 输出。** `spectrum` 导入可追溯的 CIE 1931 2° CMF 和 D65 相对 SPD，支持非整数波长的线性插值，按 `k × S(λ) × CMF(λ) × Δλ` 返回单个波长的线性 XYZ。`render_spectral_caustics` 独立发射与追踪光线，将 41 个波长的光子贡献直接双线性累积到一张 XYZ 图。`main` 以相同采样和曝光输出彩色 `output/caustics.png` 及固定折射率白光对照 `output/constant_ior.png`。数据、许可和校验和见 [assets/color/README.md](assets/color/README.md)。
 
-**V0.4 已接入相机单次直接光照。** `render_camera_lit` 从相机生成主光线，按最近命中的材质计算 `L_o = f_r L_light max(n · wi, 0)`，经线性 RGB→XYZ 写入 Framebuffer，再复用曝光和 sRGB 输出 `output/camera_lit.png`。玻璃的反射/透射采样留待后续。
+**V0.4 已接入相机单次直接光照和硬阴影。** `render_camera_lit` 从相机生成主光线，按最近命中的材质和 shadow ray 可见性计算 `L_o = V f_r L_light max(n · wi, 0)`，经线性 RGB→XYZ 写入 Framebuffer，再复用曝光和 sRGB 输出 `output/camera_lit.png`。玻璃的反射/透射采样留待后续。
 
 **已接入双线性光子累积。** `render::utils::bilinear_weights` 根据落点的小数位置计算四个邻近像素及其权重，`caustics.rs` 将线性 XYZ 能量按权重分配；接收区域内的边缘落点也保留全部能量。这对应 Day 6 中的双线性 splat 子项。
 
@@ -45,9 +45,9 @@
 
 ![Day 3：经过玻璃双界面折射后的地面灰度分布](output/refracted_hits.png)
 
-`Ray` 保存 `origin`、单位方向 `direction`、方向倒数缓存 `direction_inv`、时间参数 `time` 与距离区间 `t_min/t_max`。统一使用 `Ray::new(origin, direction, time)` 构造；Rust 不支持默认函数参数，因此普通光线显式传入 `0.0`。预留的 `t_min/t_max` 初始值为 `(0, f64::MAX)`，当前地面与三角形求交均不读取这两个字段。时间字段目前仅保存数值，不模拟传播时间，与 `at(distance)` 的距离参数独立。零方向分量的倒数为 `±∞`，这是允许的缓存值；后续包围盒求交需单独处理平行轴，避免 `0 × ∞` 产生 NaN。
+`Ray` 保存 `origin`、单位方向 `direction`、方向倒数缓存 `direction_inv` 与距离区间 `t_min/t_max`。统一使用 `Ray::new(origin, direction)` 构造，检查有限起点和有效方向，再归一化方向并计算倒数缓存。当前场景为静态，没有运动模糊，已删除未参与计算的时间字段。`at(distance)` 的参数表示沿光线前进的距离（米）。预留的 `t_min/t_max` 初始值为 `(0, f64::MAX)`，当前地面与三角形求交均不读取这两个字段。零方向分量的倒数为 `±∞`，这是允许的缓存值；后续包围盒求交需单独处理平行轴，避免 `0 × ∞` 产生 NaN。
 
-`Hit` 是纯数据记录，保存 `coords`、`normal`、`distance`，以及可选的 `object_id/material_id`。`Hit::default()` 仅提供字段初始值：向量全零、距离为 `f64::MAX`、编号为 `None`。命中状态统一由 `Option<Hit>` 表达：`Some(hit)` 表示命中，`None` 表示未命中。位置计算、法线归一化、合法性检查和正反面判断均由求交算法或调用方负责。`distance` 是距离，与 `Ray.time` 的时间含义独立。
+`Hit` 是纯数据记录，保存 `coords`、`normal`、`distance`，以及可选的 `object_id/material_id`。`Hit::default()` 仅提供字段初始值：向量全零、距离为 `f64::MAX`、编号为 `None`。命中状态统一由 `Option<Hit>` 表达：`Some(hit)` 表示命中，`None` 表示未命中。位置计算、法线归一化、合法性检查和正反面判断均由求交算法或调用方负责。`distance` 是从光线起点到交点的距离，单位为米。
 
 物体和材质关联用 `Option<usize>` 保存编号，`None` 对应 C++ 示例中的空指针；后续场景管理负责按编号访问实际对象。`Hittable::intersect(&self, ray: &Ray)` 只接收光线并返回 `Option<Hit>`，具体实现填写命中记录后返回 `Some(hit)`。
 
@@ -67,7 +67,7 @@ let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
 
 `Scene::intersect(&ray)` 返回最近的 `Option<Hit>`，并填写 `Hit.object_id`。配置构建的物体还会填写 `Hit.material_id`，通过 `Scene::material(id)` 查询对应材质；手动只调用 `Scene::add` 添加几何时，材质编号仍为 `None`。物体编号是当前集合下标，查询期间不能重排集合。渲染入口从 `RenderSetting` 获取宽高，`camera` 与 `background_color` 不参与当前光源追踪。
 
-`take_photon(&scene, ray, prism_id, ground_id, glass_ior)` 按顺序执行首次求交、空气 → 玻璃折射、内部求交、玻璃 → 空气折射、最后一次地面求交。`glass_ior` 类型为 `impl FnOnce() -> Option<f64>`，通过 `||` 创建无参数闭包，并捕获当前波长和模式。函数只调用一次闭包，将得到的玻璃折射率用于两个界面；闭包返回 `None`、非正或非有限折射率时返回 `None`。空气折射率固定为 `1.0`。界面起点沿法线偏移 `1e-5` 米，后续 Ray 保留原来的 `time`。入射使用朝外法线，出射使用取反后的法线。光线需从空气中出发，不处理已有玻璃内部起点。
+`take_photon(&scene, ray, prism_id, ground_id, glass_ior)` 按顺序执行首次求交、空气 → 玻璃折射、内部求交、玻璃 → 空气折射、最后一次地面求交。`glass_ior` 类型为 `impl FnOnce() -> Option<f64>`，通过 `||` 创建无参数闭包，并捕获当前波长和模式。函数只调用一次闭包，将得到的玻璃折射率用于两个界面；闭包返回 `None`、非正或非有限折射率时返回 `None`。空气折射率固定为 `1.0`。界面起点沿法线偏移 `1e-5` 米，后续 Ray 由偏移起点和折射方向构造。入射使用朝外法线，出射使用取反后的法线。光线需从空气中出发，不处理已有玻璃内部起点。
 
 `refractive_index(None, IorMode::Constant)` 返回 `Some(1.52)`，传入其他波长也不改变该模式的结果；`refractive_index(Some(wavelength_nm), IorMode::Dispersion)` 使用 `n = 1.5046 + 0.0042 / (wavelength_nm / 1000)²`，除以 1000 将 nm 转为 μm。参数来自路线图，仅用于演示，不代表特定真实玻璃。色散模式下缺少波长、波长非正或非有限、计算溢出时返回 `None`。450 nm 时折射率约为 `1.52534`，650 nm 时约为 `1.51454`；同一条从 `(0.25, 0.2, 3)` 向下发射的光线分别落在约 `(-0.73212, 0.2, 0)` 与 `(-0.70696, 0.2, 0)`。调用示例：
 
@@ -280,7 +280,7 @@ let ray = scene.camera.ray_for_pixel(
 let hit = scene.intersect(&ray);
 ```
 
-`ray_for_pixel(x, y, width, height)` 接收从零开始的像素下标，图像原点位于左上角，x 向右、y 向下。光线从 `position` 出发，穿过像素中心，返回方向归一化、`time = 0` 的 `Option<Ray>`。非有限数值、重合的位置/目标、零 up、与观察方向平行或近平行的 up、无效或导致投影尺度下溢的 FOV 在构建相机时被拒绝；像素接口检查零尺寸与越界。
+`ray_for_pixel(x, y, width, height)` 接收从零开始的像素下标，图像原点位于左上角，x 向右、y 向下。光线从 `position` 出发，穿过像素中心，返回方向归一化的 `Option<Ray>`。非有限数值、重合的位置/目标、零 up、与观察方向平行或近平行的 up、无效或导致投影尺度下溢的 FOV 在构建相机时被拒绝；像素接口检查零尺寸与越界。
 
 `Camera::from_config` 在构建时计算并缓存正交坐标系：`forward = normalize(target - position)`，`right = normalize(forward × up)`，`camera_up = right × forward`。虚拟成像平面位于相机前方 1 米处，半高 `tan(fov_y / 2)` 也同时缓存。每个像素直接读取这些缓存，用 `width / height` 确定半宽，再将像素中心映射到平面坐标，主光线方向为 `normalize(forward + image_x × right + image_y × camera_up)`。像素循环不再重复计算叉积、相机坐标系的归一化或 FOV 的正切值。例如相机朝世界 -z、up 为 +y，FOV 为 90° 时，2×2 图像左上像素的平面偏移为 `(-0.5, +0.5, -1)`。
 
@@ -294,12 +294,13 @@ let hit = scene.intersect(&ray);
 
 ![相机视角的世界空间法线可视化](output/camera_debug.png)
 
-`render::render_camera_lit(&scene, width, height)` 返回未经曝光的 XYZ `Framebuffer`，每像素仅追踪一条中心主光线。数据流为：
+`render::render_camera_lit(&scene, width, height)` 返回未经曝光的 XYZ `Framebuffer`，每像素追踪一条中心主光线，有直接光贡献时再追踪一条 shadow ray。数据流为：
 
 ```text
 camera.ray_for_pixel → scene.intersect → scene.material
 → material.evaluate(wi, wo, normal, EvaluateMode::Rgb)
-→ L_o = f_r × L_light × max(n · wi, 0)
+→ shadow ray → 可见性 V（遮挡为 0，通畅为 1）
+→ L_o = V × f_r × L_light × max(n · wi, 0)
 → linear_srgb_to_xyz → framebuffer.set → Render::save
 ```
 
@@ -307,7 +308,11 @@ camera.ray_for_pixel → scene.intersect → scene.material
 
 现有光源只有相对总通量，本阶段约定 `L_light = total_flux / 水平发射孔径面积` 为白色平行光的相对方向光强度，默认 `8 / 16 = 0.5`。这是供基础着色使用的相对标尺，不做斜射孔径投影校正，也不声明绝对辐射度单位。例如默认地面反射率为 `0.8`、正入射时，线性 RGB 为 `0.8 × 0.5 / π ≈ 0.1273`，曝光 1 时编码为约 `[100, 100, 100]`。
 
-未命中时使用 `scene.background_linear_rgb`；命中未绑定材质的物体时为黑色。理想玻璃的普通 BSDF 为零，所以默认三棱镜暂为黑色轮廓；本阶段不进行阴影遮挡查询、有限孔径裁切、反射/折射、间接光或焦散叠加。相机光照使用配置曝光，法线调试图继续使用直接 RGB8 法线编码。
+对直接光照非零的命中，使用 `Ray::new(hit.coords + normal × 1e-5 m, wi)` 发射 shadow ray。起点偏移大于几何求交的 `1e-6 m` 自相交阈值；场景求交仍检测所有物体，不跳过命中物体编号，以保留同一物体其他表面的遮挡。当前是无穷远方向光，因此向前查询不限于光源配置的发射高度，也不使用尚未接入几何求交的 `Ray.t_max`。
+
+shadow ray 命中任意表面时 `V = 0`，只将当前直接光照置零；通畅时保留原有 BSDF、光强和余弦项。玻璃和未绑定材质的几何也按不透明遮挡物处理，尚未计算透射率。固定法线偏移可能漏掉距表面小于该偏移的极近遮挡，后续可按场景尺度改善起点偏移。
+
+主光线未命中时使用 `scene.background_linear_rgb`；命中未绑定材质的物体时为黑色。理想玻璃的普通 BSDF 为零，所以默认三棱镜暂为黑色轮廓。本阶段不进行有限孔径裁切、反射/折射、间接光或焦散叠加；阴影不会被背景色照亮。相机光照使用配置曝光，法线调试图继续使用直接 RGB8 法线编码。
 
 ```rust
 use spectral_caustics::render::render_camera_lit;
@@ -316,7 +321,7 @@ let framebuffer = render_camera_lit(&scene, config.render.width, config.render.h
 renderer.save(&framebuffer, "output/camera_lit.png")?;
 ```
 
-![相机视角的单次直接光照](output/camera_lit.png)
+![相机视角的直接光照与硬阴影](output/camera_lit.png)
 
 ## 运行
 
@@ -347,7 +352,7 @@ RAYON_NUM_THREADS=4 cargo run --release --locked
 | `output/caustics.png` | 41 点 D65/CIE 光谱积分，Cauchy 色散彩色焦散 |
 | `output/constant_ior.png` | 同样的光谱、采样和曝光，玻璃固定 n = 1.52 的白光对照 |
 | `output/camera_debug.png` | 相机视角下的世界空间几何法线可视化 |
-| `output/camera_lit.png` | RGB 材质单次直接光照，复用 XYZ 与曝光/sRGB 输出 |
+| `output/camera_lit.png` | RGB 材质单次直接光照与硬阴影，复用 XYZ 与曝光/sRGB 输出 |
 | `output/no_prism.png` | 无三棱镜的灰度对照 |
 | `output/refracted_hits.png` | 固定折射率玻璃的灰度地面分布 |
 | `output/wavelength_450nm.png`、`output/wavelength_550nm.png`、`output/wavelength_650nm.png` | 三个波长各自的灰度落点调试图 |
@@ -435,7 +440,7 @@ src/
 └── render/
     ├── mod.rs                # Render、PNG 输出与相机调试接口导出
     ├── camera_debug.rs       # 相机法线调试遍历与对应测试
-    ├── integrator.rs         # 相机单次直接光照与对应测试
+    ├── integrator.rs         # 相机直接光照、shadow ray 与对应测试
     ├── caustics.rs           # 分层发射、光路追踪与地面累积
     ├── framebuffer.rs        # 线性 XYZ 图像缓冲
     └── utils.rs              # XYZ/sRGB 颜色转换、法线可视化、双线性权重
@@ -459,7 +464,7 @@ src/
 - 求交忽略 `t <= 1e-6` 米的交点，以防止自相交；单位方向的 `|direction.z| <= 1e-12` 时视为平行。两个阈值分别作用于距离和方向分量。
 - 三角形复用 `1e-6` 米的距离阈值；平行判断使用单位方向与单位法线的点积绝对值，阈值为 `1e-12`，与三角形面积独立。三棱镜采用固定顶点，棱边处返回最近面之一的法线；棱边没有唯一的几何法线。
 - 曝光由 `render.exposure` 控制，在线性颜色空间施加；不会根据每张图片的最大值自动归一化。
-- 相机光照目前只进行一次 RGB 直接光照求值；未计算阴影、有限孔径光束覆盖、玻璃反射/透射或间接光。`total_flux / 孔径面积` 作为相对方向光强度，没有斜射孔径投影校正。
+- 相机光照使用二值 shadow ray 生成硬阴影，玻璃也按不透明物体遮光；法线起点偏移固定为 `1e-5 m`。尚未计算有限孔径光束覆盖、玻璃反射/透射或间接光。`total_flux / 孔径面积` 作为相对方向光强度，没有斜射孔径投影校正。
 - 显示范围采用逐通道裁剪，可能丢失高亮和色域外的颜色细节；Framebuffer 中的线性 XYZ 数据保留原值。
 - 固定折射率对照使用 `1.52`，三波长批量调试使用 Cauchy 色散和等权离散分量。各波长图仍采用 D65 参考白缩放以显示落点密度，尚未按真实光谱颜色匹配函数着色，也未进行连续光谱积分。
 - 彩色合成支持 JSON 中的波长范围/步长（当前限定 380–780 nm），采用含右端点的梯形积分；每个 Rayon 采样块直接累积所有波长到自己的 XYZ 图，全部完成后顺序合并，512×512 时像素缓冲峰值约 102 MiB。有限波长范围与积分步长使 D65 白点略有误差，固定模式 PNG 允许 RGB 通道相差 1 个字节。

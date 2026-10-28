@@ -8,7 +8,7 @@ pub struct Hit {
     pub coords: Vector3<f64>,
     /// 由求交算法填写的单位几何法线，封闭物体约定朝外。
     pub normal: Vector3<f64>,
-    /// 光线起点到交点的距离（米），与 Ray.time 的时间参数独立。
+    /// 光线起点到交点的距离（米）。
     pub distance: f64,
     /// 场景中的物体编号；None 对应 C++ 示例中 obj = nullptr。
     pub object_id: Option<usize>,

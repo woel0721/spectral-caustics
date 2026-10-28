@@ -110,7 +110,7 @@ mod tests {
     }
 
     fn downward_ray(x: f64, y: f64, z: f64) -> Ray {
-        Ray::new(Vector3::new(x, y, z), Vector3::new(0.0, 0.0, -1.0), 0.0).unwrap()
+        Ray::new(Vector3::new(x, y, z), Vector3::new(0.0, 0.0, -1.0)).unwrap()
     }
 
     #[test]
@@ -125,12 +125,7 @@ mod tests {
 
     #[test]
     fn back_hit_preserves_geometric_normal() {
-        let ray = Ray::new(
-            Vector3::new(0.25, 0.25, -2.0),
-            Vector3::new(0.0, 0.0, 1.0),
-            0.0,
-        )
-        .unwrap();
+        let ray = Ray::new(Vector3::new(0.25, 0.25, -2.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
         let hit = unit_triangle().intersect(&ray).unwrap();
 
         assert!((hit.distance - 2.0).abs() < 1e-12);
@@ -154,12 +149,7 @@ mod tests {
 
     #[test]
     fn oblique_ray_hits_expected_point() {
-        let ray = Ray::new(
-            Vector3::new(-0.75, 0.25, 1.0),
-            Vector3::new(1.0, 0.0, -1.0),
-            0.0,
-        )
-        .unwrap();
+        let ray = Ray::new(Vector3::new(-0.75, 0.25, 1.0), Vector3::new(1.0, 0.0, -1.0)).unwrap();
         let hit = unit_triangle().intersect(&ray).unwrap();
 
         assert!((hit.distance - 2.0_f64.sqrt()).abs() < 1e-12);
@@ -197,7 +187,6 @@ mod tests {
             let ray = Ray::new(
                 Vector3::new(0.25, 0.25, z),
                 Vector3::new(1.0, 0.0, direction_z),
-                0.0,
             )
             .unwrap();
             assert!(triangle.intersect(&ray).is_none());
@@ -206,12 +195,7 @@ mod tests {
 
     #[test]
     fn intersection_behind_ray_origin_is_rejected() {
-        let ray = Ray::new(
-            Vector3::new(0.25, 0.25, 2.0),
-            Vector3::new(0.0, 0.0, 1.0),
-            0.0,
-        )
-        .unwrap();
+        let ray = Ray::new(Vector3::new(0.25, 0.25, 2.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
 
         assert!(unit_triangle().intersect(&ray).is_none());
     }

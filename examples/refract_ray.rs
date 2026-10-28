@@ -16,12 +16,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let epsilon = 1e-5;
 
     // 1. 从空气中向下发射，选 x = 0.25，避开顶棱。
-    let incoming_ray = Ray::new(
-        Vector3::new(0.25, 0.2, 3.0),
-        Vector3::new(0.0, 0.0, -1.0),
-        0.0,
-    )
-    .ok_or("入射光线无效")?;
+    let incoming_ray = Ray::new(Vector3::new(0.25, 0.2, 3.0), Vector3::new(0.0, 0.0, -1.0))
+        .ok_or("入射光线无效")?;
     let entry = prism.intersect(&incoming_ray).ok_or("没有命中玻璃")?;
 
     // 2. 空气 -> 玻璃：朝外法线正好朝向入射介质（空气）。
@@ -30,7 +26,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let inside_ray = Ray::new(
         entry.coords - entry.normal * epsilon, // 沿法线反向，移到玻璃内侧。
         inside_direction,
-        0.0,
     )
     .ok_or("玻璃内光线无效")?;
 
@@ -43,7 +38,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let outside_ray = Ray::new(
         exit.coords + exit.normal * epsilon, // 沿朝外法线，移到玻璃外侧。
         outside_direction,
-        0.0,
     )
     .ok_or("出射光线无效")?;
 
