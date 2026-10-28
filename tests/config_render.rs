@@ -1,4 +1,5 @@
 use nalgebra::Vector3;
+use rand::{SeedableRng, rngs::StdRng};
 use spectral_caustics::{
     config::{
         Config,
@@ -139,6 +140,19 @@ fn json_materials_build_runtime_values_and_follow_the_hit_object() {
                 material.evaluate_rgb(hit.normal, -ray.direction, hit.normal),
                 expected_bsdf
             );
+            let mut rng = StdRng::seed_from_u64(42);
+            if material.is_delta() {
+                assert_eq!(material.sample(hit.normal, hit.normal, &mut rng), None);
+                assert_eq!(material.pdf(hit.normal, hit.normal, hit.normal), 0.0);
+            } else {
+                let wi = material.sample(hit.normal, hit.normal, &mut rng).unwrap();
+                assert!((wi.norm() - 1.0).abs() < 1e-12);
+                let cosine = hit.normal.dot(&wi);
+                let pdf = material.pdf(wi, hit.normal, hit.normal);
+                assert!(cosine > 0.0 && pdf > 0.0);
+                let weight = material.evaluate_rgb(wi, hit.normal, hit.normal) * (cosine / pdf);
+                assert!((weight - Vector3::new(0.2, 0.3, 0.4)).norm() < 1e-12);
+            }
             assert_eq!(
                 scene.objects[hit.object_id.unwrap()].material_id(),
                 hit.material_id
@@ -168,15 +182,19 @@ fn scene_accepts_custom_materials_without_changing_geometry_or_a_material_enum()
             Vector3::new(0.1, 0.2, 0.3)
         }
 
-        fn evaluate_xyz(
+        fn evaluate_spectral(
             &self,
             _wi: Vector3<f64>,
             _wo: Vector3<f64>,
             _normal: Vector3<f64>,
             wavelength_nm: f64,
-        ) -> Vector3<f64> {
+        ) -> f64 {
             // 自定义材质也可直接提供光谱 BSDF；这里设为常数 0.2 sr⁻¹。
-            spectral_caustics::optics::spectrum::cie_xyz(wavelength_nm).unwrap_or_default() * 0.2
+            if wavelength_nm.is_finite() && wavelength_nm > 0.0 {
+                0.2
+            } else {
+                0.0
+            }
         }
     }
 
@@ -195,9 +213,15 @@ fn scene_accepts_custom_materials_without_changing_geometry_or_a_material_enum()
         material.evaluate_rgb(-ray.direction, -ray.direction, hit.normal),
         Vector3::new(0.1, 0.2, 0.3)
     );
-    let xyz = material.evaluate_xyz(-ray.direction, -ray.direction, hit.normal, 550.0);
-    // CIE 官方 550 nm 表值，验证光谱接口经 trait object 分派。
-    assert!((xyz - Vector3::new(0.4334499, 0.9949501, 0.008749999) * 0.2).norm() < 1e-12);
+    // 验证光谱接口经 trait object 分派，并直接返回标量 BSDF。
+    assert_eq!(
+        material.evaluate_spectral(-ray.direction, -ray.direction, hit.normal, 550.0),
+        0.2
+    );
+    // 只提供 BSDF 求值的自定义材质可保留默认的“无采样器”行为。
+    let mut rng = StdRng::seed_from_u64(42);
+    assert_eq!(material.sample(-ray.direction, hit.normal, &mut rng), None);
+    assert_eq!(material.pdf(hit.normal, -ray.direction, hit.normal), 0.0);
     assert!(!material.is_delta());
     assert_eq!(material.ior(), None);
 }

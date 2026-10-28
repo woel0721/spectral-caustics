@@ -176,8 +176,8 @@ if let Some(hit) = scene.intersect(&ray) {
         let wi = -scene.light.direction; // 从交点指向光源
         let wo = -ray.direction;        // 从交点指向观察者
         let f_rgb = material.evaluate_rgb(wi, wo, hit.normal);
-        let f_xyz = material.evaluate_xyz(wi, wo, hit.normal, 550.0); // 波长单位 nm
-        // f_rgb 是线性 RGB BSDF；f_xyz 是 550 nm 的 BSDF × CIE 匹配函数。
+        let f_spectral = material.evaluate_spectral(wi, wo, hit.normal, 550.0); // 波长单位 nm
+        // f_rgb 是线性 RGB BSDF；f_spectral 是 550 nm 的标量 BSDF rho(λ) / π。
         // 光照积分仍需乘该波长的入射辐亮度、余弦项和采样权重。
     }
 }
@@ -185,13 +185,48 @@ if let Some(hit) = scene.intersect(&ray) {
 
 `Material: Send + Sync` 的 `evaluate_rgb(wi, wo, normal) -> Vector3<f64>`（原 `evaluate`）返回线性 RGB 的 BSDF 值（sr⁻¹），不包含余弦、PDF、曝光或显示编码。`wi` 和 `wo` 都从交点向外指；内部归一化三个向量，零向量、非有限值和模长溢出安全返回零。
 
-`evaluate_xyz(wi, wo, normal, wavelength_nm) -> Vector3<f64>` 返回单个波长的 XYZ 响应 `f(λ) × CMF(λ)`。Lambertian 先使用 [PBRT 的 Smits 七基谱近似](https://pbr-book.org/3ed-2018/Color_and_Radiometry/The_SampledSpectrum_Class) 将线性 RGB albedo 重建为反射率 `rho(λ)`，再计算 `rho(λ) / π × [x̄(λ), ȳ(λ), z̄(λ)]`。因此波长既影响材质反射率，也影响 CIE 响应。接口不含 D65/其他光源 SPD、归一化因子 k 或波长积分权重；离散积分需乘 `k × L_i(λ) × cosθ × Δλ`，随机波长采样则使用相应的 `1/p(λ)` 权重。多次反射应保持标量光谱吞吐量，最终转为 XYZ，不能逐分量连乘这些 XYZ 响应。波长非正、非有限或超出 CIE 的 360–830 nm 范围时返回零；理想 Dielectric 的光谱普通求值也为零。
+`material::to_world(local, normal) -> Option<Vector3<f64>>` 将局部方向转换为世界方向。局部 +Z 对应归一化后的法线 n，局部 X/Y 对应函数构造的切线 t 和副切线 b，满足 `t × b = n`；结果为 `local.x × t + local.y × b + local.z × n`。仅给定法线时，绕法线的切线朝向由辅助坐标轴确定；法线为世界 +Z 时变换为恒等映射。函数保留向量长度和局部 z 的正负，零局部向量映射为零，不加交点位置，也不额外归一化局部方向。非有限局部分量、无法归一化的法线或计算溢出返回 `None`。例如：
+
+```rust
+let world_direction = spectral_caustics::material::to_world(
+    nalgebra::Vector3::z(), // 局部方向 (0, 0, 1)
+    hit.normal,
+); // Some(归一化后的 hit.normal)
+```
+
+`evaluate_spectral(wi, wo, normal, wavelength_nm) -> f64` 返回单个波长的标量 BSDF（sr⁻¹）。Lambertian 使用已有的 PBRT/Smits 反射基谱将线性 RGB albedo 重建为 `rho(λ)`，仅返回 `f_r(λ) = rho(λ) / π`。它不乘 CIE 匹配函数、光源 SPD、余弦、PDF、归一化因子 k 或波长积分权重。积分器保持标量光谱吞吐量，在最终转换为 XYZ 时再乘 `CMF(λ)`；离散积分还需乘 `k × L_i(λ) × cosθ × Δλ`，随机波长采样则使用相应的 `1/p(λ)` 权重。非法方向、背面、切线，以及非正或非有限波长返回 `0.0`；理想 Dielectric 的光谱普通求值也返回 `0.0`。该接口独立于 CIE 表的波长范围，有效波长沿用反射基谱的端点延拓。
+
+`Material` 的方向采样接口为：
+
+```rust
+fn sample(&self, wo: Vector3<f64>, normal: Vector3<f64>, rng: &mut dyn rand::RngCore)
+    -> Option<Vector3<f64>>;
+fn pdf(&self, wi: Vector3<f64>, wo: Vector3<f64>, normal: Vector3<f64>) -> f64;
+```
+
+`wo` 是已知的、从交点指向上一顶点/观察者的方向；`sample` 返回新的单位世界方向 `wi`，从交点指向下一顶点。两者与 BSDF 求值的方向约定相同。Lambertian 使用 [余弦加权半球采样](https://www.pbr-book.org/4ed/Sampling_Algorithms/Sampling_Multidimensional_Functions#Cosine-WeightedHemisphereSampling)：取两个均匀随机数 `u, v ∈ [0, 1)`，构造局部方向 `(sqrt(u) cos(2πv), sqrt(u) sin(2πv), sqrt(1-u))`，再调用 `to_world`。配套 `pdf` 是相对于立体角 dω 的条件概率密度 `p(wi | wo) = max(n · wi, 0) / π`（sr⁻¹），`n` 和方向均归一化；它不包含 albedo、BSDF 或波长权重。样本落在法线正半球内，`f_r × cosθ / pdf` 对 Lambertian 恰好恢复 RGB albedo 或光谱反射率。
+
+调用方持有 RNG 并设置固定种子，可直接通过 `Box<dyn Material>` 分派，不创建隐藏随机源。非法方向/法线以及背面或切线 `wo` 使 `sample` 返回 `None` 且不消耗随机数；`pdf` 对非法输入或采样范围外方向返回 `0.0`。黑色漫反射材质仍有相同的方向采样分布，其 BSDF 为零。使用示例：
+
+```rust
+use rand::{SeedableRng, rngs::StdRng};
+
+let mut rng = StdRng::seed_from_u64(42); // 每条路径/工作线程持有并持续使用自己的 RNG
+let wo = -ray.direction;
+if let Some(wi) = material.sample(wo, hit.normal, &mut rng) {
+    let p = material.pdf(wi, wo, hit.normal);
+    let f = material.evaluate_spectral(wi, wo, hit.normal, 550.0);
+    // 积分器使用 f × cosθ / p 更新吞吐量，再负责射线起点偏移和下一次求交。
+}
+```
+
+本阶段按用户选择仅实现 Lambertian 采样。`Material` 默认 `sample = None`、`pdf = 0.0`，供尚无采样器的自定义材质使用；理想 Dielectric 保留同样的 delta 约定，尚未采样 Fresnel 反射/折射。delta 的普通立体角 PDF 为零，不代表反射或透射的离散概率为零；后续实现玻璃采样时需单独返回离散事件概率和权重。
 
 RGB 不能唯一确定真实反射光谱；当前是有来源的近似模型，不是实测数据，也不保证在 D65 下积分后精确恢复原始 sRGB。七条基谱来自 PBRT 的 380–720 nm、32 个原始节点，节点间线性插值，表外延用最近端点，组合后按 PBRT 乘 0.94，并将反射率裁剪到 `[0, 1]`。数据与许可证见 `assets/color/README.md`。`render::utils::linear_srgb_to_xyz` 使用 [W3C 的 D65 矩阵](https://www.w3.org/TR/css-color-4/#color-conversion-code) 做普通线性 sRGB→XYZ 转换，和已有 `xyz_to_linear_srgb` 互逆；它不重建光谱，也不需要波长，不施加 gamma、裁剪或曝光，非法数值/溢出返回 `None`。
 
 `Lambertian` 是单面漫反射：仅在 `normal · wi > 0` 且 `normal · wo > 0` 时返回 `albedo / π`，背面及切线方向返回零；若希望从背面观察，调用方需先翻转着色法线。公式参考 [PBRT Lambertian Reflection](https://www.pbr-book.org/3ed-2018/Reflection_Models/Lambertian_Reflection)。`Dielectric` 表示理想光滑玻璃，其反射/透射属于 delta 分布，普通方向求值返回零，`is_delta()` 返回 `true`，`ior()` 返回保存的折射率；有效贡献须通过后续散射采样计算，不能直接把这个零值用于生成玻璃画面。这一约定参考 [PBRT Specular Reflection and Transmission](https://www.pbr-book.org/3ed-2018/Reflection_Models/Specular_Reflection_and_Transmission)。
 
-材质编号由场景构建时分配，不写进 JSON；物体编号和材质编号分别索引各自的表。`Scene::add_with_material(geometry, material)` 可添加任意实现 trait 的材质；`Scene::add` 仍只添加几何。当前阶段完成 trait、BSDF 求值和命中关联，散射采样与材质着色留待后续。`render::camera_debug` 统一保存相机法线调试遍历和对应测试，并通过 `render::render_camera_debug` 保留原调用路径；`render::integrator` 留给后续路径追踪。光源焦散的折射率仍由原有 `render.mode` 固定值/Cauchy 模型控制，暂未使用材质中的 `ior` 或 `albedo` 改变光路和亮度。
+材质编号由场景构建时分配，不写进 JSON；物体编号和材质编号分别索引各自的表。`Scene::add_with_material(geometry, material)` 可添加任意实现 trait 的材质；`Scene::add` 仍只添加几何。当前阶段完成 trait、BSDF 求值、Lambertian 方向采样/PDF 和命中关联，光照积分与材质着色留待后续。`render::camera_debug` 统一保存相机法线调试遍历和对应测试，并通过 `render::render_camera_debug` 保留原调用路径；`render::integrator` 留给后续路径追踪。光源焦散的折射率仍由原有 `render.mode` 固定值/Cauchy 模型控制，暂未使用材质中的 `ior` 或 `albedo` 改变光路和亮度。
 
 统一读写入口是 `config::Config`：
 
@@ -319,7 +354,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-当前 148 项单元测试和 10 项集成测试通过，严格 Clippy 通过。新增材质测试覆盖 RGB/XYZ 两个接口、PBRT 反射基谱参考值与波长响应、非法输入和能量上限；颜色工具测试覆盖线性 sRGB→XYZ 的 D65 白点、三原色和往返转换。彩色合成测试覆盖 XYZ 通量与采样数归一化、独立单波长合成及遮挡丢失通量、固定模式中性白、色散分色与可复现、非法配置以及彩色 PNG 读回。新增光谱测试检查官方表格完整性及列和、已知 CMF/SPD 值、非整数波长插值、端点与表外行为、积分权重、D65 白点、不同积分步长的稳定性，以及非法输入和溢出。统一入口测试覆盖单张固定模式图与多张固定模式图的通量一致性、两模式共享采样、固定模式各波长分布相同而色散模式不同，以及色散波长缺失、非法或溢出时返回错误。测试覆盖固定模式忽略波长、色散模式要求有效波长、闭包只求值一次并复用于两个界面、闭包返回非法折射率时拒绝追踪、Cauchy 单位换算、可见光区间折射率单调性、非法波长与溢出、两种波长通过双界面后的已知落点，以及传入光子追踪的非法波长。三波长测试检查共享空间采样、完整 XYZ 能量守恒、采样数归一化、丢失通量不重分配、各波长结果与独立单波长追踪一致，以及图像分布不同且可复现。采样测试逐格检查每层恰有一个点、点不越出所属层、两轴随机偏移，以及固定种子下的发射位置和图像完全重复。增加采样数时检查总能量守恒与无玻璃图的噪声降低；两种光路通过同种子对照验证发射位置一致。其余测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。双线性测试覆盖已知小数位置的四点权重、像素中心、权重和、边缘与单像素尺寸、完整 XYZ 总能量守恒及遮挡边缘的平滑分配。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地；`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、编号与添加顺序。
+当前 155 项单元测试和 10 项集成测试通过，严格 Clippy 通过。方向采样测试覆盖 PDF 归一化、余弦分布矩、固定种子复现、BSDF 权重、材质/方向约定与非法输入。局部方向转换测试覆盖法线对齐、右手正交基、长度与角度保持、非法输入和溢出。新增材质测试覆盖 RGB/标量光谱两个接口、PBRT 反射基谱参考值与波长响应、非法输入、端点延拓和漫反射能量积分；颜色工具测试覆盖线性 sRGB→XYZ 的 D65 白点、三原色和往返转换。彩色合成测试覆盖 XYZ 通量与采样数归一化、独立单波长合成及遮挡丢失通量、固定模式中性白、色散分色与可复现、非法配置以及彩色 PNG 读回。新增光谱测试检查官方表格完整性及列和、已知 CMF/SPD 值、非整数波长插值、端点与表外行为、积分权重、D65 白点、不同积分步长的稳定性，以及非法输入和溢出。统一入口测试覆盖单张固定模式图与多张固定模式图的通量一致性、两模式共享采样、固定模式各波长分布相同而色散模式不同，以及色散波长缺失、非法或溢出时返回错误。测试覆盖固定模式忽略波长、色散模式要求有效波长、闭包只求值一次并复用于两个界面、闭包返回非法折射率时拒绝追踪、Cauchy 单位换算、可见光区间折射率单调性、非法波长与溢出、两种波长通过双界面后的已知落点，以及传入光子追踪的非法波长。三波长测试检查共享空间采样、完整 XYZ 能量守恒、采样数归一化、丢失通量不重分配、各波长结果与独立单波长追踪一致，以及图像分布不同且可复现。采样测试逐格检查每层恰有一个点、点不越出所属层、两轴随机偏移，以及固定种子下的发射位置和图像完全重复。增加采样数时检查总能量守恒与无玻璃图的噪声降低；两种光路通过同种子对照验证发射位置一致。其余测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。双线性测试覆盖已知小数位置的四点权重、像素中心、权重和、边缘与单像素尺寸、完整 XYZ 总能量守恒及遮挡边缘的平滑分配。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地；`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、编号与添加顺序。
 
 7 项三棱镜测试覆盖 8 个面的已知交点和朝外单位法线、最近面选择、棱边命中、内外求交、自相交与非有限光线；场景测试验证同一集合中不同物体的求交，以及改变添加顺序后仍选择最近交点。
 

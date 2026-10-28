@@ -30,14 +30,14 @@ impl Material for Dielectric {
         Vector3::zeros()
     }
 
-    fn evaluate_xyz(
+    fn evaluate_spectral(
         &self,
         _wi: Vector3<f64>,
         _wo: Vector3<f64>,
         _normal: Vector3<f64>,
         _wavelength_nm: f64,
-    ) -> Vector3<f64> {
-        Vector3::zeros()
+    ) -> f64 {
+        0.0
     }
 
     fn is_delta(&self) -> bool {
@@ -52,24 +52,30 @@ impl Material for Dielectric {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     #[test]
     fn ideal_dielectric_preserves_ior_and_has_no_regular_bsdf_component() {
         let glass: Box<dyn Material> = Box::new(Dielectric::new(1.33).unwrap());
         assert_eq!(glass.ior(), Some(1.33));
         assert!(glass.is_delta());
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut untouched = rng.clone();
         for wi in [Vector3::z(), -Vector3::z(), Vector3::repeat(f64::NAN)] {
             assert_eq!(
                 glass.evaluate_rgb(wi, Vector3::z(), Vector3::z()),
                 Vector3::zeros()
             );
+            assert_eq!(glass.sample(wi, Vector3::z(), &mut rng), None);
+            assert_eq!(glass.pdf(wi, Vector3::z(), Vector3::z()), 0.0);
             for nm in [450.0, 550.0, 650.0, f64::NAN] {
                 assert_eq!(
-                    glass.evaluate_xyz(wi, Vector3::z(), Vector3::z(), nm),
-                    Vector3::zeros()
+                    glass.evaluate_spectral(wi, Vector3::z(), Vector3::z(), nm),
+                    0.0
                 );
             }
         }
+        assert_eq!(rng.random::<u64>(), untouched.random::<u64>());
     }
 
     #[test]
