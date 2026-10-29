@@ -66,12 +66,12 @@ impl Default for Scene {
 }
 
 impl Scene {
-    /// 创建空场景，使用默认相机、黑色背景。
+    /// 创建空场景，使用默认配置中的相机与线性 RGB 背景。
     pub fn new() -> Self {
         let config = SceneConfig::default();
         Self {
             camera: Camera::from_config(&config.camera).expect("内置默认相机参数必须有效"),
-            background_color: Vector3::zeros(),
+            background_color: Vector3::from(config.background_linear_rgb),
             objects: Vec::new(),
             materials: Vec::new(),
             light: ParallelLight {

@@ -55,7 +55,7 @@ impl Default for SceneConfig {
     fn default() -> Self {
         Self {
             camera: CameraConfig::default(),
-            background_linear_rgb: [0.0; 3],
+            background_linear_rgb: [0.08, 0.10, 0.14],
             objects: vec![
                 ObjectConfig::Prism {
                     vertices_m: [

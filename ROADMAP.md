@@ -318,6 +318,7 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - [x] 保留线性 RGB 的 `1/spp` 平均与八次玻璃散射上限；将单条已知方向的光学测试放到 `trace_camera_path`，像素渲染测试验证随机位置和面积平均。
 - **验证范围：** 子像素与中心坐标、已知投影位置和非方形宽高比、非法偏移/越界、黑白各半像素的线性覆盖率、多样本归一化、固定种子重现、玻璃反射/透射及光源渲染独立性。
 - **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（185 项单元测试、11 项集成测试）、严格 `cargo clippy --locked --all-targets -- -D warnings` 和 diff 检查通过。实际运行 64 SPP 玻璃示例并查看了更新的 512×512 RGB8 PNG；默认 release 渲染成功，其余十一张 PNG 与添加抖动前逐字节一致。
+- **默认背景更新：** 按用户设置将线性 RGB 背景调整为 `[0.08, 0.10, 0.14]`，默认 JSON、`SceneConfig::default` 和 `Scene::new` 保持一致。现有 185 项单元测试、11 项集成测试、格式和严格 Clippy 通过；已重新生成 `camera_glass.png`、`camera_lit.png`，其余十张 PNG 的 SHA-256 保持一致。
 - **范围：** 只做像素区域内的独立均匀采样，不增加镜头景深、运动模糊、分层采样、间接光或透明阴影。有限 SPP 的边缘仍有随机噪声；下一阶段可使用像素内分层采样降低方差。
 
 ## 6. Codex 执行约定

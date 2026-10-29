@@ -21,7 +21,7 @@
       "up": [0.0, 0.0, 1.0],
       "fov_y_degrees": 45.0
     },
-    "background_linear_rgb": [0.0, 0.0, 0.0],
+    "background_linear_rgb": [0.08, 0.10, 0.14],
     "objects": [
       {
         "type": "prism",
