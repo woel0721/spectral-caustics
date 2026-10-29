@@ -3,7 +3,7 @@
 use nalgebra::Vector3;
 use spectral_caustics::{
     geometry::{ground::Ground, object::Hittable, prism::Prism, ray::Ray},
-    scene::refract,
+    optics::refract,
 };
 use std::error::Error;
 

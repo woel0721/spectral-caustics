@@ -21,7 +21,9 @@
 
 **Day 5 已完成：光谱积分与彩色 PNG 输出。** `spectrum` 导入可追溯的 CIE 1931 2° CMF 和 D65 相对 SPD，支持非整数波长的线性插值，按 `k × S(λ) × CMF(λ) × Δλ` 返回单个波长的线性 XYZ。`render_spectral_caustics` 独立发射与追踪光线，将 41 个波长的光子贡献直接双线性累积到一张 XYZ 图。`main` 以相同采样和曝光输出彩色 `output/caustics.png` 及固定折射率白光对照 `output/constant_ior.png`。数据、许可和校验和见 [assets/color/README.md](assets/color/README.md)。
 
-**V0.4 已接入相机单次直接光照和硬阴影。** `render_camera_lit` 从相机生成主光线，按最近命中的材质和 shadow ray 可见性计算 `L_o = V f_r L_light max(n · wi, 0)`，经线性 RGB→XYZ 写入 Framebuffer，再复用曝光和 sRGB 输出 `output/camera_lit.png`。玻璃的反射/透射采样留待后续。
+**V0.4 已接入相机单次直接光照和硬阴影。** `render_camera_lit` 从相机生成主光线，按最近命中的材质和 shadow ray 可见性计算 `L_o = V f_r L_light max(n · wi, 0)`，经线性 RGB→XYZ 写入 Framebuffer，再复用曝光和 sRGB 输出 `output/camera_lit.png`。玻璃采样器已独立实现，递归相机追踪留待后续。
+
+**已实现玻璃 Fresnel 离散事件采样。** `Material::sample` 统一返回 `Option<MaterialSample>`，Lambertian 返回 `Continuous { wi }`，Dielectric 返回 `Glass(GlassSample { wi, event, probability, weight })`；`GlassEvent` 区分反射与透射。可通过 `dyn Material` 调用，当前相机积分器和光源焦散仍使用原来的计算流程。
 
 **已接入双线性光子累积。** `render::utils::bilinear_weights` 根据落点的小数位置计算四个邻近像素及其权重，`caustics.rs` 将线性 XYZ 能量按权重分配；接收区域内的边缘落点也保留全部能量。这对应 Day 6 中的双线性 splat 子项。
 
@@ -207,31 +209,44 @@ let world_direction = spectral_caustics::material::to_world(
 
 ```rust
 fn sample(&self, wo: Vector3<f64>, normal: Vector3<f64>, rng: &mut dyn rand::RngCore)
-    -> Option<Vector3<f64>>;
+    -> Option<MaterialSample>;
 fn pdf(&self, wi: Vector3<f64>, wo: Vector3<f64>, normal: Vector3<f64>) -> f64;
 ```
 
 `wo` 是已知的、从交点指向上一顶点/观察者的方向；`sample` 返回新的单位世界方向 `wi`，从交点指向下一顶点。两者与 BSDF 求值的方向约定相同。Lambertian 使用 [余弦加权半球采样](https://www.pbr-book.org/4ed/Sampling_Algorithms/Sampling_Multidimensional_Functions#Cosine-WeightedHemisphereSampling)：取两个均匀随机数 `u, v ∈ [0, 1)`，构造局部方向 `(sqrt(u) cos(2πv), sqrt(u) sin(2πv), sqrt(1-u))`，再调用 `to_world`。配套 `pdf` 是相对于立体角 dω 的条件概率密度 `p(wi | wo) = max(n · wi, 0) / π`（sr⁻¹），`n` 和方向均归一化；它不包含 albedo、BSDF 或波长权重。样本落在法线正半球内，`f_r × cosθ / pdf` 对 Lambertian 恰好恢复 RGB albedo 或光谱反射率。
 
-调用方持有 RNG 并设置固定种子，可直接通过 `Box<dyn Material>` 分派，不创建隐藏随机源。非法方向/法线以及背面或切线 `wo` 使 `sample` 返回 `None` 且不消耗随机数；`pdf` 对非法输入或采样范围外方向返回 `0.0`。黑色漫反射材质仍有相同的方向采样分布，其 BSDF 为零。使用示例：
+调用方持有 RNG 并设置固定种子，可直接通过 `Box<dyn Material>` 分派，不创建隐藏随机源。非法方向/法线以及切线 `wo` 使 `sample` 返回 `None` 且不消耗随机数；Lambertian 也拒绝背面，玻璃则支持内外两侧。`pdf` 对非法输入或采样范围外方向返回 `0.0`。黑色漫反射材质仍有相同的方向采样分布，其 BSDF 为零。统一接口使用示例：
 
 ```rust
 use rand::{SeedableRng, rngs::StdRng};
-use spectral_caustics::material::{BsdfValue, EvaluateMode};
+use spectral_caustics::material::{BsdfValue, EvaluateMode, MaterialSample};
 
 let mut rng = StdRng::seed_from_u64(42); // 每条路径/工作线程持有并持续使用自己的 RNG
 let wo = -ray.direction;
-if let Some(wi) = material.sample(wo, hit.normal, &mut rng) {
-    let p = material.pdf(wi, wo, hit.normal);
-    if let BsdfValue::Spectral(f) = material.evaluate(
-        wi, wo, hit.normal, EvaluateMode::Spectral { wavelength_nm: 550.0 },
-    ) {
-        // 积分器使用 f × cosθ / p 更新吞吐量，再负责射线起点偏移和下一次求交。
+match material.sample(wo, hit.normal, &mut rng) {
+    Some(MaterialSample::Continuous { wi }) => {
+        let p = material.pdf(wi, wo, hit.normal);
+        if let BsdfValue::Spectral(f) = material.evaluate(
+            wi, wo, hit.normal, EvaluateMode::Spectral { wavelength_nm: 550.0 },
+        ) {
+            // 积分器使用 f × cosθ / p 更新吞吐量。
+        }
     }
+    Some(MaterialSample::Glass(sample)) => {
+        // sample.wi 是下一条射线的方向，吞吐量直接乘 sample.weight。
+        // sample.probability 已被权重抵消，不再乘/除它，也不调用普通 evaluate/pdf。
+    }
+    None => {}
 }
 ```
 
-本阶段按用户选择仅实现 Lambertian 采样。`Material` 默认 `sample = None`、`pdf = 0.0`，供尚无采样器的自定义材质使用；理想 Dielectric 保留同样的 delta 约定，尚未采样 Fresnel 反射/折射。delta 的普通立体角 PDF 为零，不代表反射或透射的离散概率为零；后续实现玻璃采样时需单独返回离散事件概率和权重。
+`Material` 默认 `sample = None`、`pdf = 0.0`，供尚无采样器的自定义材质使用。统一返回类型 `MaterialSample` 定义在 `material`，`Continuous { wi }` 表示连续方向采样，`Glass(GlassSample)` 保留玻璃的事件、离散概率和权重。两种结果都可用 `sample.wi()` 读取方向；更新吞吐量时按变体分别处理。`GlassEvent` 与 `GlassSample` 定义在 `material::dielectric`，并从 `material` 重导出。
+
+玻璃方向仍采用 `wo`、`wi` 都从交点向外指的约定，实际到达界面的射线方向为 `-wo`。`normal` 必须是玻璃朝外的几何法线，不能预先朝向 `wo`：`wo · normal > 0` 表示从空气进入玻璃，取 `(eta_i, eta_t) = (1, ior)`；小于零时表示从玻璃出射，取 `(ior, 1)` 并翻转折射法线。反射方向为 `2(wo · n)n - wo`，透射方向使用 `optics::refract(-wo, n, eta_i, eta_t)`，其中 `n` 已朝向 `wo`。采样结果重新归一化；全反射强制选择反射。非法方向或数值计算失败返回 `None`，非法方向不消耗随机数；全反射及相同折射率的确定事件也不消耗随机数。
+
+非偏振光使用完整 Fresnel 方程计算 `F`，按 `P(reflection)=F`、`P(transmission)=1-F` 选择一个事件。`GlassSample::probability` 是被选事件的离散概率，与普通立体角 PDF 不同；理想玻璃的 `evaluate` 和 `pdf` 仍返回零。`weight` 已是相机 **radiance** 追踪使用的 `f × |cosθ| / probability`，反射的 `F/F` 和透射的 `(1-F)/(1-F)` 都已抵消：反射权重为 `1`，透射权重为 `(eta_i/eta_t)²`。积分器直接执行 `throughput *= sample.weight`，不再乘 Fresnel 因子、余弦或除以 `probability`。例如空气进入 `ior=1.5` 的玻璃，法向入射有约 4% 的反射事件、96% 的透射事件，对应权重为 `1` 和 `4/9`；反向透射权重为 `9/4`。采样概率、delta 求值与 radiance 平方项参考 [PBRT Dielectric BSDF](https://pbr-book.org/4ed/Reflection_Models/Dielectric_BSDF)。
+
+当前玻璃采样器固定外部为空气、内部使用材质的常量 `ior`，不处理嵌套介质、吸收或按波长变化的折射率；该 radiance 权重也不能直接作为正向光子通量权重。当前阶段只完成采样器，尚未接入递归相机追踪或改变 shadow ray 的二值遮挡规则。
 
 RGB 不能唯一确定真实反射光谱；当前是有来源的近似模型，不是实测数据，也不保证在 D65 下积分后精确恢复原始 sRGB。七条基谱来自 PBRT 的 380–720 nm、32 个原始节点，节点间线性插值，表外延用最近端点，组合后按 PBRT 乘 0.94，并将反射率裁剪到 `[0, 1]`。数据与许可证见 `assets/color/README.md`。`render::utils::linear_srgb_to_xyz` 使用 [W3C 的 D65 矩阵](https://www.w3.org/TR/css-color-4/#color-conversion-code) 做普通线性 sRGB→XYZ 转换，和已有 `xyz_to_linear_srgb` 互逆；它不重建光谱，也不需要波长，不施加 gamma、裁剪或曝光，非法数值/溢出返回 `None`。
 
@@ -377,7 +392,7 @@ Day 3 的单条光线折射示例：
 cargo run --locked --example refract_ray
 ```
 
-示例按顺序执行空气 → 玻璃（`n = 1.52`）→ 空气 → 地面，打印入射点、玻璃内方向、出射点、出射方向和地面落点。`refract` 要求单位方向、单位法线，且法线朝向入射介质，所以出射调用使用 `-exit.normal`。界面处沿法线偏移 `1e-5` 米；全反射时终止并报告原因。`examples/refract_ray.rs` 保留了逐步展开的写法，方便对照 `take_photon` 阅读。
+示例按顺序执行空气 → 玻璃（`n = 1.52`）→ 空气 → 地面，打印入射点、玻璃内方向、出射点、出射方向和地面落点。`optics::refract` 要求单位方向、单位法线，且法线朝向入射介质，所以出射调用使用 `-exit.normal`。界面处沿法线偏移 `1e-5` 米；全反射时终止并报告原因。`examples/refract_ray.rs` 保留了逐步展开的写法，方便对照 `take_photon` 阅读。
 
 仅运行地面求交的 11 项测试：
 
@@ -430,11 +445,11 @@ src/
 │   ├── triangle.rs           # 三角形求交
 │   └── prism.rs              # 三棱镜及最近交点
 ├── material/
-│   ├── mod.rs                # Material trait 与配置到运行时的构建
+│   ├── mod.rs                # Material trait、MaterialSample 与配置到运行时的构建
 │   ├── lambertian.rs         # 漫反射 BSDF 数值求值
-│   └── dielectric.rs         # 理想玻璃、折射率与 delta 标识
+│   └── dielectric.rs         # 理想玻璃、Fresnel、GlassEvent/GlassSample 与离散采样
 ├── optics/
-│   ├── mod.rs
+│   ├── mod.rs                # Snell 折射与光学子模块入口
 │   ├── iormode.rs            # 固定折射率 / 色散模式
 │   └── spectrum.rs           # RGB 反射基谱、CIE/D65 插值与光谱积分
 └── render/

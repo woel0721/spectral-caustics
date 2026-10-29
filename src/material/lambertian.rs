@@ -1,6 +1,6 @@
 //! 单面 Lambertian 漫反射，正半球内 f_r = albedo / π。
 
-use super::{BsdfValue, EvaluateMode, Material, to_world, unit_vector};
+use super::{BsdfValue, EvaluateMode, Material, MaterialSample, to_world, unit_vector};
 use crate::optics::spectrum::rgb_reflectance;
 use nalgebra::Vector3;
 use rand::{Rng, RngCore};
@@ -57,7 +57,7 @@ impl Material for Lambertian {
         wo: Vector3<f64>,
         normal: Vector3<f64>,
         rng: &mut dyn RngCore,
-    ) -> Option<Vector3<f64>> {
+    ) -> Option<MaterialSample> {
         let (wo, normal) = (unit_vector(wo)?, unit_vector(normal)?);
         if normal.dot(&wo) <= 0.0 {
             return None;
@@ -69,7 +69,9 @@ impl Material for Lambertian {
         let phi = 2.0 * PI * rng.random::<f64>();
         let radius = u.sqrt();
         let local = Vector3::new(radius * phi.cos(), radius * phi.sin(), (1.0 - u).sqrt());
-        unit_vector(to_world(local, normal)?)
+        Some(MaterialSample::Continuous {
+            wi: unit_vector(to_world(local, normal)?)?,
+        })
     }
 
     fn pdf(&self, wi: Vector3<f64>, wo: Vector3<f64>, normal: Vector3<f64>) -> f64 {
@@ -147,8 +149,11 @@ mod tests {
         let mut mean = Vector3::zeros();
         let mut mean_cos_squared = 0.0;
         for _ in 0..16384 {
-            let wi = material.sample(wo, n, &mut rng).unwrap();
-            assert_eq!(material.sample(wo, n, &mut replay), Some(wi));
+            let MaterialSample::Continuous { wi } = material.sample(wo, n, &mut rng).unwrap()
+            else {
+                panic!("Lambertian 必须返回连续方向采样");
+            };
+            assert_eq!(material.sample(wo, n, &mut replay).unwrap().wi(), wi);
             assert!((wi.norm() - 1.0).abs() < 1e-12);
             let cos_theta = n.dot(&wi);
             let pdf = material.pdf(wi, wo, n);
@@ -177,8 +182,12 @@ mod tests {
             for _ in 0..64 {
                 let wi = white
                     .sample(normal * 2.0, normal * 3.0, &mut white_rng)
-                    .unwrap();
-                assert_eq!(black.sample(normal, normal, &mut black_rng), Some(wi));
+                    .unwrap()
+                    .wi();
+                assert_eq!(
+                    black.sample(normal, normal, &mut black_rng).unwrap().wi(),
+                    wi
+                );
                 assert!(wi.dot(&normal) > 0.0);
                 assert_eq!(white.pdf(wi, normal, normal), black.pdf(wi, normal, normal));
             }
@@ -197,14 +206,14 @@ mod tests {
             Vector3::repeat(f64::INFINITY),
             Vector3::repeat(f64::MAX),
         ] {
-            assert_eq!(material.sample(invalid, n, &mut rng), None);
-            assert_eq!(material.sample(n, invalid, &mut rng), None);
+            assert!(material.sample(invalid, n, &mut rng).is_none());
+            assert!(material.sample(n, invalid, &mut rng).is_none());
             for (wi, wo, normal) in [(invalid, n, n), (n, invalid, n), (n, n, invalid)] {
                 assert_eq!(material.pdf(wi, wo, normal), 0.0);
             }
         }
         for wo in [-n, Vector3::x()] {
-            assert_eq!(material.sample(wo, n, &mut rng), None);
+            assert!(material.sample(wo, n, &mut rng).is_none());
             assert_eq!(material.pdf(n, wo, n), 0.0);
         }
         for wi in [-n, Vector3::x()] {

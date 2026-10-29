@@ -43,11 +43,11 @@ spectral-caustics/
 │   ├── main.rs                # 程序入口
 │   ├── lib.rs                 # 模块入口
 │   ├── camera.rs              # 针孔相机与像素主光线
-│   ├── scene.rs               # 场景、求交、Snell/Cauchy 与光子追踪
+│   ├── scene.rs               # 场景、求交、Cauchy 与光子追踪
 │   ├── config/                # JSON 读写、CameraConfig、MaterialConfig、渲染/场景描述
 │   ├── geometry/              # Ray、Hit、Hittable、地面、三角形、三棱镜
 │   ├── material/              # Material trait、Lambertian、Dielectric
-│   ├── optics/                # 折射率模式、CIE/D65 与光谱积分
+│   ├── optics/                # Snell 折射、折射率模式、CIE/D65 与光谱积分
 │   └── render/                # Render、光子累积、Framebuffer、sRGB/PNG
 ├── examples/
 │   └── refract_ray.rs
@@ -277,6 +277,18 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - **范围：** 只增加二值硬阴影；不实现玻璃反射/透射、间接光、有限孔径裁切或焦散叠加。固定起点偏移可能漏掉偏移距离内的极近遮挡。下一阶段可实现玻璃 Fresnel 离散事件采样。
 - **Ray 接口精简：** 当前为静态场景，按用户要求删除未参与求交或光照计算的 `Ray.time`；所有相机、光源、折射、shadow ray、示例与测试统一使用 `Ray::new(origin, direction)`。保留方向归一化、倒数缓存与原有距离区间，未增加新的渲染阶段。
 - **接口精简验收：** 160 项单元测试、10 项集成测试、`cargo fmt --check`、严格 Clippy 与 diff 检查通过。删除重复的时间位置测试，将时间合法性测试替换为起点/方向的有限值、零向量、溢出与下溢检查。实际运行默认 release 渲染和 `refract_ray` 示例成功，十一张已有 PNG 的 SHA-256 均与精简前一致。
+
+### V0.4 阶段 9 — 玻璃 Fresnel 离散事件采样
+
+- [x] 在 `material/dielectric.rs` 定义 `GlassEvent::{Reflection, Transmission}` 和 `GlassSample { wi, event, probability, weight }`，从 `material` 重导出。
+- [x] `Dielectric::sample` 按精确 Fresnel 反射率 `F` 与 `1-F` 选择事件；全反射强制反射，相同折射率直接透射，确定事件不消耗随机数。
+- [x] `wo`、`wi` 都从交点向外指；使用朝外几何法线判断进入/离开，切换 `(eta_i, eta_t)` 并朝向入射侧；折射调用 `optics::refract(-wo, n, eta_i, eta_t)`。归一化方向并拒绝非法、切线及无效计算。
+- [x] `probability` 保存离散事件概率；`weight` 为已抵消 Fresnel、余弦与事件概率的 radiance 吞吐量乘数，反射为 `1`，透射为 `(eta_i/eta_t)²`。理想 delta 的普通 `evaluate`、`pdf` 仍为零。
+- [x] 按用户选择将 `Material::sample` 统一为 `Option<MaterialSample>`，替换阶段 6 的方向返回值。Lambertian 返回 `Continuous { wi }`，Dielectric 返回 `Glass(GlassSample)`；两者可通过 `wi()` 读取方向，支持 `dyn Material` 分派，默认仍返回 `None`。
+- **验证范围：** 内外两侧的法向/斜向方向、Snell 定律、世界空间法线、全反射、相同折射率、非法输入与 RNG 消耗、固定种子可复现、事件频率、重要性采样估计及 JSON 构建后的 trait object 分派。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（172 项单元测试、10 项集成测试）、严格 `cargo clippy --locked --all-targets -- -D warnings` 和 diff 检查通过。
+- **发布前复查：** 默认 `cargo run --release --locked` 和 `refract_ray` 示例运行成功；十一张已有 PNG 均为 512×512 RGB8，重新生成后的 SHA-256 与运行前完全一致。
+- **范围：** 仅实现空气与常量折射率玻璃之间的采样器，不接入递归相机追踪、光源光子通量权重、嵌套介质、吸收或光谱折射率。现有阴影规则和 PNG 输出流程保留；下一阶段可让相机积分器消费 `GlassSample`。
 
 ## 6. Codex 执行约定
 

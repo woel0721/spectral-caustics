@@ -3,6 +3,8 @@
 pub mod dielectric;
 pub mod lambertian;
 
+pub use dielectric::{GlassEvent, GlassSample};
+
 use crate::config::materialconfig::MaterialConfig;
 use dielectric::Dielectric;
 use lambertian::Lambertian;
@@ -34,6 +36,25 @@ impl BsdfValue {
     }
 }
 
+/// 一次材质采样的统一结果，区分连续方向与玻璃的离散事件。
+#[derive(Debug, Clone, Copy)]
+pub enum MaterialSample {
+    /// 连续方向按立体角分布采样；BSDF 和密度由 evaluate、pdf 查询。
+    Continuous { wi: Vector3<f64> },
+    /// 理想玻璃的离散事件，包含已计算好的吞吐量权重。
+    Glass(GlassSample),
+}
+
+impl MaterialSample {
+    /// 从交点向外指的单位世界方向。
+    pub fn wi(&self) -> Vector3<f64> {
+        match self {
+            Self::Continuous { wi } => *wi,
+            Self::Glass(sample) => sample.wi,
+        }
+    }
+}
+
 /// 可通过 `Box<dyn Material>` 保存和并行只读访问的运行时材质。
 pub trait Material: Send + Sync {
     /// 按 mode 返回给定方向的 BSDF 值，单位为 sr⁻¹。
@@ -46,7 +67,7 @@ pub trait Material: Send + Sync {
     /// wavelength_nm 必须为正有限值，否则返回光谱标量零。
     /// 此值不含入射辐亮度、CIE、余弦项、PDF、波长积分权重、曝光或 sRGB 编码。
     /// 非法输入、无效反射方向及理想 delta 材质返回对应 mode 的零值；
-    /// delta 贡献需要后续通过散射采样计算，XYZ 转换由积分器处理。
+    /// delta 贡献通过 sample 返回的离散记录计算，XYZ 转换由积分器处理。
     fn evaluate(
         &self,
         wi: Vector3<f64>,
@@ -55,18 +76,22 @@ pub trait Material: Send + Sync {
         mode: EvaluateMode,
     ) -> BsdfValue;
 
-    /// 给定已知的世界方向 wo，随机生成新的单位世界方向 wi。
+    /// 给定已知的世界方向 wo，返回统一的方向/事件采样记录。
     ///
     /// wi、wo 都从交点向外指，约定同 evaluate。
     /// rng 由调用方持有和设种子；Lambertian 使用法线正半球的余弦加权采样。
-    /// 非法 wo/normal 或 wo 位于背面/切线时返回 None，且不消耗随机数。
-    /// 默认没有方向采样实现；理想 Dielectric 暂沿用此行为。
+    /// 非法 wo/normal 或切线 wo 返回 None，且不消耗随机数；Lambertian 也拒绝背面。
+    /// Lambertian 返回 Continuous，使用 evaluate * |n·wi| / pdf 更新吞吐量。
+    /// Dielectric 返回 Glass，支持两侧，normal 必须是玻璃朝外的几何法线，不能预先翻面。
+    /// Glass 中的 weight 是 radiance 吞吐量乘数，已抵消余弦与离散事件概率；
+    /// 直接乘 weight，不再乘 Fresnel、余弦或除以 probability，也不用普通 evaluate/pdf。
+    /// 默认没有采样实现。
     fn sample(
         &self,
         _wo: Vector3<f64>,
         _normal: Vector3<f64>,
         _rng: &mut dyn RngCore,
-    ) -> Option<Vector3<f64>> {
+    ) -> Option<MaterialSample> {
         None
     }
 

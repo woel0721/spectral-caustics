@@ -7,7 +7,10 @@ use spectral_caustics::{
         sceneconfig::{ObjectConfig, SceneConfig},
     },
     geometry::{ground::Ground, ray::Ray},
-    material::{BsdfValue, EvaluateMode, Material},
+    material::{
+        BsdfValue, EvaluateMode, GlassEvent, Material, MaterialSample,
+        dielectric::fresnel_dielectric,
+    },
     optics::{iormode::IorMode, spectrum::rgb_reflectance},
     render::{Render, caustics::ground_to_pixel, framebuffer::Framebuffer},
     scene::Scene,
@@ -159,10 +162,34 @@ fn json_materials_build_runtime_values_and_follow_the_hit_object() {
             }
             let mut rng = StdRng::seed_from_u64(42);
             if material.is_delta() {
-                assert_eq!(material.sample(hit.normal, hit.normal, &mut rng), None);
+                let wo = -ray.direction;
+                let MaterialSample::Glass(sample) =
+                    material.sample(wo, hit.normal, &mut rng).unwrap()
+                else {
+                    panic!("JSON 玻璃必须通过统一接口返回离散事件记录");
+                };
+                assert!((sample.wi.norm() - 1.0).abs() < 1e-12);
+                let ior = expected_ior.unwrap();
+                let f = fresnel_dielectric(wo.dot(&hit.normal), 1.0, ior).unwrap();
+                match sample.event {
+                    GlassEvent::Reflection => {
+                        assert!(sample.wi.dot(&hit.normal) > 0.0);
+                        assert_eq!(sample.probability, f);
+                        assert_eq!(sample.weight, 1.0);
+                    }
+                    GlassEvent::Transmission => {
+                        assert!(sample.wi.dot(&hit.normal) < 0.0);
+                        assert_eq!(sample.probability, 1.0 - f);
+                        assert_eq!(sample.weight, (1.0 / ior).powi(2));
+                    }
+                }
                 assert_eq!(material.pdf(hit.normal, hit.normal, hit.normal), 0.0);
             } else {
-                let wi = material.sample(hit.normal, hit.normal, &mut rng).unwrap();
+                let MaterialSample::Continuous { wi } =
+                    material.sample(hit.normal, hit.normal, &mut rng).unwrap()
+                else {
+                    panic!("JSON Lambertian 必须通过统一接口返回连续方向");
+                };
                 assert!((wi.norm() - 1.0).abs() < 1e-12);
                 let cosine = hit.normal.dot(&wi);
                 let pdf = material.pdf(wi, hit.normal, hit.normal);
@@ -250,7 +277,11 @@ fn scene_accepts_custom_materials_without_changing_geometry_or_a_material_enum()
     );
     // 只提供 BSDF 求值的自定义材质可保留默认的“无采样器”行为。
     let mut rng = StdRng::seed_from_u64(42);
-    assert_eq!(material.sample(-ray.direction, hit.normal, &mut rng), None);
+    assert!(
+        material
+            .sample(-ray.direction, hit.normal, &mut rng)
+            .is_none()
+    );
     assert_eq!(material.pdf(hit.normal, -ray.direction, hit.normal), 0.0);
     assert!(!material.is_delta());
     assert_eq!(material.ior(), None);
