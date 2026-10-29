@@ -12,7 +12,10 @@ use spectral_caustics::{
         dielectric::fresnel_dielectric,
     },
     optics::{iormode::IorMode, spectrum::rgb_reflectance},
-    render::{Render, caustics::ground_to_pixel, framebuffer::Framebuffer, render_camera_glass},
+    render::{
+        Render, caustics::ground_to_pixel, framebuffer::Framebuffer, render_camera_glass,
+        render_camera_glass_with_ground,
+    },
     scene::Scene,
 };
 use std::{
@@ -98,6 +101,50 @@ fn render(config: &Config) -> Framebuffer {
 
 fn total_y(image: &Framebuffer) -> f64 {
     image.pixels.iter().map(|v| v.y).sum()
+}
+
+#[test]
+fn spectral_irradiance_flows_through_gray_ground_camera_paths_and_png_output() {
+    let config = small_config();
+    let scene = Scene::from_config(&config.scene).unwrap();
+    let renderer = Render::new(config.render.clone()).unwrap();
+    // 第一遍是未曝光的 XYZ 辐照度图；相机分辨率独立于这张图。
+    let ground = renderer.render(&scene).unwrap();
+    let camera = |map: &Framebuffer| {
+        render_camera_glass_with_ground(&scene, map, 18, 10, 8, config.render.seed).unwrap()
+    };
+    let image = camera(&ground);
+    assert_eq!((image.width, image.height), (18, 10));
+    assert_eq!(image.pixels, camera(&ground).pixels);
+    let zero = Framebuffer::new(ground.width, ground.height);
+    let no_ground = camera(&zero);
+    assert!(
+        image
+            .pixels
+            .iter()
+            .zip(&no_ground.pixels)
+            .any(|(full, black)| full.y > black.y + 1e-9)
+    );
+    let half = Framebuffer {
+        width: ground.width,
+        height: ground.height,
+        pixels: ground.pixels.iter().map(|p| p * 0.5).collect(),
+    };
+    let half_image = camera(&half);
+    for ((full, half), background) in image
+        .pixels
+        .iter()
+        .zip(&half_image.pixels)
+        .zip(&no_ground.pixels)
+    {
+        assert!((half - (background + (full - background) * 0.5)).norm() < 1e-12);
+    }
+    let directory = TemporaryDirectory::new();
+    let path = directory.0.join("camera_glass_with_ground.png");
+    renderer.save(&image, &path).unwrap();
+    let saved = image::open(path).unwrap();
+    assert_eq!((saved.width(), saved.height()), (18, 10));
+    assert_eq!(saved.color(), image::ColorType::Rgb8);
 }
 
 #[test]

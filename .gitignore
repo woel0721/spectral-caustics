@@ -12,4 +12,5 @@
 !/output/camera_debug.png
 !/output/camera_lit.png
 !/output/camera_glass.png
+!/output/camera_glass_with_ground.png
 .DS_Store

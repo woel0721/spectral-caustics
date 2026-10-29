@@ -321,6 +321,16 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - **默认背景更新：** 按用户设置将线性 RGB 背景调整为 `[0.08, 0.10, 0.14]`，默认 JSON、`SceneConfig::default` 和 `Scene::new` 保持一致。现有 185 项单元测试、11 项集成测试、格式和严格 Clippy 通过；已重新生成 `camera_glass.png`、`camera_lit.png`，其余十张 PNG 的 SHA-256 保持一致。
 - **范围：** 只做像素区域内的独立均匀采样，不增加镜头景深、运动模糊、分层采样、间接光或透明阴影。有限 SPP 的边缘仍有随机噪声；下一阶段可使用像素内分层采样降低方差。
 
+### V0.4 阶段 13 — 地面光谱辐照度接入相机画面
+
+- [x] `sample_ground_irradiance` 将世界交点映射到光源地面图的连续像素坐标，按原有 y 翻转/像素中心约定双线性读取 XYZ 辐照度；接收区域外为零，边缘夹紧，拒绝非法数据。
+- [x] `lambertian_radiance(E_xyz, rho)` 使用 `L_o = E rho / π`，先支持波长无关的中性灰反射率；默认 `rho=0.8`，保持色度和 HDR，不对已积分的 E 再乘光照或余弦。
+- [x] 新增 `render_camera_glass_with_ground`，在共用 `trace_camera_path` 中按 `Scene.ground_id` 识别地面并使用地面图替换原直接光照/硬阴影；保留原玻璃 Fresnel 路径、八次限制、SPP、抖动及旧相机入口。
+- [x] 新增 `camera_glass_with_ground` example：先由 `Render::render` 生成光谱地面图，将未曝光的内存 Framebuffer 传给新相机入口，最后保存 `output/camera_glass_with_ground.png`；可选 SPP 参数沿用现有配置。
+- **验证范围：** 已知世界位置与非方形图像的双线性插值、接收区边界/单像素图、非法 XYZ/元数据、中性灰 `rho/π`、HDR 与色度保持、避免重复直接光和硬阴影、玻璃吞吐量、背面/其他物体、地面图与相机分辨率独立、完整光谱→相机→PNG 流程及照明缩放线性。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（191 项单元测试、12 项集成测试）、严格 `cargo clippy --locked --all-targets -- -D warnings` 和 diff 检查通过。新 example 实际生成并查看了 512×512 RGB8 的 `camera_glass_with_ground.png`；原玻璃 example 与默认 release 主程序重新运行成功，十二张原有 PNG 的 SHA-256 均保持一致。
+- **范围：** 只接入水平中性灰 Lambertian 地面；接收区外为零，彩色地面需后续保留波长信息。光源通道仍沿用双界面模型并忽略 Fresnel 损失/吸收，相机仍使用常量玻璃折射率；未增加间接光或通用 Photon Mapping。下一阶段可保留按波长的地面照明来支持彩色材质。
+
 ## 6. Codex 执行约定
 
 1. **每次只实现当前一个里程碑**，完成后总结修改文件、运行命令、测试结果和下一步；不要抢跑后续阶段。

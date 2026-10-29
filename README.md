@@ -25,6 +25,8 @@
 
 **已实现玻璃 Fresnel 离散事件采样、有界相机路径、SPP 与子像素抖动。** `Material::sample` 统一返回 `Option<MaterialSample>`，Lambertian 返回 `Continuous { wi }`，Dielectric 返回 `Glass(GlassSample { wi, event, probability, weight })`；`GlassEvent` 区分反射与透射。`render_camera_glass` 负责像素内随机位置的多样本平均，`trace_camera_path` 负责单条最多八次散射的路径；运行 `camera_glass` 示例可生成独立的相机玻璃图，默认 64 SPP。
 
+**已接入地面光谱辐照度与相机画面。** `camera_glass_with_ground` 示例先由光源追踪得到未曝光的地面 XYZ 辐照度，再通过 `render_camera_glass_with_ground` 追踪相机路径；命中中性灰地面时双线性读取 E，并按 `L_o = E rho / π` 着色，输出 `output/camera_glass_with_ground.png`。
+
 **已接入双线性光子累积。** `render::utils::bilinear_weights` 根据落点的小数位置计算四个邻近像素及其权重，`caustics.rs` 将线性 XYZ 能量按权重分配；接收区域内的边缘落点也保留全部能量。这对应 Day 6 中的双线性 splat 子项。
 
 **发射采用分层随机采样。** 每个小格各发射一条光线，x、y 分别使用独立的随机偏移。`StdRng` 使用固定种子 `42`；每次渲染都重新初始化，因此无三棱镜和折射图共享同一组发射位置，命中或丢弃光线不会改变后续采样序列。
@@ -342,11 +344,11 @@ renderer.save(&framebuffer, "output/camera_lit.png")?;
 
 `render_camera_glass(scene, width, height, spp, seed)` 对每个像素调用 `trace_camera_path` 共 `spp` 次，在线性 RGB 中计算 `mean = (L₁ + … + L_spp) / spp`，再转为线性 XYZ 写入 Framebuffer。`spp` 是每像素路径总数，必须大于零。每个样本先独立均匀生成 `u、v ∈ [0,1)`，再通过 `ray_for_pixel_sample` 从 `(x+u, y+v)` 发射射线，随后采样玻璃事件。SPP=1 也会抖动一次；更多样本同时降低玻璃事件噪声，并估计几何边缘覆盖率来改善锯齿。相机位置、法线与光路本身不添加随机扰动。
 
-`trace_camera_path` 是积分器内部的单路径函数，接收一条初始 Ray 和调用方持有的 RNG，返回未经曝光的线性 RGB 辐亮度。每次调用重新将吞吐量设为 1、辐亮度设为零；本次渲染只在开始时用 `seed` 初始化一次 `StdRng`，按行、像素、样本顺序消耗随机数，每个样本先生成两个偏移，再执行玻璃路径采样，不逐样本重设种子。相同参数、SPP 与种子可复现。均匀采样的像素区域面积为 1，空间采样密度为 1，使用现有 `1/spp` 平均即可，不引入额外曝光或颜色权重。
+`trace_camera_path` 是积分器内部的单路径函数，接收一条初始 Ray、调用方持有的 RNG 和可选的地面辐照度绑定，返回未经曝光的线性 RGB 辐亮度。每次调用重新将吞吐量设为 1、辐亮度设为零；本次渲染只在开始时用 `seed` 初始化一次 `StdRng`，按行、像素、样本顺序消耗随机数，每个样本先生成两个偏移，再执行玻璃路径采样，不逐样本重设种子。相同参数、SPP 与种子可复现。均匀采样的像素区域面积为 1，空间采样密度为 1，使用现有 `1/spp` 平均即可，不引入额外曝光或颜色权重。
 
 单条路径命中玻璃后更新 `throughput *= sample.weight` 并继续最近求交。`wo = -ray.direction`，传给材质的是朝外几何法线；新射线起点按 `sample.wi · normal` 的符号沿法线偏移 `1e-5 m`。事件概率已经包含在权重中，不再乘 Fresnel、余弦或除以离散概率。最多允许八次玻璃散射；第八次后仍可读取地面直接光照或背景，第九个玻璃命中处截断。未命中时累加 `throughput × background_color`；到达非 delta 表面时累加 `throughput × V f_r L_light max(n · wi, 0)` 后终止。未绑定材质、采样失败或吞吐量为零的路径贡献为零，平均时仍计入总 SPP。
 
-两个相机入口共享方向光校验、直接光照和 shadow ray 计算。玻璃相机路径仍将 shadow ray 上的玻璃作为不透明遮挡，因此玻璃下方地面可能较暗；背景只在路径离开场景时返回，不作为地面的环境照明。较低 SPP 会有明显的反射/透射噪点，八次上限会丢弃更长路径；尚无漫反射间接光、透明阴影、光谱色散或焦散叠加。
+相机入口共享方向光校验、直接光照和 shadow ray 计算。在原有 `render_camera_glass` 中，shadow ray 上的玻璃仍作为不透明遮挡，因此玻璃下方地面可能较暗；背景只在路径离开场景时返回，不作为地面的环境照明。较低 SPP 会有明显的反射/透射噪点，八次上限会丢弃更长路径。地面光谱照明通过下面的新入口接入，漫反射间接光、透明阴影与相机路径的光谱色散仍留待后续。
 
 ```rust
 use spectral_caustics::render::render_camera_glass;
@@ -370,6 +372,38 @@ cargo run --release --locked --example camera_glass -- 256
 示例读取 `configs/default.json` 的场景、尺寸、`render.camera_spp`、随机种子和曝光，输出 `output/camera_glass.png`。`render.camera_spp` 默认为 64，旧 JSON 缺省该字段时也使用 64；可用示例的可选 SPP 参数覆盖。它与光源发射使用的 `render.samples_per_pixel_axis` 独立，64 SPP 表示每像素总计 64 条相机路径，不是 64×64。默认主程序仍输出原来的对照图。
 
 ![相机视角的八次上限玻璃路径，64 SPP，像素内抖动](output/camera_glass.png)
+
+`render_camera_glass_with_ground(scene, ground_irradiance, width, height, spp, seed)` 接收同一场景生成的地面 XYZ 辐照度 Framebuffer。地面图的尺寸可以与相机图不同，但必须对应 `scene.receiver` 的同一世界区域；`scene.ground_id` 指定接受该照明的地面物体，其他表面继续使用原来的直接光照。玻璃事件、八次上限、SPP 和子像素抖动与原入口共用同一个路径循环。
+
+光源渲染已将每个光子的通量除以地面像素面积，得到当前相对能量标尺下的 XYZ 辐照度。`sample_ground_irradiance(&map, &scene.receiver, hit.coords)` 复用 `ground_to_pixel` 与 `bilinear_weights`，按世界 +x 向右、+y 向上、像素中心为整数的约定读取四邻域并插值。接收区域为 `[min,max)`：区域内的边缘夹紧到最近像素中心，区域外返回零。读取的是未曝光的浮点数据，不读取 PNG，也不再次除以像素面积。
+
+`lambertian_radiance(E_xyz, rho)` 返回 `E_xyz × rho / π`。本阶段将中性灰作为波长无关的标量反射率，XYZ 三个分量乘同一个系数，保持入射光的色度；默认灰地面的 `rho=0.8`。积分器通过已有 `Material::evaluate` 的法向 RGB BSDF 读取 `rho/π`，在渲染开始时恢复并校验灰色反射率；当前对彩色地面返回错误。XYZ 三通道不足以支持任意波长相关反射率，后续彩色材质需保留地面的光谱照明数据。
+
+地面图已经包含直射与穿过棱镜后的光子贡献。路径命中地面正面时，累加 `throughput × L_o` 后终止，不再叠加原方向光、乘入射余弦或再次查询地面 shadow ray。这样既避免重复计算直射光，也允许光源通道计算出的透射光照亮玻璃下方地面。中性地面先在 XYZ 中缩放，再转换到路径循环的线性 RGB；超出显示色域的值仍保留，到最后导出 PNG 时才曝光、裁剪和编码。
+
+```rust
+use spectral_caustics::render::{Render, render_camera_glass_with_ground};
+
+let renderer = Render::new(config.render.clone())?;
+let ground_irradiance = renderer.render(&scene)?;
+let image = render_camera_glass_with_ground(
+    &scene, &ground_irradiance, config.render.width, config.render.height,
+    config.render.camera_spp, config.render.seed,
+)?;
+renderer.save(&image, "output/camera_glass_with_ground.png")?;
+```
+
+运行完整示例：
+
+```bash
+cargo run --release --locked --example camera_glass_with_ground
+# 可选参数覆盖相机 SPP：
+cargo run --release --locked --example camera_glass_with_ground -- 128
+```
+
+该示例先保存光谱地面预览到 `render.output_path`，再将原始内存 Framebuffer 交给相机通道，最后保存 `output/camera_glass_with_ground.png`。曝光只用于预览和最终 PNG 导出，不参与两遍之间的数据传递。当前接收区域外的地面没有存储照明，显示为黑色；区域内使用双线性过滤，较细色带会受到地面图分辨率影响。光源通道继续使用现有固定值/Cauchy 色散及最多两个界面模型，尚未计算 Fresnel 损失或吸收；相机通道仍使用材质的常量玻璃折射率，支持 Fresnel 反射/透射。
+
+![光谱地面辐照度接入中性灰地面与玻璃相机路径](output/camera_glass_with_ground.png)
 
 ## 运行
 
@@ -488,7 +522,7 @@ src/
 └── render/
     ├── mod.rs                # Render、PNG 输出与相机调试接口导出
     ├── camera_debug.rs       # 相机法线调试遍历与对应测试
-    ├── integrator.rs         # 相机直接光照、shadow ray 与对应测试
+    ├── integrator.rs         # 相机直接光照、玻璃路径、地面 XYZ 辐照度采样与测试
     ├── caustics.rs           # 分层发射、光路追踪与地面累积
     ├── framebuffer.rs        # 线性 XYZ 图像缓冲
     └── utils.rs              # XYZ/sRGB 颜色转换、法线可视化、双线性权重

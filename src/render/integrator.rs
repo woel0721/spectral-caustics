@@ -1,19 +1,97 @@
 //! 相机视角的直接光照与有界玻璃路径追踪，在线性 RGB 中计算并保存为 XYZ。
 
-use super::{framebuffer::Framebuffer, utils::linear_srgb_to_xyz};
+use super::{
+    caustics::ground_to_pixel,
+    framebuffer::Framebuffer,
+    utils::{bilinear_weights, linear_srgb_to_xyz, xyz_to_linear_srgb},
+};
 use crate::{
     geometry::{
         hit::Hit,
         ray::{INTERSECTION_EPSILON, Ray},
     },
     material::{BsdfValue, EvaluateMode, Material, MaterialSample},
-    scene::Scene,
+    scene::{GroundReceiver, Scene},
 };
 use nalgebra::{Vector2, Vector3};
 use rand::{Rng, SeedableRng, rngs::StdRng};
-use std::{error::Error, mem::size_of};
+use std::{error::Error, f64::consts::PI, mem::size_of};
 
 const MAX_GLASS_BOUNCES: usize = 8;
+
+/// 从未曝光的地面 XYZ 辐照度图读取世界交点的 E，使用像素中心约定和双线性插值。
+///
+/// 接收区域、尺寸应与生成该图的光源渲染一致；使用世界 x/y，图片 y 向下。
+/// 有效区域为 [min, max)，区域外返回零；区域内边缘夹紧到最近像素中心。
+/// 非法尺寸/接收区域/交点，或被读取的像素含负值、非有限值时返回 None。
+/// 图中已除以像素面积，使用相同的相对能量标尺；不再除面积或施加曝光、sRGB。
+pub fn sample_ground_irradiance(
+    irradiance: &Framebuffer,
+    receiver: &GroundReceiver,
+    position: Vector3<f64>,
+) -> Option<Vector3<f64>> {
+    if !valid_ground_map_layout(irradiance, receiver)
+        || !position.iter().all(|value| value.is_finite())
+    {
+        return None;
+    }
+    let Some((x, y)) = ground_to_pixel(position, irradiance.width, irradiance.height, receiver)
+    else {
+        return Some(Vector3::zeros());
+    };
+    let mut xyz = Vector3::zeros();
+    for (px, py, weight) in bilinear_weights(x, y, irradiance.width, irradiance.height)? {
+        if weight == 0.0 {
+            continue;
+        }
+        let pixel = irradiance.get(px, py)?;
+        if pixel.iter().any(|value| !value.is_finite() || *value < 0.0) {
+            return None;
+        }
+        xyz += pixel * weight;
+    }
+    xyz.iter().all(|value| value.is_finite()).then_some(xyz)
+}
+
+/// 中性 Lambertian：L_o,XYZ = E_XYZ * rho / pi；rho 是 [0,1] 内的灰色反射率。
+/// E 已对入射方向积分，不再乘入射余弦、光源强度或可见性。
+/// 保留 HDR 线性值；非法输入或计算溢出返回 None。
+pub fn lambertian_radiance(irradiance_xyz: Vector3<f64>, rho: f64) -> Option<Vector3<f64>> {
+    if irradiance_xyz
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+        || !rho.is_finite()
+        || !(0.0..=1.0).contains(&rho)
+    {
+        return None;
+    }
+    let radiance = irradiance_xyz * (rho / PI);
+    radiance
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(radiance)
+}
+
+fn valid_ground_map_layout(irradiance: &Framebuffer, receiver: &GroundReceiver) -> bool {
+    let span = receiver.max_m - receiver.min_m;
+    irradiance.width > 0
+        && irradiance.height > 0
+        && irradiance.width.checked_mul(irradiance.height) == Some(irradiance.pixels.len())
+        && receiver
+            .min_m
+            .iter()
+            .chain(receiver.max_m.iter())
+            .all(|value| value.is_finite())
+        && span.iter().all(|value| value.is_finite() && *value > 0.0)
+}
+
+/// 一次相机渲染中只读的地面绑定；反射率由现有材质 evaluate 接口读取一次。
+struct GroundLighting<'a> {
+    irradiance: &'a Framebuffer,
+    receiver: &'a GroundReceiver,
+    object_id: usize,
+    rho: f64,
+}
 
 /// 每像素从相机发射一条主光线，计算 L_o = V f_r L_light max(n · wi, 0)。
 ///
@@ -70,6 +148,74 @@ pub fn render_camera_glass(
     spp: usize,
     seed: u64,
 ) -> Result<Framebuffer, Box<dyn Error>> {
+    render_camera_glass_impl(scene, width, height, spp, seed, None)
+}
+
+/// 使用光源通道生成的地面 XYZ 辐照度图渲染相机画面，先支持中性 Lambertian 地面。
+///
+/// irradiance 必须来自同一场景的接收区域且尚未曝光/编码；图像分辨率可与相机不同。
+/// Scene.ground_id 标识唯一地面；地面贡献由 E*rho/pi 替换原直接光照，区域外为零。
+/// 玻璃仍使用原 Fresnel 路径、八次上限、SPP 与抖动；其他表面继续使用直接光照。
+/// 缺少地面/材质、非中性灰材质或非法图像数据返回错误。
+pub fn render_camera_glass_with_ground(
+    scene: &Scene,
+    irradiance: &Framebuffer,
+    width: usize,
+    height: usize,
+    spp: usize,
+    seed: u64,
+) -> Result<Framebuffer, Box<dyn Error>> {
+    if !valid_ground_map_layout(irradiance, &scene.receiver)
+        || irradiance
+            .pixels
+            .iter()
+            .any(|pixel| pixel.iter().any(|v| !v.is_finite() || *v < 0.0))
+    {
+        return Err("地面辐照度图的尺寸、接收区域或 XYZ 数据无效".into());
+    }
+    let object_id = scene
+        .ground_id
+        .ok_or("场景缺少 ground_id，无法绑定地面辐照度图")?;
+    let material = scene
+        .objects
+        .get(object_id)
+        .and_then(|object| object.material_id())
+        .and_then(|id| scene.material(id))
+        .ok_or("地面编号或地面材质无效")?;
+    if material.is_delta() {
+        return Err("辐照度贴图要求中性 Lambertian 地面".into());
+    }
+    // Lambertian 的普通 BSDF 是 rho/pi；法向求值只读取材质，不包含光照和余弦。
+    let BsdfValue::Rgb(bsdf) =
+        material.evaluate(Vector3::z(), Vector3::z(), Vector3::z(), EvaluateMode::Rgb)
+    else {
+        return Err("地面 RGB 求值必须返回 RGB BSDF".into());
+    };
+    if bsdf
+        .iter()
+        .any(|v| !v.is_finite() || *v < 0.0 || *v * PI > 1.0 + 1e-12)
+        || (bsdf.x - bsdf.y).abs() > 1e-12
+        || (bsdf.x - bsdf.z).abs() > 1e-12
+    {
+        return Err("当前地面辐照度贴图仅支持中性灰 Lambertian 反射率".into());
+    }
+    let ground = GroundLighting {
+        irradiance,
+        receiver: &scene.receiver,
+        object_id,
+        rho: (bsdf.x * PI).clamp(0.0, 1.0),
+    };
+    render_camera_glass_impl(scene, width, height, spp, seed, Some(&ground))
+}
+
+fn render_camera_glass_impl(
+    scene: &Scene,
+    width: usize,
+    height: usize,
+    spp: usize,
+    seed: u64,
+    ground: Option<&GroundLighting<'_>>,
+) -> Result<Framebuffer, Box<dyn Error>> {
     if spp == 0 {
         return Err("相机 SPP 必须大于零".into());
     }
@@ -90,7 +236,8 @@ pub fn render_camera_glass(
                     .ray_for_pixel_sample(x, y, width, height, offset)
                     .ok_or("无法生成子像素摄像机光线")?;
                 // 先缩放每项再相加，避免有限样本之和溢出而平均值仍有限。
-                mean_rgb += trace_camera_path(scene, ray, &mut rng, light_wi, light)? / spp as f64;
+                mean_rgb +=
+                    trace_camera_path(scene, ray, &mut rng, light_wi, light, ground)? / spp as f64;
             }
             let xyz = linear_srgb_to_xyz(mean_rgb).ok_or("相机样本平均颜色非法或计算溢出")?;
             if !framebuffer.set(x, y, xyz) {
@@ -107,13 +254,15 @@ pub fn render_camera_glass(
 /// wo = -ray.direction，保留朝外几何法线；玻璃只乘 sample.weight。
 /// 新起点沿采样方向所在侧的法线偏移 1e-5 米，第九个玻璃命中处截断。
 /// 未命中返回背景贡献；非 delta 命中累加带硬阴影的直接光照并终止。
-/// 不采样漫反射间接光、不叠加焦散，也不模拟透明 shadow ray。
+/// 可选地面绑定使用已积分的 XYZ 辐照度，不再为地面加直接光或查询 shadow ray。
+/// 不采样漫反射间接光，也不模拟透明 shadow ray。
 fn trace_camera_path(
     scene: &Scene,
     mut ray: Ray,
     rng: &mut dyn rand::RngCore,
     light_wi: Vector3<f64>,
     light: f64,
+    ground: Option<&GroundLighting<'_>>,
 ) -> Result<Vector3<f64>, Box<dyn Error>> {
     let mut throughput = 1.0;
     let mut radiance = Vector3::zeros();
@@ -126,6 +275,24 @@ fn trace_camera_path(
             break;
         };
         let wo = -ray.direction;
+        if let Some(ground) = ground
+            && hit.object_id == Some(ground.object_id)
+        {
+            let length = hit.normal.norm();
+            if !length.is_finite() || length == 0.0 {
+                return Err("地面法线无效".into());
+            }
+            // 当前地面是单面 Lambertian，朝外法线指向已存储辐照度的那一侧。
+            if (hit.normal / length).dot(&wo) <= 0.0 {
+                break;
+            }
+            let e = sample_ground_irradiance(ground.irradiance, ground.receiver, hit.coords)
+                .ok_or("地面辐照度采样失败")?;
+            let lo_xyz = lambertian_radiance(e, ground.rho).ok_or("地面辐亮度计算失败")?;
+            // 保留超出 sRGB 色域的线性值，最终输出时才裁剪；中性反射直接缩放 XYZ。
+            radiance += xyz_to_linear_srgb(lo_xyz).ok_or("地面 XYZ 辐亮度转换失败")? * throughput;
+            break;
+        }
         if !material.is_delta() {
             radiance += direct_lighting(scene, &hit, material, wo, light_wi, light)? * throughput;
             break;
@@ -279,6 +446,228 @@ mod tests {
         .unwrap()
     }
 
+    fn neutral_ground_scene(rho: f64) -> Scene {
+        Scene::from_config(&SceneConfig {
+            camera: CameraConfig {
+                position: [0.0, 0.0, 2.0],
+                target: [0.0; 3],
+                up: [0.0, 1.0, 0.0],
+                fov_y_degrees: 45.0,
+            },
+            objects: vec![ObjectConfig::Ground {
+                height_m: 0.0,
+                material: MaterialConfig::Lambertian { albedo: [rho; 3] },
+            }],
+            ..SceneConfig::default()
+        })
+        .unwrap()
+    }
+
+    fn uniform_ground_map(xyz: Vector3<f64>) -> Framebuffer {
+        let mut map = Framebuffer::new(1, 1);
+        assert!(map.set(0, 0, xyz));
+        map
+    }
+
+    #[test]
+    fn ground_irradiance_sampling_preserves_world_axes_centers_and_bilinear_weights() {
+        let receiver = GroundReceiver {
+            min_m: Vector2::new(-2.0, -1.0),
+            max_m: Vector2::new(2.0, 1.0),
+        };
+        let mut map = Framebuffer::new(2, 2);
+        let unit = Vector3::new(1.0, 10.0, 100.0);
+        for (index, pixel) in map.pixels.iter_mut().enumerate() {
+            *pixel = unit * (index + 1) as f64;
+        }
+        for (position, scale) in [
+            (Vector3::new(-1.0, 0.5, 0.0), 1.0),
+            (Vector3::new(1.0, 0.5, 0.0), 2.0),
+            (Vector3::new(-1.0, -0.5, 0.0), 3.0),
+            (Vector3::new(1.0, -0.5, 0.0), 4.0),
+            (Vector3::zeros(), 2.5),
+            (Vector3::new(-0.5, 0.25, 7.0), 1.75),
+            (Vector3::new(-2.0, -1.0, 0.0), 3.0),
+        ] {
+            let actual = sample_ground_irradiance(&map, &receiver, position).unwrap();
+            assert!((actual - unit * scale).norm() < 1e-12);
+        }
+        for position in [
+            Vector3::new(2.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(-2.01, 0.0, 0.0),
+        ] {
+            assert_eq!(
+                sample_ground_irradiance(&map, &receiver, position),
+                Some(Vector3::zeros())
+            );
+        }
+        let uniform = uniform_ground_map(unit);
+        assert_eq!(
+            sample_ground_irradiance(&uniform, &receiver, Vector3::new(-2.0, -1.0, 0.0)),
+            Some(unit)
+        );
+        let wide = Framebuffer {
+            width: 3,
+            height: 2,
+            pixels: (1..=6).map(|v| Vector3::repeat(f64::from(v))).collect(),
+        };
+        assert_eq!(
+            sample_ground_irradiance(&wide, &receiver, Vector3::zeros()),
+            Some(Vector3::repeat(3.5))
+        );
+    }
+
+    #[test]
+    fn ground_irradiance_sampling_rejects_invalid_input_and_pixel_data() {
+        let mut scene = neutral_ground_scene(0.8);
+        let mut map = uniform_ground_map(Vector3::repeat(1.0));
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                sample_ground_irradiance(&map, &scene.receiver, Vector3::repeat(value)).is_none()
+            );
+        }
+        for value in [-1.0, f64::NAN, f64::INFINITY] {
+            map.pixels[0].x = value;
+            assert!(sample_ground_irradiance(&map, &scene.receiver, Vector3::zeros()).is_none());
+        }
+        map.pixels[0].x = 1.0;
+        scene.receiver.max_m.x = scene.receiver.min_m.x;
+        assert!(sample_ground_irradiance(&map, &scene.receiver, Vector3::zeros()).is_none());
+        scene.receiver.max_m.x = f64::INFINITY;
+        assert!(sample_ground_irradiance(&map, &scene.receiver, Vector3::zeros()).is_none());
+        let receiver = neutral_ground_scene(0.8).receiver;
+        map.pixels.clear();
+        assert!(sample_ground_irradiance(&map, &receiver, Vector3::zeros()).is_none());
+        map.width = 0;
+        assert!(sample_ground_irradiance(&map, &receiver, Vector3::zeros()).is_none());
+    }
+
+    #[test]
+    fn neutral_lambertian_converts_irradiance_to_radiance_without_changing_chromaticity() {
+        let e = Vector3::new(2.0, 3.0, 4.0);
+        for rho in [0.0, 0.2, 0.8, 1.0] {
+            assert!((lambertian_radiance(e, rho).unwrap() - e * rho / PI).norm() < 1e-14);
+        }
+        assert_eq!(
+            lambertian_radiance(Vector3::zeros(), 0.8),
+            Some(Vector3::zeros())
+        );
+        assert!(
+            lambertian_radiance(Vector3::repeat(f64::MAX), 1.0)
+                .unwrap()
+                .iter()
+                .all(|v| v.is_finite())
+        );
+        for rho in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
+            assert!(lambertian_radiance(e, rho).is_none());
+        }
+        for value in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(lambertian_radiance(Vector3::repeat(value), 0.8).is_none());
+        }
+    }
+
+    #[test]
+    fn ground_map_supplies_complete_radiance_and_keeps_glass_path_weights() {
+        let mut scene = neutral_ground_scene(0.8);
+        // 此 XYZ 超出 sRGB 色域，计算过程也必须保留，不能提前裁剪成 RGB。
+        let e = Vector3::new(0.1, 0.2, 1.0);
+        let map = uniform_ground_map(e);
+        let expected = e * (0.8 / PI);
+        for spp in [1, 8] {
+            let image = render_camera_glass_with_ground(&scene, &map, 3, 2, spp, 42).unwrap();
+            for xyz in image.pixels {
+                assert!((xyz - expected).norm() < 1e-12);
+            }
+        }
+        let black = uniform_ground_map(Vector3::zeros());
+        assert!(
+            render_camera_glass_with_ground(&scene, &black, 3, 2, 4, 42)
+                .unwrap()
+                .pixels
+                .iter()
+                .all(|p| p.norm() == 0.0)
+        );
+        // 无限玻璃面会挡住原来的 shadow ray；已积分的 E 不应再次被该阴影清零。
+        scene.add_with_material(
+            Box::new(Ground::new(1.0).unwrap()),
+            Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.25, 0.5)))),
+        );
+        let image = render_camera_glass_with_ground(&scene, &map, 3, 2, 8, 42).unwrap();
+        for xyz in image.pixels {
+            assert!((xyz - expected * 0.5).norm() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn ground_map_only_shades_bound_ground_front_side_and_returns_zero_outside_receiver() {
+        let mut scene = neutral_ground_scene(0.8);
+        let map = uniform_ground_map(Vector3::repeat(1.0));
+        scene.add_with_material(
+            Box::new(Ground::new(1.0).unwrap()),
+            Box::new(Lambertian::new(Vector3::new(0.1, 0.2, 0.3)).unwrap()),
+        );
+        assert_eq!(
+            render_camera_glass_with_ground(&scene, &map, 3, 2, 4, 42)
+                .unwrap()
+                .pixels,
+            render_camera_glass(&scene, 3, 2, 4, 42).unwrap().pixels
+        );
+        let mut scene = neutral_ground_scene(0.8);
+        for (position, target) in [
+            ([0.0, 0.0, -2.0], [0.0; 3]),
+            ([4.0, 0.0, 2.0], [4.0, 0.0, 0.0]),
+        ] {
+            scene.camera = Camera::from_config(&CameraConfig {
+                position,
+                target,
+                up: [0.0, 1.0, 0.0],
+                fov_y_degrees: 10.0,
+            })
+            .unwrap();
+            assert!(
+                render_camera_glass_with_ground(&scene, &map, 1, 1, 8, 42)
+                    .unwrap()
+                    .pixels
+                    .iter()
+                    .all(|p| p.norm() == 0.0)
+            );
+        }
+    }
+
+    #[test]
+    fn ground_renderer_rejects_invalid_maps_bindings_and_colored_ground() {
+        let map = uniform_ground_map(Vector3::repeat(1.0));
+        assert!(render_camera_glass_with_ground(&ground_scene(), &map, 1, 1, 1, 42).is_err());
+        let mut scene = neutral_ground_scene(0.8);
+        for id in [None, Some(usize::MAX)] {
+            scene.ground_id = id;
+            assert!(render_camera_glass_with_ground(&scene, &map, 1, 1, 1, 42).is_err());
+        }
+        let scene = neutral_ground_scene(0.8);
+        for value in [-1.0, f64::NAN, f64::INFINITY] {
+            let mut invalid = uniform_ground_map(Vector3::zeros());
+            invalid.pixels[0].x = value;
+            assert!(render_camera_glass_with_ground(&scene, &invalid, 1, 1, 1, 42).is_err());
+        }
+        let invalid = Framebuffer {
+            width: 2,
+            height: 1,
+            pixels: vec![Vector3::zeros()],
+        };
+        assert!(render_camera_glass_with_ground(&scene, &invalid, 1, 1, 1, 42).is_err());
+        assert!(render_camera_glass_with_ground(&scene, &map, 1, 1, 0, 42).is_err());
+        let mut scene = Scene::new();
+        scene.ground_id = Some(scene.add(Box::new(Ground::new(0.0).unwrap())));
+        assert!(render_camera_glass_with_ground(&scene, &map, 1, 1, 1, 42).is_err());
+        let mut scene = Scene::new();
+        scene.ground_id = Some(scene.add_with_material(
+            Box::new(Ground::new(0.0).unwrap()),
+            Box::new(Dielectric::new(1.5).unwrap()),
+        ));
+        assert!(render_camera_glass_with_ground(&scene, &map, 1, 1, 1, 42).is_err());
+    }
+
     fn glass_background_scene() -> Scene {
         let mut scene = Scene::new();
         scene.camera = Camera::from_config(&CameraConfig {
@@ -337,6 +726,7 @@ mod tests {
             &mut StdRng::seed_from_u64(seed),
             light_wi,
             light,
+            None,
         )
         .unwrap()
     }

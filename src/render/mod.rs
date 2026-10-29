@@ -8,7 +8,10 @@ pub mod integrator;
 pub mod utils;
 
 pub use camera_debug::render_camera_debug;
-pub use integrator::{render_camera_glass, render_camera_lit};
+pub use integrator::{
+    lambertian_radiance, render_camera_glass, render_camera_glass_with_ground, render_camera_lit,
+    sample_ground_irradiance,
+};
 
 use self::{
     framebuffer::Framebuffer,
