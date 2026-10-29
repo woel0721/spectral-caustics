@@ -1,14 +1,14 @@
 //! 相机视角的直接光照与有界玻璃路径追踪，在线性 RGB 中计算并保存为 XYZ。
 
 use super::{
-    caustics::ground_to_pixel,
+    caustics::{SpectralLighting, ground_to_pixel},
     framebuffer::Framebuffer,
     utils::{bilinear_weights, linear_srgb_to_xyz, xyz_to_linear_srgb},
 };
 use crate::{
     geometry::{
         hit::Hit,
-        ray::{INTERSECTION_EPSILON, Ray},
+        ray::{INTERSECTION_EPSILON, PARALLEL_EPSILON, Ray},
     },
     material::{BsdfValue, EvaluateMode, Material, MaterialSample},
     scene::{GroundReceiver, Scene},
@@ -18,6 +18,21 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{error::Error, f64::consts::PI, mem::size_of};
 
 const MAX_GLASS_BOUNCES: usize = 8;
+
+/// 调试分量；Direct 包含解析直射及原有背景，Caustics 只显示焦散。
+/// 三种模式复用相同相机 RNG/玻璃路径，Combined 为两者在线性空间中的和。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroundLightingComponent {
+    Direct,
+    Caustics,
+    Combined,
+}
+
+struct SunGroundLighting {
+    wi: Vector3<f64>,
+    irradiance_xyz: Vector3<f64>,
+    component: GroundLightingComponent,
+}
 
 /// 从未曝光的地面 XYZ 辐照度图读取世界交点的 E，使用像素中心约定和双线性插值。
 ///
@@ -91,6 +106,8 @@ struct GroundLighting<'a> {
     receiver: &'a GroundReceiver,
     object_id: usize,
     rho: f64,
+    // None 保留阶段 13 的完整贴图替换行为；Some 使用解析直射 + 焦散专用图。
+    sun: Option<SunGroundLighting>,
 }
 
 /// 每像素从相机发射一条主光线，计算 L_o = V f_r L_light max(n · wi, 0)。
@@ -165,7 +182,50 @@ pub fn render_camera_glass_with_ground(
     spp: usize,
     seed: u64,
 ) -> Result<Framebuffer, Box<dyn Error>> {
-    if !valid_ground_map_layout(irradiance, &scene.receiver)
+    let ground = bind_ground_lighting(scene, irradiance, &scene.receiver)?;
+    render_camera_glass_impl(scene, width, height, spp, seed, Some(&ground))
+}
+
+/// 阶段 14：无限远解析太阳直射 + 经棱镜追踪的焦散，不叠加 sampled direct 图。
+///
+/// lighting 必须由同一场景/光源的 render_spectral_lighting（或 Render::render_lighting）生成。
+/// 地面直射逐交点发射 shadow ray（玻璃也遮挡）；焦散仅查其生成时的 receiver，
+/// 区域外只有焦散为零。保留中性灰、Fresnel 相机路径、八次散射、SPP 与抖动。
+/// 原有 RGB 直接光入口和完整地面图入口继续保留其历史输出约定。
+pub fn render_camera_glass_with_lighting(
+    scene: &Scene,
+    lighting: &SpectralLighting,
+    width: usize,
+    height: usize,
+    spp: usize,
+    seed: u64,
+    component: GroundLightingComponent,
+) -> Result<Framebuffer, Box<dyn Error>> {
+    if lighting.light_wi.iter().any(|v| !v.is_finite())
+        || (lighting.light_wi.norm() - 1.0).abs() > 1e-12
+        || lighting.light_wi.z <= PARALLEL_EPSILON
+        || lighting
+            .sun_irradiance_xyz
+            .iter()
+            .any(|v| !v.is_finite() || *v < 0.0)
+    {
+        return Err("解析太阳的方向或 XYZ 辐照度无效".into());
+    }
+    let mut ground = bind_ground_lighting(scene, &lighting.caustics, &lighting.receiver)?;
+    ground.sun = Some(SunGroundLighting {
+        wi: lighting.light_wi,
+        irradiance_xyz: lighting.sun_irradiance_xyz,
+        component,
+    });
+    render_camera_glass_impl(scene, width, height, spp, seed, Some(&ground))
+}
+
+fn bind_ground_lighting<'a>(
+    scene: &Scene,
+    irradiance: &'a Framebuffer,
+    receiver: &'a GroundReceiver,
+) -> Result<GroundLighting<'a>, Box<dyn Error>> {
+    if !valid_ground_map_layout(irradiance, receiver)
         || irradiance
             .pixels
             .iter()
@@ -199,13 +259,13 @@ pub fn render_camera_glass_with_ground(
     {
         return Err("当前地面辐照度贴图仅支持中性灰 Lambertian 反射率".into());
     }
-    let ground = GroundLighting {
+    Ok(GroundLighting {
         irradiance,
-        receiver: &scene.receiver,
+        receiver,
         object_id,
         rho: (bsdf.x * PI).clamp(0.0, 1.0),
-    };
-    render_camera_glass_impl(scene, width, height, spp, seed, Some(&ground))
+        sun: None,
+    })
 }
 
 fn render_camera_glass_impl(
@@ -254,7 +314,7 @@ fn render_camera_glass_impl(
 /// wo = -ray.direction，保留朝外几何法线；玻璃只乘 sample.weight。
 /// 新起点沿采样方向所在侧的法线偏移 1e-5 米，第九个玻璃命中处截断。
 /// 未命中返回背景贡献；非 delta 命中累加带硬阴影的直接光照并终止。
-/// 可选地面绑定使用已积分的 XYZ 辐照度，不再为地面加直接光或查询 shadow ray。
+/// 阶段 13 绑定只读完整地面图；阶段 14 绑定将解析直射和焦散图相加。
 /// 不采样漫反射间接光，也不模拟透明 shadow ray。
 fn trace_camera_path(
     scene: &Scene,
@@ -268,7 +328,12 @@ fn trace_camera_path(
     let mut radiance = Vector3::zeros();
     for bounce in 0..=MAX_GLASS_BOUNCES {
         let Some(hit) = scene.intersect(&ray) else {
-            radiance += scene.background_color * throughput;
+            if ground
+                .and_then(|g| g.sun.as_ref())
+                .is_none_or(|sun| sun.component != GroundLightingComponent::Caustics)
+            {
+                radiance += scene.background_color * throughput;
+            }
             break;
         };
         let Some(material) = hit.material_id.and_then(|id| scene.material(id)) else {
@@ -286,15 +351,22 @@ fn trace_camera_path(
             if (hit.normal / length).dot(&wo) <= 0.0 {
                 break;
             }
-            let e = sample_ground_irradiance(ground.irradiance, ground.receiver, hit.coords)
-                .ok_or("地面辐照度采样失败")?;
+            let e = ground_irradiance(scene, &hit, ground)?;
             let lo_xyz = lambertian_radiance(e, ground.rho).ok_or("地面辐亮度计算失败")?;
             // 保留超出 sRGB 色域的线性值，最终输出时才裁剪；中性反射直接缩放 XYZ。
             radiance += xyz_to_linear_srgb(lo_xyz).ok_or("地面 XYZ 辐亮度转换失败")? * throughput;
             break;
         }
         if !material.is_delta() {
-            radiance += direct_lighting(scene, &hit, material, wo, light_wi, light)? * throughput;
+            let direct = match ground.and_then(|g| g.sun.as_ref()) {
+                Some(sun) if sun.component == GroundLightingComponent::Caustics => Vector3::zeros(),
+                Some(sun) => direct_lighting(scene, &hit, material, wo, sun.wi, 1.0)?
+                    .component_mul(
+                        &xyz_to_linear_srgb(sun.irradiance_xyz).ok_or("太阳 XYZ 转换失败")?,
+                    ),
+                None => direct_lighting(scene, &hit, material, wo, light_wi, light)?,
+            };
+            radiance += direct * throughput;
             break;
         }
         if bounce == MAX_GLASS_BOUNCES {
@@ -340,7 +412,46 @@ fn trace_camera_path(
     Ok(radiance)
 }
 
-/// 两个相机入口共享尺寸和方向光校验，以及同一相对光强约定。
+fn ground_irradiance(
+    scene: &Scene,
+    hit: &Hit,
+    ground: &GroundLighting<'_>,
+) -> Result<Vector3<f64>, Box<dyn Error>> {
+    let Some(sun) = &ground.sun else {
+        return sample_ground_irradiance(ground.irradiance, ground.receiver, hit.coords)
+            .ok_or_else(|| "地面辐照度采样失败".into());
+    };
+    let mut e = Vector3::zeros();
+    if sun.component != GroundLightingComponent::Caustics {
+        let normal = hit.normal / hit.normal.norm();
+        let cosine = normal.dot(&sun.wi).clamp(0.0, 1.0);
+        if cosine > 0.0
+            && sun.irradiance_xyz != Vector3::zeros()
+            && visible_to_light(scene, hit.coords, normal, sun.wi)?
+        {
+            e += sun.irradiance_xyz * cosine;
+        }
+    }
+    if sun.component != GroundLightingComponent::Direct {
+        // 已包含折射路径的可见性和入射几何；不能再用直射方向的阴影清零。
+        e += sample_ground_irradiance(ground.irradiance, ground.receiver, hit.coords)
+            .ok_or("焦散辐照度采样失败")?;
+    }
+    Ok(e)
+}
+
+fn visible_to_light(
+    scene: &Scene,
+    position: Vector3<f64>,
+    normal: Vector3<f64>,
+    wi: Vector3<f64>,
+) -> Result<bool, Box<dyn Error>> {
+    let origin = position + normal * (10.0 * INTERSECTION_EPSILON);
+    let shadow_ray = Ray::new(origin, wi).ok_or("阴影光线起点或方向无效")?;
+    Ok(scene.intersect(&shadow_ray).is_none())
+}
+
+/// 旧 RGB 相机入口的兼容设置；阶段 14 地面入口使用 SpectralLighting 中的太阳光谱。
 fn camera_lighting_setup(
     scene: &Scene,
     width: usize,
@@ -399,12 +510,8 @@ fn direct_lighting(
     if !direct_rgb.iter().all(|v| v.is_finite()) {
         return Err("直接光照颜色非法或计算溢出".into());
     }
-    if direct_rgb != Vector3::zeros() {
-        let origin = hit.coords + normal * (10.0 * INTERSECTION_EPSILON);
-        let shadow_ray = Ray::new(origin, wi).ok_or("阴影光线起点或方向无效")?;
-        if scene.intersect(&shadow_ray).is_some() {
-            return Ok(Vector3::zeros());
-        }
+    if direct_rgb != Vector3::zeros() && !visible_to_light(scene, hit.coords, normal, wi)? {
+        return Ok(Vector3::zeros());
     }
     Ok(direct_rgb)
 }
@@ -467,6 +574,176 @@ mod tests {
         let mut map = Framebuffer::new(1, 1);
         assert!(map.set(0, 0, xyz));
         map
+    }
+
+    fn split_ground_map(scene: &Scene) -> SpectralLighting {
+        super::super::caustics::render_spectral_lighting(
+            scene,
+            scene.prism_id,
+            scene.ground_id.unwrap(),
+            &crate::config::rendersetting::RenderSetting {
+                width: 16,
+                height: 12,
+                samples_per_pixel_axis: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn analytic_direct_is_continuous_across_receiver_and_window_without_double_counting() {
+        let mut scene = neutral_ground_scene(0.8);
+        scene.receiver.min_m = Vector2::repeat(-0.1);
+        scene.receiver.max_m = Vector2::repeat(0.1);
+        // 斜射光同样以水平窗口 Phi/A 为水平地面辐照度。
+        scene.light.direction = Vector3::new(-3.0, 0.0, -4.0);
+        let mut lighting = split_ground_map(&scene);
+        assert!(
+            lighting
+                .caustics
+                .pixels
+                .iter()
+                .all(|p| *p == Vector3::zeros())
+        );
+        // sampled direct 图绝不能被相机当作第二份直射累加。
+        lighting.direct.pixels.fill(Vector3::repeat(100.0));
+        let expected = lighting.sun_irradiance_xyz * lighting.light_wi.z * (0.8 / PI);
+        for x in [
+            -3.0,
+            -0.10000001,
+            -0.09999999,
+            0.0,
+            0.09999999,
+            0.10000001,
+            3.0,
+        ] {
+            scene.camera = Camera::from_config(&CameraConfig {
+                position: [x, 0.0, 2.0],
+                target: [x, 0.0, 0.0],
+                up: [0.0, 1.0, 0.0],
+                fov_y_degrees: 10.0,
+            })
+            .unwrap();
+            for spp in [1, 8] {
+                let direct = render_camera_glass_with_lighting(
+                    &scene,
+                    &lighting,
+                    3,
+                    2,
+                    spp,
+                    42,
+                    GroundLightingComponent::Direct,
+                )
+                .unwrap();
+                let combined = render_camera_glass_with_lighting(
+                    &scene,
+                    &lighting,
+                    3,
+                    2,
+                    spp,
+                    42,
+                    GroundLightingComponent::Combined,
+                )
+                .unwrap();
+                assert_eq!(direct.pixels, combined.pixels);
+                for xyz in direct.pixels {
+                    assert!((xyz - expected).norm() < 1e-12, "x={x}: {xyz:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn changing_receiver_does_not_change_analytic_sun_at_the_same_world_positions() {
+        let mut scene = neutral_ground_scene(0.8);
+        let mut reference = None;
+        for (min, max) in [(-0.01, 0.01), (-2.0, 2.0), (-20.0, 40.0)] {
+            scene.receiver.min_m = Vector2::repeat(min);
+            scene.receiver.max_m = Vector2::repeat(max);
+            let lighting = split_ground_map(&scene);
+            let image = render_camera_glass_with_lighting(
+                &scene,
+                &lighting,
+                5,
+                3,
+                8,
+                42,
+                GroundLightingComponent::Combined,
+            )
+            .unwrap();
+            if let Some(pixels) = &reference {
+                assert_eq!(&image.pixels, pixels);
+            } else {
+                reference = Some(image.pixels);
+            }
+        }
+    }
+
+    #[test]
+    fn glass_shadows_only_direct_and_camera_throughput_still_weights_caustics() {
+        let mut scene = neutral_ground_scene(0.8);
+        scene.add_with_material(
+            Box::new(Ground::new(1.0).unwrap()),
+            Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.25, 0.5)))),
+        );
+        let mut lighting = split_ground_map(&scene);
+        // 给地面一个已知的焦散 E；无限玻璃面会遮挡每一条向上的 shadow ray。
+        let e = Vector3::new(0.1, 0.2, 1.0);
+        lighting.caustics.pixels.fill(e);
+        let direct = render_camera_glass_with_lighting(
+            &scene,
+            &lighting,
+            3,
+            2,
+            8,
+            42,
+            GroundLightingComponent::Direct,
+        )
+        .unwrap();
+        let caustics = render_camera_glass_with_lighting(
+            &scene,
+            &lighting,
+            3,
+            2,
+            8,
+            42,
+            GroundLightingComponent::Caustics,
+        )
+        .unwrap();
+        let combined = render_camera_glass_with_lighting(
+            &scene,
+            &lighting,
+            3,
+            2,
+            8,
+            42,
+            GroundLightingComponent::Combined,
+        )
+        .unwrap();
+        assert!(direct.pixels.iter().all(|p| p.norm() == 0.0));
+        assert_eq!(combined.pixels, caustics.pixels);
+        for xyz in caustics.pixels {
+            assert!((xyz - e * (0.8 / PI) * 0.5).norm() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn split_camera_rejects_invalid_metadata_maps_and_non_gray_ground() {
+        let scene = neutral_ground_scene(0.8);
+        let mut lighting = split_ground_map(&scene);
+        let render = |s: &Scene, l: &SpectralLighting| {
+            render_camera_glass_with_lighting(s, l, 1, 1, 1, 42, GroundLightingComponent::Combined)
+        };
+        assert!(render(&ground_scene(), &lighting).is_err());
+        lighting.sun_irradiance_xyz.x = f64::NAN;
+        assert!(render(&scene, &lighting).is_err());
+        lighting.sun_irradiance_xyz.x = 0.5;
+        lighting.light_wi = Vector3::repeat(0.0);
+        assert!(render(&scene, &lighting).is_err());
+        lighting.light_wi = Vector3::z();
+        lighting.caustics.pixels[0].x = -1.0;
+        assert!(render(&scene, &lighting).is_err());
     }
 
     #[test]

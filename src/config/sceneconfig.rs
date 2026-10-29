@@ -39,7 +39,8 @@ pub struct ParallelLightConfig {
     pub direction: [f64; 3],
     pub aperture_min_m: [f64; 2],
     pub aperture_max_m: [f64; 2],
-    /// 相对总通量；默认值为原有 0.5 亮度 × 16 平方米，不声明实际瓦特单位。
+    /// 穿过水平发射窗口的相对通量 Phi；默认 8/16=0.5 为水平面辐照度。
+    /// 阶段 14 太阳光束法向强度为 Phi/(窗口面积*|归一化 direction.z|)，无瓦特标定。
     pub total_flux: f64,
 }
 

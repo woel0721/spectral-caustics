@@ -27,6 +27,8 @@
 
 **已接入地面光谱辐照度与相机画面。** `camera_glass_with_ground` 示例先由光源追踪得到未曝光的地面 XYZ 辐照度，再通过 `render_camera_glass_with_ground` 追踪相机路径；命中中性灰地面时双线性读取 E，并按 `L_o = E rho / π` 着色，输出 `output/camera_glass_with_ground.png`。
 
+**V0.4 阶段 14 已分离直射与焦散。** `camera_direct_caustics` 示例只追踪一批光源样本，将解析太阳直射与焦散专用图相加；普通地面不再受 receiver 边界裁切，玻璃硬阴影只作用于直射。旧输出入口继续保留。
+
 **已接入双线性光子累积。** `render::utils::bilinear_weights` 根据落点的小数位置计算四个邻近像素及其权重，`caustics.rs` 将线性 XYZ 能量按权重分配；接收区域内的边缘落点也保留全部能量。这对应 Day 6 中的双线性 splat 子项。
 
 **发射采用分层随机采样。** 每个小格各发射一条光线，x、y 分别使用独立的随机偏移。`StdRng` 使用固定种子 `42`；每次渲染都重新初始化，因此无三棱镜和折射图共享同一组发射位置，命中或丢弃光线不会改变后续采样序列。
@@ -325,7 +327,7 @@ camera.ray_for_pixel → scene.intersect → scene.material
 
 `wi = -normalize(scene.light.direction)` 指向光源，`wo = -ray.direction` 指向相机，保留原始几何法线朝向。Lambertian 返回 `albedo / π`，由积分器乘光照与一个余弦项；这是确定的方向光求值，不调用随机采样，也不除以 PDF、像素数或光子发射数。
 
-现有光源只有相对总通量，本阶段约定 `L_light = total_flux / 水平发射孔径面积` 为白色平行光的相对方向光强度，默认 `8 / 16 = 0.5`。这是供基础着色使用的相对标尺，不做斜射孔径投影校正，也不声明绝对辐射度单位。例如默认地面反射率为 `0.8`、正入射时，线性 RGB 为 `0.8 × 0.5 / π ≈ 0.1273`，曝光 1 时编码为约 `[100, 100, 100]`。
+旧 RGB 入口为保持历史输出，使用 `L_light = total_flux / 水平发射孔径面积` 作为白色平行光的相对方向光强度，默认 `8 / 16 = 0.5`，不做斜射孔径投影校正。例如默认地面反射率为 `0.8`、正入射时，线性 RGB 为 `0.8 × 0.5 / π ≈ 0.1273`，曝光 1 时编码为约 `[100, 100, 100]`。阶段 14 新组合入口使用下文的太阳投影约定，与光子通量统一尺度。
 
 对直接光照非零的命中，使用 `Ray::new(hit.coords + normal × 1e-5 m, wi)` 发射 shadow ray。起点偏移大于几何求交的 `1e-6 m` 自相交阈值；场景求交仍检测所有物体，不跳过命中物体编号，以保留同一物体其他表面的遮挡。当前是无穷远方向光，因此向前查询不限于光源配置的发射高度，也不使用尚未接入几何求交的 `Ray.t_max`。
 
@@ -401,9 +403,54 @@ cargo run --release --locked --example camera_glass_with_ground
 cargo run --release --locked --example camera_glass_with_ground -- 128
 ```
 
-该示例先保存光谱地面预览到 `render.output_path`，再将原始内存 Framebuffer 交给相机通道，最后保存 `output/camera_glass_with_ground.png`。曝光只用于预览和最终 PNG 导出，不参与两遍之间的数据传递。当前接收区域外的地面没有存储照明，显示为黑色；区域内使用双线性过滤，较细色带会受到地面图分辨率影响。光源通道继续使用现有固定值/Cauchy 色散及最多两个界面模型，尚未计算 Fresnel 损失或吸收；相机通道仍使用材质的常量玻璃折射率，支持 Fresnel 反射/透射。
+该示例先保存光谱地面预览到 `render.output_path`，再将原始内存 Framebuffer 交给相机通道，最后保存 `output/camera_glass_with_ground.png`。曝光只用于预览和最终 PNG 导出，不参与两遍之间的数据传递。此阶段 13 兼容入口将接收区域外显示为黑色；区域内使用双线性过滤，较细色带会受到地面图分辨率影响。光源通道继续使用现有固定值/Cauchy 色散及最多两个界面模型，尚未计算 Fresnel 损失或吸收；相机通道仍使用材质的常量玻璃折射率，支持 Fresnel 反射/透射。
 
 ![光谱地面辐照度接入中性灰地面与玻璃相机路径](output/camera_glass_with_ground.png)
+
+### V0.4 阶段 14：太阳直射与焦散分量
+
+`Render::render_lighting(&scene)` / `render_spectral_lighting` 在原来的光源追踪中区分两类落点：首次直接命中地面的光子写入 `SpectralLighting.direct`，经棱镜双界面折射后落地的写入 `.caustics`。两个分量共用发射位置、RNG、首次交点及逐波长路径，不再发射第二批光子。每条光子仍分得 `Phi/N`，再除以接收像素的世界面积。`.combined()` 将两张浮点图相加，可在浮点舍入误差内恢复旧地面图。旧 `render_spectral_caustics` 继续使用一个缓冲和原累积顺序，保持输出；新拆分模式的像素缓冲约为旧模式的两倍。
+
+太阳位于无限远，光线沿单位方向 `d` 传播，指向光源的方向为 `wi=-d`。水平发射窗口只用来采样焦散，不限制解析太阳的照明区域。`scene.light.total_flux = Phi` 定义为穿过这个水平窗口的相对通量，窗口面积为 `A`，`c=wi.z>1e-12`：
+
+```text
+水平面未遮挡辐照度：E_horizontal = Phi / A
+光束法向辐照度：    E_sun = Phi / (A * c)
+任意正面解析直射：  E_direct = V * E_sun * max(n·wi, 0)
+中性灰地面辐亮度：  L_o = (E_direct + E_caustics) * rho / pi
+```
+
+`ParallelLight::sunlight()` 处理方向归一化和投影面积换算；新入口拒绝向上及近水平的发射方向。默认竖直太阳为 `8/16=0.5`；例如 `d=(-0.6,0,-0.8)` 时光束法向强度为 `0.625`，水平面乘余弦 `0.8` 后仍为 `0.5`，与光子法得到的水平辐照度一致。这个标尺以 D65 积分的 `Y=1` 归一化，不声明绝对瓦特单位。调整窗口尺寸且希望维持太阳亮度时，应按窗口面积同比调整 `total_flux`。
+
+`SpectralLighting.sun_irradiance_xyz` 保存上述光束法向强度乘完整 D65 积分白点，使用与光子相同的波长节点、SPD、CMF、`Δλ` 和归一化 `k`，不从地面图估计光强。结果同时保存生成时的 receiver。场景、光源或波长设置改变后应重新生成照明数据。
+
+`render_camera_glass_with_lighting` 在 `trace_camera_path` 命中地面时计算解析直射，再读取焦散专用图；**不读取 sampled direct 图**。解析直射的 Shadow Ray 检查完整场景，包括玻璃，查询至无穷远；焦散图已包含折射路径的可见性，不能再乘直射方向的二值阴影。receiver 只限制焦散数据查询，范围外焦散为零，普通地面仍接受太阳直射；未模糊 receiver 边缘，也未跳过玻璃遮挡。
+
+```rust
+use spectral_caustics::render::{GroundLightingComponent, Render, render_camera_glass_with_lighting};
+
+let renderer = Render::new(config.render.clone())?;
+let lighting = renderer.render_lighting(&scene)?;
+let image = render_camera_glass_with_lighting(
+    &scene, &lighting, config.render.width, config.render.height,
+    config.render.camera_spp, config.render.seed, GroundLightingComponent::Combined,
+)?;
+renderer.save(&image, "output/camera_combined.png")?;
+```
+
+```bash
+cargo run --release --locked --example camera_direct_caustics
+# 可选覆盖相机 SPP：
+cargo run --release --locked --example camera_direct_caustics -- 128
+```
+
+示例只调用一次 `render_lighting`，然后以相同相机种子、SPP 和子像素抖动输出三张 512×512 图。Direct 包含原有相机背景，Caustics 未命中时为零，因此固定路径样本满足 **Direct + Caustics = Combined（线性 XYZ/辐亮度）**。保存后的 sRGB PNG 已经过曝光、裁剪和非线性编码，不能直接相加字节。
+
+| Direct：玻璃硬阴影 | Caustics：仅折射照明 | Combined：两者相加 |
+| --- | --- | --- |
+| ![Direct](output/camera_direct.png) | ![Caustics](output/camera_caustics.png) | ![Combined](output/camera_combined.png) |
+
+本阶段仍只支持水平中性灰 Lambertian 地面。焦散受有限采样、接收范围裁切和双线性重建影响；发射窗口必须覆盖能照亮棱镜的入射区域，扩大 receiver 不能补回没有发射的光子。光源通道没有 Fresnel 通量损失、内部反射续追或吸收，相机通道仍为常量折射率、八次上限。阶段 15 的 Fresnel 通量修正尚未实现；背景只对未命中相机射线可见，不照亮地面。没有直射也没有焦散的位置保持黑色。
 
 ## 运行
 
@@ -546,7 +593,7 @@ src/
 - 求交忽略 `t <= 1e-6` 米的交点，以防止自相交；单位方向的 `|direction.z| <= 1e-12` 时视为平行。两个阈值分别作用于距离和方向分量。
 - 三角形复用 `1e-6` 米的距离阈值；平行判断使用单位方向与单位法线的点积绝对值，阈值为 `1e-12`，与三角形面积独立。三棱镜采用固定顶点，棱边处返回最近面之一的法线；棱边没有唯一的几何法线。
 - 曝光由 `render.exposure` 控制，在线性颜色空间施加；不会根据每张图片的最大值自动归一化。
-- 相机光照使用二值 shadow ray 生成硬阴影，玻璃也按不透明物体遮光；法线起点偏移固定为 `1e-5 m`。尚未计算有限孔径光束覆盖、玻璃反射/透射或间接光。`total_flux / 孔径面积` 作为相对方向光强度，没有斜射孔径投影校正。
+- 解析直射使用二值 shadow ray，玻璃也遮挡；法线起点偏移固定为 `1e-5 m`。阶段 14 以无限远太阳加焦散图组成地面照明，使用投影面积校正，receiver 不裁切直射。旧 RGB 入口保留 `total_flux / 孔径面积` 的历史约定；旧完整地面图入口保留接收区域外为零的行为。
 - 显示范围采用逐通道裁剪，可能丢失高亮和色域外的颜色细节；Framebuffer 中的线性 XYZ 数据保留原值。
 - 固定折射率对照使用 `1.52`，三波长批量调试使用 Cauchy 色散和等权离散分量。各波长图仍采用 D65 参考白缩放以显示落点密度，尚未按真实光谱颜色匹配函数着色，也未进行连续光谱积分。
 - 彩色合成支持 JSON 中的波长范围/步长（当前限定 380–780 nm），采用含右端点的梯形积分；每个 Rayon 采样块直接累积所有波长到自己的 XYZ 图，全部完成后顺序合并，512×512 时像素缓冲峰值约 102 MiB。有限波长范围与积分步长使 D65 白点略有误差，固定模式 PNG 允许 RGB 通道相差 1 个字节。
@@ -554,4 +601,4 @@ src/
 - 光源高度、方向、发射孔径、总通量和地面接收范围均可由 `scene` 配置；光源仍是从水平矩形发射窗口出发的平行光。分层随机采样与双线性 splat 减轻周期性条纹，但有限采样仍产生颗粒噪声，可增加 `samples_per_pixel_axis` 来降低噪声；较亮落点还可能被显示范围裁剪，没有按每张图的最大值自动归一化。
 - Day 6 的 JSON 参数入口已接入；后续仍可补充成功落地、全反射和丢弃光子统计。
 
-使用 `nalgebra` 进行数学计算，`image` 编解码 PNG，`rand` 提供固定种子的格内随机偏移，`rand_chacha` 提供随机序列的直接定位接口，`rayon` 并行执行光谱采样块。`Cargo.lock` 随项目提交；`.gitignore` 放行上述九张默认输出，以及 Day 1 的 `output/test.png`、Day 2 的 `output/ground_hits.png` 阶段示例，编译目录 `target/` 和其他生成文件继续忽略。
+使用 `nalgebra` 进行数学计算，`image` 编解码 PNG，`rand` 提供固定种子的格内随机偏移，`rand_chacha` 提供随机序列的直接定位接口，`rayon` 并行执行光谱采样块。`Cargo.lock` 随项目提交；`.gitignore` 放行默认输出、各阶段示例及阶段 14 的三张相机调试图，编译目录 `target/` 和其他生成文件继续忽略。

@@ -13,4 +13,7 @@
 !/output/camera_lit.png
 !/output/camera_glass.png
 !/output/camera_glass_with_ground.png
+!/output/camera_direct.png
+!/output/camera_caustics.png
+!/output/camera_combined.png
 .DS_Store

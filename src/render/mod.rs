@@ -8,8 +8,10 @@ pub mod integrator;
 pub mod utils;
 
 pub use camera_debug::render_camera_debug;
+pub use caustics::SpectralLighting;
 pub use integrator::{
-    lambertian_radiance, render_camera_glass, render_camera_glass_with_ground, render_camera_lit,
+    GroundLightingComponent, lambertian_radiance, render_camera_glass,
+    render_camera_glass_with_ground, render_camera_glass_with_lighting, render_camera_lit,
     sample_ground_irradiance,
 };
 
@@ -51,6 +53,20 @@ impl Render {
 
     pub fn render(&self, scene: &Scene) -> Result<Framebuffer, Box<dyn Error>> {
         self.render_mode(scene, self.settings.mode)
+    }
+
+    /// 一批光子生成直射/焦散调试图，并携带同尺度的解析太阳光照明。
+    pub fn render_lighting(&self, scene: &Scene) -> Result<SpectralLighting, Box<dyn Error>> {
+        let ground_id = scene.ground_id.ok_or("运行时场景缺少接收地面编号")?;
+        let work = || {
+            caustics::render_spectral_lighting(scene, scene.prism_id, ground_id, &self.settings)
+                .map_err(|error| error.to_string())
+        };
+        let result = match &self.pool {
+            Some(pool) => pool.install(work),
+            None => work(),
+        };
+        result.map_err(Into::into)
     }
 
     /// 用相同的其余配置生成另一种折射率模式的对照图。

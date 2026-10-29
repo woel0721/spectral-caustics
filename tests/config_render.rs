@@ -13,8 +13,8 @@ use spectral_caustics::{
     },
     optics::{iormode::IorMode, spectrum::rgb_reflectance},
     render::{
-        Render, caustics::ground_to_pixel, framebuffer::Framebuffer, render_camera_glass,
-        render_camera_glass_with_ground,
+        GroundLightingComponent, Render, caustics::ground_to_pixel, framebuffer::Framebuffer,
+        render_camera_glass, render_camera_glass_with_ground, render_camera_glass_with_lighting,
     },
     scene::Scene,
 };
@@ -145,6 +145,121 @@ fn spectral_irradiance_flows_through_gray_ground_camera_paths_and_png_output() {
     let saved = image::open(path).unwrap();
     assert_eq!((saved.width(), saved.height()), (18, 10));
     assert_eq!(saved.color(), image::ColorType::Rgb8);
+}
+
+#[test]
+fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
+    let config = small_config();
+    let scene = Scene::from_config(&config.scene).unwrap();
+    let renderer = Render::new(config.render.clone()).unwrap();
+    let lighting = renderer.render_lighting(&scene).unwrap();
+    let legacy = renderer.render(&scene).unwrap();
+    for (actual, expected) in lighting
+        .combined()
+        .unwrap()
+        .pixels
+        .iter()
+        .zip(&legacy.pixels)
+    {
+        assert!((actual - expected).norm() < 1e-12);
+    }
+    let camera = |component| {
+        render_camera_glass_with_lighting(
+            &scene,
+            &lighting,
+            24,
+            16,
+            16,
+            config.render.seed,
+            component,
+        )
+        .unwrap()
+    };
+    let direct = camera(GroundLightingComponent::Direct);
+    let caustics = camera(GroundLightingComponent::Caustics);
+    let combined = camera(GroundLightingComponent::Combined);
+    assert_eq!(
+        combined.pixels,
+        camera(GroundLightingComponent::Combined).pixels
+    );
+    assert!(caustics.pixels.iter().any(|p| p.y > 1e-6));
+    for ((d, c), sum) in direct
+        .pixels
+        .iter()
+        .zip(&caustics.pixels)
+        .zip(&combined.pixels)
+    {
+        assert!((sum - d - c).norm() < 1e-12);
+    }
+    let directory = TemporaryDirectory::new();
+    for (name, image) in [
+        ("direct", direct),
+        ("caustics", caustics),
+        ("combined", combined),
+    ] {
+        let path = directory.0.join(format!("{name}.png"));
+        renderer.save(&image, &path).unwrap();
+        let saved = image::open(path).unwrap();
+        assert_eq!((saved.width(), saved.height()), (24, 16));
+        assert_eq!(saved.color(), image::ColorType::Rgb8);
+    }
+}
+
+#[test]
+fn traced_prism_caustics_light_the_geometric_glass_shadow_independently() {
+    let mut config = small_config();
+    config.render.width = 48;
+    config.render.height = 36;
+    let mut scene = Scene::from_config(&config.scene).unwrap();
+    let renderer = Render::new(config.render.clone()).unwrap();
+    let lighting = renderer.render_lighting(&scene).unwrap();
+    let span = lighting.receiver.max_m - lighting.receiver.min_m;
+    let mut shadow_point = None;
+    for y in 0..lighting.caustics.height {
+        for x in 0..lighting.caustics.width {
+            if lighting.caustics.get(x, y).unwrap().y <= 1e-6 {
+                continue;
+            }
+            let p = Vector3::new(
+                lighting.receiver.min_m.x
+                    + (x as f64 + 0.5) / lighting.caustics.width as f64 * span.x,
+                lighting.receiver.max_m.y
+                    - (y as f64 + 0.5) / lighting.caustics.height as f64 * span.y,
+                1e-5,
+            );
+            let shadow = Ray::new(p, lighting.light_wi).unwrap();
+            if scene
+                .intersect(&shadow)
+                .is_some_and(|hit| hit.object_id == scene.prism_id)
+            {
+                shadow_point = Some(p);
+                break;
+            }
+        }
+        if shadow_point.is_some() {
+            break;
+        }
+    }
+    let p = shadow_point.expect("应有经折射的焦散照亮棱镜的几何阴影");
+    // 相机放在玻璃底面下方，以便单独检查同一地面位置的直射/焦散。
+    scene.camera = spectral_caustics::camera::Camera::from_config(
+        &spectral_caustics::config::cameraconfig::CameraConfig {
+            position: [p.x, p.y, 0.5],
+            target: [p.x, p.y, 0.0],
+            up: [0.0, 1.0, 0.0],
+            fov_y_degrees: 0.001,
+        },
+    )
+    .unwrap();
+    let camera = |component| {
+        render_camera_glass_with_lighting(&scene, &lighting, 1, 1, 8, 42, component).unwrap()
+    };
+    let direct = camera(GroundLightingComponent::Direct);
+    let caustics = camera(GroundLightingComponent::Caustics);
+    let combined = camera(GroundLightingComponent::Combined);
+    assert_eq!(direct.pixels[0], Vector3::zeros());
+    assert!(caustics.pixels[0].y > 1e-6);
+    assert_eq!(combined.pixels, caustics.pixels);
 }
 
 #[test]

@@ -331,6 +331,20 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（191 项单元测试、12 项集成测试）、严格 `cargo clippy --locked --all-targets -- -D warnings` 和 diff 检查通过。新 example 实际生成并查看了 512×512 RGB8 的 `camera_glass_with_ground.png`；原玻璃 example 与默认 release 主程序重新运行成功，十二张原有 PNG 的 SHA-256 均保持一致。
 - **范围：** 只接入水平中性灰 Lambertian 地面；接收区外为零，彩色地面需后续保留波长信息。光源通道仍沿用双界面模型并忽略 Fresnel 损失/吸收，相机仍使用常量玻璃折射率；未增加间接光或通用 Photon Mapping。下一阶段可保留按波长的地面照明来支持彩色材质。
 
+### V0.4 阶段 14 — 统一太阳光标尺，分离地面直射与折射焦散
+
+- [x] 新增 `SpectralLighting`、`render_spectral_lighting` 和 `Render::render_lighting`：同一批分层光源样本分别累积 Direct（首次命中地面）和 Caustics（经棱镜双界面后落地）。首次求交、发射随机序列和光路继续复用，不重复追踪全部光子。
+- [x] 保留 `render_spectral_caustics`、`Render::render` 的单缓冲、原累积顺序及旧输出；拆分结果的 `combined()` 可在线性 XYZ 中恢复旧地面图，允许浮点求和次序带来的舍入误差。
+- [x] 明确 `total_flux = Phi` 为穿过水平发射窗口的相对通量。窗口面积为 `A`，传播单位方向为 `d`，则水平面未遮挡辐照度为 `Phi/A`，光束法向强度为 `Phi/(A*|d.z|)`。`ParallelLight::sunlight` 进行投影换算；新入口要求向下且非近水平的光源方向。太阳视作无限远，窗口不裁切解析直射。
+- [x] 解析太阳 XYZ 和光子使用同一批波长节点、D65 SPD、归一化 `k` 和相对通量标尺；不从有限接收图估计太阳强度，不按接收面积改变解析直射亮度。
+- [x] 新增 `render_camera_glass_with_lighting`，地面使用 `L_o = (E_direct + E_caustics)*rho/pi`。解析直射保留完整场景 Shadow Ray，玻璃也遮挡；焦散专用图已包含折射路径可见性，不再做二值阴影判断。receiver 只限定焦散查询，范围之外的普通地面仍有太阳直射，不增加边界模糊或玻璃遮挡例外。
+- [x] 保留中性灰 Lambertian 校验、Fresnel 相机路径、八次散射、SPP、固定种子和子像素抖动。旧 RGB 相机入口及阶段 13 完整地面图入口保留历史行为；阶段 14 新入口采用统一的太阳投影/光谱约定。
+- [x] 新增 `camera_direct_caustics` example，一次光源追踪后，以相同相机种子分别生成 `camera_direct.png`、`camera_caustics.png`、`camera_combined.png`。Direct 含原背景，Caustics 背景为零；三者满足线性辐亮度的 Direct + Caustics = Combined，不能直接对 sRGB PNG 字节相加。
+- **验证范围：** 无棱镜时 receiver 内外/发射窗口外地面直射连续、只含直射时不重复计数、拆分合并恢复两种折射率模式的旧图、求交计数未增加、斜射时光子总通量与解析直射一致、不同接收范围不改变相同世界位置的太阳直射、玻璃硬阴影与真实棱镜焦散可独立检查，以及完整 Fresnel 相机→三分量 PNG 流程和非法输入。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（199 项单元测试、14 项集成测试）、严格 `cargo clippy --locked --all-targets -- -D warnings` 及 `git diff --check` 通过。新 example 已实际生成并查看三张 512×512 RGB8、64 SPP 调试图；默认 release 主程序、旧 `camera_glass` / `camera_glass_with_ground` examples 运行成功，十三张原有 PNG 的 SHA-256 均与改动前一致。
+- **限制：** 相对通量尚无绝对辐射单位标定；有限发射窗口须覆盖能照亮棱镜的入射区域，焦散仍受接收范围裁切、分辨率和采样噪声影响。仅支持水平中性灰地面。光源通道仍为双界面折射，TIR 路径丢弃，**尚无 Fresnel 通量修正或吸收**；相机玻璃仍为 RGB 常量折射率并在八次后截断。背景只对未命中相机射线可见，**不提供环境照明或漫反射间接光**，无直射也无焦散的地面保持黑色。
+- **下一阶段：** 阶段 15 的 Fresnel 光子通量修正留待单独任务，本次不实现。
+
 ## 6. Codex 执行约定
 
 1. **每次只实现当前一个里程碑**，完成后总结修改文件、运行命令、测试结果和下一步；不要抢跑后续阶段。

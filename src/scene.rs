@@ -3,7 +3,13 @@
 use crate::{
     camera::Camera,
     config::sceneconfig::{ObjectConfig, SceneConfig},
-    geometry::{ground::Ground, hit::Hit, object::Hittable, prism::Prism, ray::Ray},
+    geometry::{
+        ground::Ground,
+        hit::Hit,
+        object::Hittable,
+        prism::Prism,
+        ray::{PARALLEL_EPSILON, Ray},
+    },
     material::{self, Material},
     optics::{iormode::IorMode, refract},
 };
@@ -38,15 +44,50 @@ pub struct Scene {
     pub ground_id: Option<usize>,
 }
 
-/// 运行时光源：使用数学向量，方向已归一化。
+/// 平行太阳光；水平窗口仅用于有限数量的光子采样，不裁切解析直射光。
 pub struct ParallelLight {
     pub height_m: f64,
     pub direction: Vector3<f64>,
     pub aperture_min_m: Vector2<f64>,
     pub aperture_max_m: Vector2<f64>,
+    /// 穿过水平窗口的相对通量 Phi，D65 积分以 Y=1 归一化，无绝对瓦特标定。
+    /// 水平面未遮挡辐照度为 Phi/A；垂直于光束的辐照度为 Phi/(A*|direction.z|)。
     pub total_flux: f64,
 }
 
+impl ParallelLight {
+    /// 阶段 14 的太阳光约定：(指向太阳的单位方向，光束法向相对辐照度)。
+    /// 水平发射面要求光束向下；水平/近水平/向上方向无法表示此约定，返回 None。
+    pub fn sunlight(&self) -> Option<(Vector3<f64>, f64)> {
+        let length = self.direction.norm();
+        let span = self.aperture_max_m - self.aperture_min_m;
+        let area = span.x * span.y;
+        if !self.height_m.is_finite()
+            || !length.is_finite()
+            || length == 0.0
+            || self
+                .aperture_min_m
+                .iter()
+                .chain(self.aperture_max_m.iter())
+                .any(|v| !v.is_finite())
+            || span.iter().any(|v| !v.is_finite() || *v <= 0.0)
+            || !area.is_finite()
+            || area <= 0.0
+            || !self.total_flux.is_finite()
+            || self.total_flux < 0.0
+        {
+            return None;
+        }
+        let wi = -self.direction / length;
+        if wi.z <= PARALLEL_EPSILON {
+            return None;
+        }
+        let irradiance = (self.total_flux / area) / wi.z;
+        irradiance.is_finite().then_some((wi, irradiance))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct GroundReceiver {
     pub min_m: Vector2<f64>,
     pub max_m: Vector2<f64>,
@@ -284,6 +325,36 @@ pub(crate) fn take_photon_from_hit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sunlight_uses_projected_window_area_and_rejects_degenerate_inputs() {
+        let mut light = Scene::new().light;
+        assert_eq!(light.sunlight(), Some((Vector3::z(), 0.5)));
+        light.direction = Vector3::new(-3.0, 0.0, -4.0);
+        let (wi, strength) = light.sunlight().unwrap();
+        assert!((wi - Vector3::new(0.6, 0.0, 0.8)).norm() < 1e-12);
+        assert_eq!(strength, 0.625);
+        light.direction *= 10.0;
+        assert_eq!(light.sunlight(), Some((wi, strength)));
+        light.aperture_min_m *= 2.0;
+        light.aperture_max_m *= 2.0;
+        light.total_flux *= 4.0;
+        assert_eq!(light.sunlight(), Some((wi, strength)));
+        light.total_flux = 0.0;
+        assert_eq!(light.sunlight(), Some((wi, 0.0)));
+        for flux in [-1.0, f64::NAN, f64::INFINITY] {
+            light.total_flux = flux;
+            assert!(light.sunlight().is_none());
+        }
+        light.total_flux = 8.0;
+        light.direction = Vector3::new(1.0, 0.0, -PARALLEL_EPSILON / 2.0);
+        assert!(light.sunlight().is_none());
+        light.direction = -Vector3::z();
+        light.aperture_max_m = light.aperture_min_m;
+        assert!(light.sunlight().is_none());
+        light.aperture_max_m = Vector2::repeat(f64::INFINITY);
+        assert!(light.sunlight().is_none());
+    }
     use crate::geometry::{ground::Ground, prism::Prism, ray::Ray};
 
     #[test]

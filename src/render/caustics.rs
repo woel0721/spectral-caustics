@@ -20,6 +20,72 @@ use std::{error::Error, ops::Range};
 /// 三张落点调试图对应的波长，单位为 nm；每个波长分配 1/3 总通量。
 pub const DEBUG_WAVELENGTHS_NM: [f64; 3] = [450.0, 550.0, 650.0];
 
+/// 同一批光源样本的两种落地贡献，均为未曝光的 XYZ 辐照度。
+/// direct 仅用于采样调试/恢复旧图；相机直射使用无限远太阳，不读取 direct 图。
+pub struct SpectralLighting {
+    pub direct: Framebuffer,
+    pub caustics: Framebuffer,
+    /// 生成图时的坐标范围，只限制焦散数据查询。
+    pub receiver: GroundReceiver,
+    /// 指向太阳的单位向量。
+    pub light_wi: Vector3<f64>,
+    /// 光束法向辐照度，使用与光子相同的 D65/波长积分和相对通量标尺。
+    pub sun_irradiance_xyz: Vector3<f64>,
+}
+
+impl SpectralLighting {
+    /// 恢复有限窗口的旧地面图；不同浮点求和顺序可能造成舍入误差。
+    /// 此图不能再与解析直射叠加。
+    pub fn combined(&self) -> Result<Framebuffer, Box<dyn Error>> {
+        let a = &self.direct;
+        let b = &self.caustics;
+        if a.width == 0
+            || a.height == 0
+            || a.width != b.width
+            || a.height != b.height
+            || a.width.checked_mul(a.height) != Some(a.pixels.len())
+            || a.pixels.len() != b.pixels.len()
+        {
+            return Err("拆分地面图的尺寸不匹配".into());
+        }
+        let mut result = Framebuffer::new(a.width, a.height);
+        for (index, (direct, caustics)) in a.pixels.iter().zip(&b.pixels).enumerate() {
+            if direct
+                .iter()
+                .chain(caustics.iter())
+                .any(|v| !v.is_finite() || *v < 0.0)
+                || !result.set(index % a.width, index / a.width, direct + caustics)
+            {
+                return Err("拆分地面 XYZ 合并失败".into());
+            }
+        }
+        Ok(result)
+    }
+}
+
+// 旧入口只分配一张图、按原顺序累积；新入口分配两张图，不增加光线求交次数。
+struct SpectralBuffers {
+    direct: Framebuffer,
+    caustics: Option<Framebuffer>,
+}
+
+impl SpectralBuffers {
+    fn new(width: usize, height: usize, split: bool) -> Self {
+        Self {
+            direct: Framebuffer::new(width, height),
+            caustics: split.then(|| Framebuffer::new(width, height)),
+        }
+    }
+
+    fn target(&mut self, caustic: bool) -> &mut Framebuffer {
+        if caustic {
+            self.caustics.as_mut().unwrap_or(&mut self.direct)
+        } else {
+            &mut self.direct
+        }
+    }
+}
+
 /// 将落点映射到配置的接收区域；世界 +x 朝图片右侧，+y 朝图片上方。
 /// 接收边界为半开区间，整数像素坐标对应像素中心。
 pub fn ground_to_pixel(
@@ -66,6 +132,59 @@ pub fn render_spectral_caustics(
     ground_id: usize,
     settings: &RenderSetting,
 ) -> Result<Framebuffer, Box<dyn Error>> {
+    Ok(
+        render_spectral_buffers(scene, prism_id, ground_id, settings, false)?
+            .0
+            .direct,
+    )
+}
+
+/// 一次追踪拆分 Direct（首次命中地面）与 Caustics（经棱镜双界面后落地）。
+/// 保留旧光子权重，不包含 Fresnel 通量损失；解析太阳的强度不依赖 receiver。
+pub fn render_spectral_lighting(
+    scene: &Scene,
+    prism_id: Option<usize>,
+    ground_id: usize,
+    settings: &RenderSetting,
+) -> Result<SpectralLighting, Box<dyn Error>> {
+    let (light_wi, strength) = scene
+        .light
+        .sunlight()
+        .ok_or("太阳光要求有效的向下方向、窗口与通量")?;
+    let receiver = scene.receiver;
+    let span = receiver.max_m - receiver.min_m;
+    if receiver
+        .min_m
+        .iter()
+        .chain(receiver.max_m.iter())
+        .any(|v| !v.is_finite())
+        || span.iter().any(|v| !v.is_finite() || *v <= 0.0)
+        || !receiver.area().is_finite()
+        || receiver.area() <= 0.0
+    {
+        return Err("焦散接收范围无效".into());
+    }
+    let (buffers, white_xyz) = render_spectral_buffers(scene, prism_id, ground_id, settings, true)?;
+    let sun_irradiance_xyz = white_xyz * strength;
+    if sun_irradiance_xyz.iter().any(|v| !v.is_finite()) {
+        return Err("太阳光 XYZ 强度溢出".into());
+    }
+    Ok(SpectralLighting {
+        direct: buffers.direct,
+        caustics: buffers.caustics.ok_or("缺少焦散分量")?,
+        receiver,
+        light_wi,
+        sun_irradiance_xyz,
+    })
+}
+
+fn render_spectral_buffers(
+    scene: &Scene,
+    prism_id: Option<usize>,
+    ground_id: usize,
+    settings: &RenderSetting,
+    split: bool,
+) -> Result<(SpectralBuffers, Vector3<f64>), Box<dyn Error>> {
     settings.validate()?;
     let mode = settings.mode;
     let samples_per_pixel_axis = settings.samples_per_pixel_axis;
@@ -110,6 +229,7 @@ pub fn render_spectral_caustics(
     };
     // 完整白光只在渲染前积分一次；仅色散模式缓存逐波长的 (折射率, XYZ)。
     let mut direct_xyz = Vector3::zeros();
+    let mut white_xyz = Vector3::zeros();
     let mut contributions = Vec::new();
     for (wavelength_nm, delta_lambda_nm) in samples {
         let spectral_xyz = wavelength_to_xyz(
@@ -119,6 +239,7 @@ pub fn render_spectral_caustics(
             k,
         )
         .ok_or("波长到 XYZ 转换失败")?;
+        white_xyz += spectral_xyz;
 
         // spectral_xyz 已含 Δλ，不再除以波长样本数；空间权重按全图发射数和接收面积归一化。
         let xyz = spectral_xyz * spatial_weight;
@@ -129,7 +250,7 @@ pub fn render_spectral_caustics(
         }
     }
 
-    let partials: Vec<Result<Framebuffer, &'static str>> = spectral_sample_blocks(
+    let partials: Vec<Result<SpectralBuffers, &'static str>> = spectral_sample_blocks(
         samples_x,
         samples_y,
         settings.seed,
@@ -137,7 +258,7 @@ pub fn render_spectral_caustics(
     )
     .into_par_iter()
     .map(|(rows, mut rng)| {
-        let mut framebuffer = Framebuffer::new(settings.width, settings.height);
+        let mut buffers = SpectralBuffers::new(settings.width, settings.height, split);
         for sample_y in rows {
             for sample_x in 0..samples_x {
                 // 同一空间光线的所有波长共享发射位置，每次仅消耗两个随机数。
@@ -156,7 +277,7 @@ pub fn render_spectral_caustics(
                 };
                 if first_hit.object_id == Some(ground_id) {
                     splat_spectral_xyz(
-                        &mut framebuffer,
+                        buffers.target(false),
                         first_hit.coords,
                         direct_xyz,
                         &scene.receiver,
@@ -176,7 +297,7 @@ pub fn render_spectral_caustics(
                         take_photon_from_hit(scene, ray, first_hit, prism_id, ground_id, glass_ior)
                     {
                         splat_spectral_xyz(
-                            &mut framebuffer,
+                            buffers.target(true),
                             position,
                             direct_xyz,
                             &scene.receiver,
@@ -192,25 +313,37 @@ pub fn render_spectral_caustics(
                         continue;
                     };
                     // 落地即累积；丢失光子不重新分配通量。
-                    splat_spectral_xyz(&mut framebuffer, position, xyz, &scene.receiver)?;
+                    splat_spectral_xyz(buffers.target(true), position, xyz, &scene.receiver)?;
                 }
             }
         }
-        Ok(framebuffer)
+        Ok(buffers)
     })
     .collect();
 
     // Vec 按输入块的顺序收集。所有任务完成后再依次合并，不按线程完成顺序归约。
-    let mut framebuffer = Framebuffer::new(settings.width, settings.height);
+    let mut buffers = SpectralBuffers::new(settings.width, settings.height, split);
     for partial in partials {
-        for (index, xyz) in partial?.pixels.into_iter().enumerate() {
-            // 各块已经使用全图 ray_count 归一化，这里直接相加，不除以任务或线程数。
-            if !framebuffer.accumulate(index % settings.width, index / settings.width, xyz) {
-                return Err("并行光谱 XYZ 合并失败".into());
-            }
+        let partial = partial?;
+        merge_spectral_buffer(&mut buffers.direct, partial.direct)?;
+        if let (Some(target), Some(source)) = (buffers.caustics.as_mut(), partial.caustics) {
+            merge_spectral_buffer(target, source)?;
         }
     }
-    Ok(framebuffer)
+    Ok((buffers, white_xyz))
+}
+
+fn merge_spectral_buffer(
+    target: &mut Framebuffer,
+    source: Framebuffer,
+) -> Result<(), &'static str> {
+    for (index, xyz) in source.pixels.into_iter().enumerate() {
+        // 每块已按全图 ray_count 归一化，不除以任务或线程数。
+        if !target.accumulate(index % target.width, index / target.width, xyz) {
+            return Err("并行光谱 XYZ 合并失败");
+        }
+    }
+    Ok(())
 }
 
 /// 直接定位每块在原有随机序列中的起点，不遍历或生成块之前的随机数。
@@ -450,6 +583,90 @@ mod tests {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.ground.intersect(ray)
         }
+    }
+
+    #[test]
+    fn split_lighting_recombines_legacy_and_traces_each_photon_only_once() {
+        for with_prism in [false, true] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut scene = Scene::new();
+            let prism_id = with_prism.then(|| scene.add(Box::new(Prism::new().unwrap())));
+            let ground_id = scene.add(Box::new(CountedGround {
+                ground: Ground::new(0.0).unwrap(),
+                calls: Arc::clone(&calls),
+            }));
+            for mode in [IorMode::Constant, IorMode::Dispersion] {
+                let settings = sample_settings(&settings_for_size(20, 16), 2, mode);
+                calls.store(0, Ordering::Relaxed);
+                let legacy =
+                    render_spectral_caustics(&scene, prism_id, ground_id, &settings).unwrap();
+                let legacy_calls = calls.swap(0, Ordering::Relaxed);
+                let split =
+                    render_spectral_lighting(&scene, prism_id, ground_id, &settings).unwrap();
+                assert_eq!(calls.load(Ordering::Relaxed), legacy_calls);
+                if !with_prism {
+                    assert_eq!(legacy_calls, 20 * 16 * 4);
+                    assert!(split.caustics.pixels.iter().all(|p| *p == Vector3::zeros()));
+                    assert_eq!(split.direct.pixels, legacy.pixels);
+                } else {
+                    assert!(split.caustics.pixels.iter().any(|p| p.y > 0.0));
+                    assert!(split.direct.pixels.iter().any(|p| p.y > 0.0));
+                }
+                for (actual, expected) in
+                    split.combined().unwrap().pixels.iter().zip(&legacy.pixels)
+                {
+                    assert!((actual - expected).norm() < 1e-12 * (1.0 + expected.norm()));
+                }
+                let repeated =
+                    render_spectral_lighting(&scene, prism_id, ground_id, &settings).unwrap();
+                assert_eq!(split.direct.pixels, repeated.direct.pixels);
+                assert_eq!(split.caustics.pixels, repeated.caustics.pixels);
+                assert!((split.sun_irradiance_xyz.y - 0.5).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn oblique_sun_and_photon_flux_share_the_horizontal_window_scale() {
+        let mut scene = Scene::new();
+        scene.light.direction = Vector3::new(-3.0, 0.0, -4.0);
+        // 整个发射窗口的落点平移 -3*3/4=-2.25 米；接收窗口一起平移。
+        scene.receiver.min_m.x -= 2.25;
+        scene.receiver.max_m.x -= 2.25;
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        let settings = settings_for_size(12, 8);
+        let lighting = render_spectral_lighting(&scene, None, ground_id, &settings).unwrap();
+        let photon_flux: f64 = lighting.direct.pixels.iter().map(|p| p.y).sum::<f64>()
+            * scene.receiver.area()
+            / (settings.width * settings.height) as f64;
+        let analytic_e = lighting.sun_irradiance_xyz.y * lighting.light_wi.z;
+        assert!((photon_flux - scene.light.total_flux).abs() < 1e-12);
+        assert!((analytic_e - scene.light.total_flux / scene.receiver.area()).abs() < 1e-12);
+        assert!((lighting.sun_irradiance_xyz.y - 0.625).abs() < 1e-12);
+    }
+
+    #[test]
+    fn split_lighting_rejects_invalid_sun_receiver_and_merge_data() {
+        let mut scene = Scene::new();
+        let ground = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        let settings = settings_for_size(2, 2);
+        for direction in [
+            Vector3::x(),
+            Vector3::z(),
+            Vector3::zeros(),
+            Vector3::repeat(f64::NAN),
+        ] {
+            scene.light.direction = direction;
+            assert!(render_spectral_lighting(&scene, None, ground, &settings).is_err());
+        }
+        scene.light.direction = -Vector3::z();
+        let mut lighting = render_spectral_lighting(&scene, None, ground, &settings).unwrap();
+        lighting.caustics.pixels[0].x = f64::NAN;
+        assert!(lighting.combined().is_err());
+        lighting.caustics.pixels.clear();
+        assert!(lighting.combined().is_err());
+        scene.receiver.max_m = scene.receiver.min_m;
+        assert!(render_spectral_lighting(&scene, None, ground, &settings).is_err());
     }
 
     #[test]
