@@ -290,6 +290,16 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - **发布前复查：** 默认 `cargo run --release --locked` 和 `refract_ray` 示例运行成功；十一张已有 PNG 均为 512×512 RGB8，重新生成后的 SHA-256 与运行前完全一致。
 - **范围：** 仅实现空气与常量折射率玻璃之间的采样器，不接入递归相机追踪、光源光子通量权重、嵌套介质、吸收或光谱折射率。现有阴影规则和 PNG 输出流程保留；下一阶段可让相机积分器消费 `GlassSample`。
 
+### V0.4 阶段 10 — 相机玻璃路径，最多八次散射
+
+- [x] 在 `render/integrator.rs` 新增并导出 `render_camera_glass(scene, width, height, seed) -> Result<Framebuffer, Box<dyn Error>>`；每像素一条中心射线，固定种子可复现。
+- [x] 命中玻璃后通过 `Material::sample` 获取 `GlassSample`，以 `wo = -ray.direction` 和朝外几何法线采样；只乘 `sample.weight`，按新方向所在侧偏移起点，再继续求交。
+- [x] 最多采样八次玻璃反射/透射，第八次后允许命中非 delta 表面或背景并累加贡献，第九次玻璃命中处截断。非 delta 命中使用现有直接光照和硬阴影，未命中使用背景，未绑定材质/采样失败时终止。
+- [x] 两个相机入口共享尺寸/方向光校验、直接光照与阴影逻辑；新增独立 `camera_glass` 示例，复用 JSON、曝光与 sRGB PNG 输出。
+- **验证范围：** 无玻璃时与原直接光照一致、内外侧反射/透射与全反射、双界面权重抵消和自相交、地面直接光照/玻璃硬阴影、八次与九次界面边界、固定种子可复现、非法采样与吞吐量溢出。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（178 项单元测试、10 项集成测试）、严格 `cargo clippy --locked --all-targets -- -D warnings` 和 diff 检查通过。玻璃示例实际生成 512×512 RGB8 的 `output/camera_glass.png`，已查看单路径采样结果；默认 release 渲染也运行成功，十一张原有 PNG 的 SHA-256 与改动前完全一致。
+- **范围：** 每像素一个随机玻璃路径样本，RGB 常量折射率，有限深度截断；不增加漫反射间接光、透明 shadow ray、光谱色散、环境光照或焦散叠加。下一阶段可先增加相机每像素采样数，降低反射/透射噪点。
+
 ## 6. Codex 执行约定
 
 1. **每次只实现当前一个里程碑**，完成后总结修改文件、运行命令、测试结果和下一步；不要抢跑后续阶段。

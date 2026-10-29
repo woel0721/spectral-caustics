@@ -21,9 +21,9 @@
 
 **Day 5 已完成：光谱积分与彩色 PNG 输出。** `spectrum` 导入可追溯的 CIE 1931 2° CMF 和 D65 相对 SPD，支持非整数波长的线性插值，按 `k × S(λ) × CMF(λ) × Δλ` 返回单个波长的线性 XYZ。`render_spectral_caustics` 独立发射与追踪光线，将 41 个波长的光子贡献直接双线性累积到一张 XYZ 图。`main` 以相同采样和曝光输出彩色 `output/caustics.png` 及固定折射率白光对照 `output/constant_ior.png`。数据、许可和校验和见 [assets/color/README.md](assets/color/README.md)。
 
-**V0.4 已接入相机单次直接光照和硬阴影。** `render_camera_lit` 从相机生成主光线，按最近命中的材质和 shadow ray 可见性计算 `L_o = V f_r L_light max(n · wi, 0)`，经线性 RGB→XYZ 写入 Framebuffer，再复用曝光和 sRGB 输出 `output/camera_lit.png`。玻璃采样器已独立实现，递归相机追踪留待后续。
+**V0.4 已接入相机单次直接光照和硬阴影。** `render_camera_lit` 从相机生成主光线，按最近命中的材质和 shadow ray 可见性计算 `L_o = V f_r L_light max(n · wi, 0)`，经线性 RGB→XYZ 写入 Framebuffer，再复用曝光和 sRGB 输出 `output/camera_lit.png`。
 
-**已实现玻璃 Fresnel 离散事件采样。** `Material::sample` 统一返回 `Option<MaterialSample>`，Lambertian 返回 `Continuous { wi }`，Dielectric 返回 `Glass(GlassSample { wi, event, probability, weight })`；`GlassEvent` 区分反射与透射。可通过 `dyn Material` 调用，当前相机积分器和光源焦散仍使用原来的计算流程。
+**已实现玻璃 Fresnel 离散事件采样与有界相机路径。** `Material::sample` 统一返回 `Option<MaterialSample>`，Lambertian 返回 `Continuous { wi }`，Dielectric 返回 `Glass(GlassSample { wi, event, probability, weight })`；`GlassEvent` 区分反射与透射。`render_camera_glass` 已通过 `dyn Material` 接入玻璃采样，最多八次散射；运行 `camera_glass` 示例可生成独立的相机玻璃图。
 
 **已接入双线性光子累积。** `render::utils::bilinear_weights` 根据落点的小数位置计算四个邻近像素及其权重，`caustics.rs` 将线性 XYZ 能量按权重分配；接收区域内的边缘落点也保留全部能量。这对应 Day 6 中的双线性 splat 子项。
 
@@ -246,13 +246,13 @@ match material.sample(wo, hit.normal, &mut rng) {
 
 非偏振光使用完整 Fresnel 方程计算 `F`，按 `P(reflection)=F`、`P(transmission)=1-F` 选择一个事件。`GlassSample::probability` 是被选事件的离散概率，与普通立体角 PDF 不同；理想玻璃的 `evaluate` 和 `pdf` 仍返回零。`weight` 已是相机 **radiance** 追踪使用的 `f × |cosθ| / probability`，反射的 `F/F` 和透射的 `(1-F)/(1-F)` 都已抵消：反射权重为 `1`，透射权重为 `(eta_i/eta_t)²`。积分器直接执行 `throughput *= sample.weight`，不再乘 Fresnel 因子、余弦或除以 `probability`。例如空气进入 `ior=1.5` 的玻璃，法向入射有约 4% 的反射事件、96% 的透射事件，对应权重为 `1` 和 `4/9`；反向透射权重为 `9/4`。采样概率、delta 求值与 radiance 平方项参考 [PBRT Dielectric BSDF](https://pbr-book.org/4ed/Reflection_Models/Dielectric_BSDF)。
 
-当前玻璃采样器固定外部为空气、内部使用材质的常量 `ior`，不处理嵌套介质、吸收或按波长变化的折射率；该 radiance 权重也不能直接作为正向光子通量权重。当前阶段只完成采样器，尚未接入递归相机追踪或改变 shadow ray 的二值遮挡规则。
+当前玻璃采样器固定外部为空气、内部使用材质的常量 `ior`，不处理嵌套介质、吸收或按波长变化的折射率；该 radiance 权重也不能直接作为正向光子通量权重。`render_camera_glass` 已使用该采样记录继续追踪相机路径，shadow ray 仍按二值遮挡处理。
 
 RGB 不能唯一确定真实反射光谱；当前是有来源的近似模型，不是实测数据，也不保证在 D65 下积分后精确恢复原始 sRGB。七条基谱来自 PBRT 的 380–720 nm、32 个原始节点，节点间线性插值，表外延用最近端点，组合后按 PBRT 乘 0.94，并将反射率裁剪到 `[0, 1]`。数据与许可证见 `assets/color/README.md`。`render::utils::linear_srgb_to_xyz` 使用 [W3C 的 D65 矩阵](https://www.w3.org/TR/css-color-4/#color-conversion-code) 做普通线性 sRGB→XYZ 转换，和已有 `xyz_to_linear_srgb` 互逆；它不重建光谱，也不需要波长，不施加 gamma、裁剪或曝光，非法数值/溢出返回 `None`。
 
 `Lambertian` 是单面漫反射：仅在 `normal · wi > 0` 且 `normal · wo > 0` 时返回 `albedo / π`，背面及切线方向返回零；若希望从背面观察，调用方需先翻转着色法线。公式参考 [PBRT Lambertian Reflection](https://www.pbr-book.org/3ed-2018/Reflection_Models/Lambertian_Reflection)。`Dielectric` 表示理想光滑玻璃，其反射/透射属于 delta 分布，普通方向求值返回零，`is_delta()` 返回 `true`，`ior()` 返回保存的折射率；有效贡献须通过后续散射采样计算，不能直接把这个零值用于生成玻璃画面。这一约定参考 [PBRT Specular Reflection and Transmission](https://www.pbr-book.org/3ed-2018/Reflection_Models/Specular_Reflection_and_Transmission)。
 
-材质编号由场景构建时分配，不写进 JSON；物体编号和材质编号分别索引各自的表。`Scene::add_with_material(geometry, material)` 可添加任意实现 trait 的材质；`Scene::add` 仍只添加几何。当前阶段完成 trait、BSDF 求值、Lambertian 方向采样/PDF、命中关联和相机单次直接光照。`render::camera_debug` 保存相机法线调试遍历和对应测试；`render::integrator` 实现 `render_camera_lit`，后续可扩展路径追踪。相机光照现已使用材质 `albedo`；光源焦散仍由原有 `render.mode` 固定值/Cauchy 折射率模型控制。
+材质编号由场景构建时分配，不写进 JSON；物体编号和材质编号分别索引各自的表。`Scene::add_with_material(geometry, material)` 可添加任意实现 trait 的材质；`Scene::add` 仍只添加几何。`render::camera_debug` 保存相机法线调试遍历和对应测试；`render::integrator` 实现 `render_camera_lit` 和 `render_camera_glass`。相机光照使用材质 `albedo`，玻璃相机路径使用材质的常量 `ior`；光源焦散仍由原有 `render.mode` 固定值/Cauchy 折射率模型控制。
 
 统一读写入口是 `config::Config`：
 
@@ -337,6 +337,29 @@ renderer.save(&framebuffer, "output/camera_lit.png")?;
 ```
 
 ![相机视角的直接光照与硬阴影](output/camera_lit.png)
+
+`render_camera_glass(scene, width, height, seed)` 在相机命中玻璃时采样新方向，更新 `throughput *= sample.weight`，沿该方向继续最近求交。`wo = -ray.direction`，传给材质的是朝外几何法线；新射线起点按 `sample.wi · normal` 的符号沿法线偏移 `1e-5 m`，反射和透射都移到正确的一侧。事件概率已经包含在权重中，积分器不再乘 Fresnel、余弦或除以离散概率。
+
+每个像素只采样一条中心主光线；本次渲染用 `seed` 初始化 `StdRng`，按行、像素及路径顺序消耗随机数，相同配置与种子可复现。最多允许八次玻璃散射；第八次后仍可读取地面直接光照或背景，第九个玻璃命中处截断。未命中时累加 `throughput × background_color`；到达非 delta 表面时累加 `throughput × V f_r L_light max(n · wi, 0)` 后终止。未绑定材质、采样失败或吞吐量为零时终止路径。
+
+两个相机入口共享方向光校验、直接光照和 shadow ray 计算。玻璃相机路径仍将 shadow ray 上的玻璃作为不透明遮挡，因此玻璃下方地面可能较暗；背景只在路径离开场景时返回，不作为地面的环境照明。当前单样本会有明显的反射/透射噪点，八次上限会丢弃更长路径；尚无漫反射间接光、透明阴影、光谱色散或焦散叠加。
+
+```rust
+use spectral_caustics::render::render_camera_glass;
+
+let image = render_camera_glass(&scene, config.render.width, config.render.height, config.render.seed)?;
+renderer.save(&image, "output/camera_glass.png")?;
+```
+
+可独立运行示例生成新图：
+
+```bash
+cargo run --release --locked --example camera_glass
+```
+
+示例读取 `configs/default.json` 的场景、尺寸、随机种子和曝光，输出 `output/camera_glass.png`；默认主程序仍输出原来的对照图。
+
+![相机视角的八次上限玻璃路径](output/camera_glass.png)
 
 ## 运行
 

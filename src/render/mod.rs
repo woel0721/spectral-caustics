@@ -8,7 +8,7 @@ pub mod integrator;
 pub mod utils;
 
 pub use camera_debug::render_camera_debug;
-pub use integrator::render_camera_lit;
+pub use integrator::{render_camera_glass, render_camera_lit};
 
 use self::{
     framebuffer::Framebuffer,
