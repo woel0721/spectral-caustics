@@ -23,7 +23,7 @@
 
 **V0.4 已接入相机单次直接光照和硬阴影。** `render_camera_lit` 从相机生成主光线，按最近命中的材质和 shadow ray 可见性计算 `L_o = V f_r L_light max(n · wi, 0)`，经线性 RGB→XYZ 写入 Framebuffer，再复用曝光和 sRGB 输出 `output/camera_lit.png`。
 
-**已实现玻璃 Fresnel 离散事件采样与有界相机路径。** `Material::sample` 统一返回 `Option<MaterialSample>`，Lambertian 返回 `Continuous { wi }`，Dielectric 返回 `Glass(GlassSample { wi, event, probability, weight })`；`GlassEvent` 区分反射与透射。`render_camera_glass` 已通过 `dyn Material` 接入玻璃采样，最多八次散射；运行 `camera_glass` 示例可生成独立的相机玻璃图。
+**已实现玻璃 Fresnel 离散事件采样、有界相机路径、SPP 与子像素抖动。** `Material::sample` 统一返回 `Option<MaterialSample>`，Lambertian 返回 `Continuous { wi }`，Dielectric 返回 `Glass(GlassSample { wi, event, probability, weight })`；`GlassEvent` 区分反射与透射。`render_camera_glass` 负责像素内随机位置的多样本平均，`trace_camera_path` 负责单条最多八次散射的路径；运行 `camera_glass` 示例可生成独立的相机玻璃图，默认 64 SPP。
 
 **已接入双线性光子累积。** `render::utils::bilinear_weights` 根据落点的小数位置计算四个邻近像素及其权重，`caustics.rs` 将线性 XYZ 能量按权重分配；接收区域内的边缘落点也保留全部能量。这对应 Day 6 中的双线性 splat 子项。
 
@@ -297,6 +297,8 @@ let hit = scene.intersect(&ray);
 
 `ray_for_pixel(x, y, width, height)` 接收从零开始的像素下标，图像原点位于左上角，x 向右、y 向下。光线从 `position` 出发，穿过像素中心，返回方向归一化的 `Option<Ray>`。非有限数值、重合的位置/目标、零 up、与观察方向平行或近平行的 up、无效或导致投影尺度下溢的 FOV 在构建相机时被拒绝；像素接口检查零尺寸与越界。
 
+`ray_for_pixel_sample(x, y, width, height, offset)` 允许指定像素内位置，`offset` 为 `Vector2<f64>`，两轴都必须有限且位于 `[0, 1)`；实际采样点为 `(x + offset.x, y + offset.y)`。偏移 `(0,0)` 表示像素左上角，`(0.5,0.5)` 表示像素中心。此接口只改变投影平面的采样位置，仍从同一相机位置出发，保留图像 y 向下和宽高比/FOV 约定。`ray_for_pixel` 通过中心偏移调用它，相机直接光照图与法线调试图继续使用中心采样。
+
 `Camera::from_config` 在构建时计算并缓存正交坐标系：`forward = normalize(target - position)`，`right = normalize(forward × up)`，`camera_up = right × forward`。虚拟成像平面位于相机前方 1 米处，半高 `tan(fov_y / 2)` 也同时缓存。每个像素直接读取这些缓存，用 `width / height` 确定半宽，再将像素中心映射到平面坐标，主光线方向为 `normalize(forward + image_x × right + image_y × camera_up)`。像素循环不再重复计算叉积、相机坐标系的归一化或 FOV 的正切值。例如相机朝世界 -z、up 为 +y，FOV 为 90° 时，2×2 图像左上像素的平面偏移为 `(-0.5, +0.5, -1)`。
 
 运行时 `Camera` 的参数通过 `position()`、`target()`、`up()`、`fov_y_degrees()` 只读访问。需要修改相机时，先修改 `CameraConfig`，再调用 `Camera::from_config` 或重建 `Scene`，使新参数和缓存一起更新；JSON 字段保持不变。
@@ -338,16 +340,21 @@ renderer.save(&framebuffer, "output/camera_lit.png")?;
 
 ![相机视角的直接光照与硬阴影](output/camera_lit.png)
 
-`render_camera_glass(scene, width, height, seed)` 在相机命中玻璃时采样新方向，更新 `throughput *= sample.weight`，沿该方向继续最近求交。`wo = -ray.direction`，传给材质的是朝外几何法线；新射线起点按 `sample.wi · normal` 的符号沿法线偏移 `1e-5 m`，反射和透射都移到正确的一侧。事件概率已经包含在权重中，积分器不再乘 Fresnel、余弦或除以离散概率。
+`render_camera_glass(scene, width, height, spp, seed)` 对每个像素调用 `trace_camera_path` 共 `spp` 次，在线性 RGB 中计算 `mean = (L₁ + … + L_spp) / spp`，再转为线性 XYZ 写入 Framebuffer。`spp` 是每像素路径总数，必须大于零。每个样本先独立均匀生成 `u、v ∈ [0,1)`，再通过 `ray_for_pixel_sample` 从 `(x+u, y+v)` 发射射线，随后采样玻璃事件。SPP=1 也会抖动一次；更多样本同时降低玻璃事件噪声，并估计几何边缘覆盖率来改善锯齿。相机位置、法线与光路本身不添加随机扰动。
 
-每个像素只采样一条中心主光线；本次渲染用 `seed` 初始化 `StdRng`，按行、像素及路径顺序消耗随机数，相同配置与种子可复现。最多允许八次玻璃散射；第八次后仍可读取地面直接光照或背景，第九个玻璃命中处截断。未命中时累加 `throughput × background_color`；到达非 delta 表面时累加 `throughput × V f_r L_light max(n · wi, 0)` 后终止。未绑定材质、采样失败或吞吐量为零时终止路径。
+`trace_camera_path` 是积分器内部的单路径函数，接收一条初始 Ray 和调用方持有的 RNG，返回未经曝光的线性 RGB 辐亮度。每次调用重新将吞吐量设为 1、辐亮度设为零；本次渲染只在开始时用 `seed` 初始化一次 `StdRng`，按行、像素、样本顺序消耗随机数，每个样本先生成两个偏移，再执行玻璃路径采样，不逐样本重设种子。相同参数、SPP 与种子可复现。均匀采样的像素区域面积为 1，空间采样密度为 1，使用现有 `1/spp` 平均即可，不引入额外曝光或颜色权重。
 
-两个相机入口共享方向光校验、直接光照和 shadow ray 计算。玻璃相机路径仍将 shadow ray 上的玻璃作为不透明遮挡，因此玻璃下方地面可能较暗；背景只在路径离开场景时返回，不作为地面的环境照明。当前单样本会有明显的反射/透射噪点，八次上限会丢弃更长路径；尚无漫反射间接光、透明阴影、光谱色散或焦散叠加。
+单条路径命中玻璃后更新 `throughput *= sample.weight` 并继续最近求交。`wo = -ray.direction`，传给材质的是朝外几何法线；新射线起点按 `sample.wi · normal` 的符号沿法线偏移 `1e-5 m`。事件概率已经包含在权重中，不再乘 Fresnel、余弦或除以离散概率。最多允许八次玻璃散射；第八次后仍可读取地面直接光照或背景，第九个玻璃命中处截断。未命中时累加 `throughput × background_color`；到达非 delta 表面时累加 `throughput × V f_r L_light max(n · wi, 0)` 后终止。未绑定材质、采样失败或吞吐量为零的路径贡献为零，平均时仍计入总 SPP。
+
+两个相机入口共享方向光校验、直接光照和 shadow ray 计算。玻璃相机路径仍将 shadow ray 上的玻璃作为不透明遮挡，因此玻璃下方地面可能较暗；背景只在路径离开场景时返回，不作为地面的环境照明。较低 SPP 会有明显的反射/透射噪点，八次上限会丢弃更长路径；尚无漫反射间接光、透明阴影、光谱色散或焦散叠加。
 
 ```rust
 use spectral_caustics::render::render_camera_glass;
 
-let image = render_camera_glass(&scene, config.render.width, config.render.height, config.render.seed)?;
+let image = render_camera_glass(
+    &scene, config.render.width, config.render.height,
+    config.render.camera_spp, config.render.seed,
+)?;
 renderer.save(&image, "output/camera_glass.png")?;
 ```
 
@@ -355,11 +362,14 @@ renderer.save(&image, "output/camera_glass.png")?;
 
 ```bash
 cargo run --release --locked --example camera_glass
+# 覆盖为 1 SPP 或 256 SPP：
+cargo run --release --locked --example camera_glass -- 1
+cargo run --release --locked --example camera_glass -- 256
 ```
 
-示例读取 `configs/default.json` 的场景、尺寸、随机种子和曝光，输出 `output/camera_glass.png`；默认主程序仍输出原来的对照图。
+示例读取 `configs/default.json` 的场景、尺寸、`render.camera_spp`、随机种子和曝光，输出 `output/camera_glass.png`。`render.camera_spp` 默认为 64，旧 JSON 缺省该字段时也使用 64；可用示例的可选 SPP 参数覆盖。它与光源发射使用的 `render.samples_per_pixel_axis` 独立，64 SPP 表示每像素总计 64 条相机路径，不是 64×64。默认主程序仍输出原来的对照图。
 
-![相机视角的八次上限玻璃路径](output/camera_glass.png)
+![相机视角的八次上限玻璃路径，64 SPP，像素内抖动](output/camera_glass.png)
 
 ## 运行
 

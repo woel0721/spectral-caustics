@@ -3,6 +3,7 @@
     "width": 512,
     "height": 512,
     "samples_per_pixel_axis": 4,
+    "camera_spp": 64,
     "mode": "dispersion",
     "wavelength_min_nm": 380.0,
     "wavelength_max_nm": 780.0,

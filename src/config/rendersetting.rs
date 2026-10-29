@@ -12,6 +12,9 @@ pub struct RenderSetting {
     pub height: usize,
     /// 每个发射小格沿每轴分层的数量；4 表示 4×4 个空间样本。
     pub samples_per_pixel_axis: usize,
+    /// 玻璃相机渲染的每像素路径总数，与光源每轴分层数独立。
+    #[serde(default = "default_camera_spp")]
+    pub camera_spp: usize,
     pub mode: IorMode,
     /// 波长范围和积分步长，单位为 nm。
     pub wavelength_min_nm: f64,
@@ -28,12 +31,17 @@ pub struct RenderSetting {
     pub output_path: PathBuf,
 }
 
+fn default_camera_spp() -> usize {
+    64
+}
+
 impl Default for RenderSetting {
     fn default() -> Self {
         Self {
             width: 512,
             height: 512,
             samples_per_pixel_axis: 4,
+            camera_spp: default_camera_spp(),
             mode: IorMode::Dispersion,
             wavelength_min_nm: 380.0,
             wavelength_max_nm: 780.0,
@@ -96,6 +104,13 @@ impl RenderSetting {
         self.width
             .checked_mul(self.height)
             .ok_or("render 像素数量溢出")?;
+        if self.camera_spp == 0 {
+            return Err("render.camera_spp 必须大于零".into());
+        }
+        self.width
+            .checked_mul(self.height)
+            .and_then(|pixels| pixels.checked_mul(self.camera_spp))
+            .ok_or("render 相机路径样本总数溢出")?;
         self.width
             .checked_mul(self.samples_per_pixel_axis)
             .and_then(|x| {

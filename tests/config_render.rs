@@ -12,7 +12,7 @@ use spectral_caustics::{
         dielectric::fresnel_dielectric,
     },
     optics::{iormode::IorMode, spectrum::rgb_reflectance},
-    render::{Render, caustics::ground_to_pixel, framebuffer::Framebuffer},
+    render::{Render, caustics::ground_to_pixel, framebuffer::Framebuffer, render_camera_glass},
     scene::Scene,
 };
 use std::{
@@ -24,6 +24,39 @@ use std::{
 };
 
 struct TemporaryDirectory(PathBuf);
+
+#[test]
+fn camera_spp_from_json_controls_camera_paths_without_changing_photon_rendering() {
+    let mut config = small_config();
+    config.scene.camera.position = [0.0, 0.0, 3.0];
+    config.scene.camera.target = [0.0; 3];
+    config.scene.camera.up = [0.0, 1.0, 0.0];
+    config.scene.background_linear_rgb = [0.2, 0.4, 0.8];
+    config.scene.objects = vec![ObjectConfig::Ground {
+        height_m: 1.0,
+        material: MaterialConfig::Dielectric { ior: 1.5 },
+    }];
+    let camera_image = |config: &Config| {
+        let loaded = Config::from_json(&config.to_json().unwrap()).unwrap();
+        render_camera_glass(
+            &Scene::from_config(&loaded.scene).unwrap(),
+            loaded.render.width,
+            loaded.render.height,
+            loaded.render.camera_spp,
+            loaded.render.seed,
+        )
+        .unwrap()
+    };
+    config.render.camera_spp = 1;
+    let single = camera_image(&config);
+    let photons = render(&config);
+    config.render.camera_spp = 64;
+    let multiple = camera_image(&config);
+    assert_ne!(single.pixels, multiple.pixels);
+    assert_eq!(photons.pixels, render(&config).pixels);
+    assert_eq!(multiple.pixels, camera_image(&config).pixels);
+}
+
 impl TemporaryDirectory {
     fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);

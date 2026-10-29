@@ -96,6 +96,33 @@ mod tests {
     }
 
     #[test]
+    fn camera_spp_defaults_when_omitted_and_roundtrips_explicit_values() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
+        json["render"].as_object_mut().unwrap().remove("camera_spp");
+        assert_eq!(
+            Config::from_json(&json.to_string())
+                .unwrap()
+                .render
+                .camera_spp,
+            64
+        );
+        let mut config = Config::default();
+        config.render.camera_spp = 7;
+        assert_eq!(
+            Config::from_json(&config.to_json().unwrap())
+                .unwrap()
+                .render
+                .camera_spp,
+            7
+        );
+        config.render.camera_spp = 0;
+        assert!(config.validate().is_err());
+        config.render.camera_spp = usize::MAX;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn finite_geometry_coordinates_roundtrip_without_losing_f64_bits() {
         let mut config = Config::default();
         for height_m in [
@@ -226,6 +253,9 @@ mod tests {
             ("width", json!(0)),
             ("height", json!(0)),
             ("samples_per_pixel_axis", json!(0)),
+            ("camera_spp", json!(0)),
+            ("camera_spp", json!(-1)),
+            ("camera_spp", json!(1.5)),
             ("width", json!(-1)),
             ("wavelength_min_nm", json!(0.0)),
             ("wavelength_max_nm", json!(380.0)),

@@ -300,6 +300,26 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（178 项单元测试、10 项集成测试）、严格 `cargo clippy --locked --all-targets -- -D warnings` 和 diff 检查通过。玻璃示例实际生成 512×512 RGB8 的 `output/camera_glass.png`，已查看单路径采样结果；默认 release 渲染也运行成功，十一张原有 PNG 的 SHA-256 与改动前完全一致。
 - **范围：** 每像素一个随机玻璃路径样本，RGB 常量折射率，有限深度截断；不增加漫反射间接光、透明 shadow ray、光谱色散、环境光照或焦散叠加。下一阶段可先增加相机每像素采样数，降低反射/透射噪点。
 
+### V0.4 阶段 11 — 相机 SPP 与单路径函数
+
+- [x] 将 `render_camera_glass` 的路径循环提取为内部 `trace_camera_path`：只追踪一条 Ray，返回未曝光的线性 RGB，每次重置吞吐量/辐亮度并保留八次散射限制。
+- [x] `render_camera_glass(scene, width, height, spp, seed)` 每像素追踪 `spp` 条路径，在线性 RGB 中按总样本数平均后转 XYZ；SPP=0 和总样本数量溢出返回错误，零贡献路径也计入分母。
+- [x] 保留像素中心主光线，独立采样玻璃事件；整次渲染只初始化一次 RNG，不逐样本重设种子，SPP=1 保持原图与原随机序列。
+- [x] 新增 `render.camera_spp`，默认 64，旧 JSON 缺省时兼容默认值；与光源 `samples_per_pixel_axis` 独立。示例读取此配置并支持可选的命令行 SPP 覆盖。
+- **验证范围：** 多样本权重平均和随机序列、固定种子重现、SPP 增加时的亮度归一化、相对 Fresnel 解析期望的误差下降、非法 SPP/溢出、JSON 缺省/往返，以及相机 SPP 不影响光源焦散。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（182 项单元测试、11 项集成测试）、严格 `cargo clippy --locked --all-targets -- -D warnings` 和 diff 检查通过。实际运行 1 SPP 示例，512×512 PNG 与重构前逐字节一致；默认 64 SPP 示例已更新 `output/camera_glass.png`，已查看噪声降低后的结果。默认 release 渲染成功，其余十一张已有 PNG 的 SHA-256 保持一致。
+- **范围：** 只增加玻璃路径的每像素样本数，不引入子像素抖动、并行相机渲染、漫反射间接光或透明阴影；八次截断仍会丢弃更长路径。下一阶段可加入像素内采样，改善几何边缘的锯齿。
+
+### V0.4 阶段 12 — 像素内随机抖动
+
+- [x] 新增 `Camera::ray_for_pixel_sample(..., offset: Vector2<f64>)`，接收两轴 `[0,1)` 的像素内偏移，保留 FOV、宽高比、相机位置与左上原点/y 向下约定；非法偏移返回 `None`。
+- [x] `ray_for_pixel` 复用中心偏移 `(0.5,0.5)`，原有直接光照和法线调试图继续使用中心采样。
+- [x] 玻璃相机渲染在每个 SPP 样本开始时均匀生成 `u、v ∈ [0,1)`，从像素内 `(x+u,y+v)` 发射射线，再采样玻璃路径；SPP=1 也使用抖动，固定种子可复现。
+- [x] 保留线性 RGB 的 `1/spp` 平均与八次玻璃散射上限；将单条已知方向的光学测试放到 `trace_camera_path`，像素渲染测试验证随机位置和面积平均。
+- **验证范围：** 子像素与中心坐标、已知投影位置和非方形宽高比、非法偏移/越界、黑白各半像素的线性覆盖率、多样本归一化、固定种子重现、玻璃反射/透射及光源渲染独立性。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（185 项单元测试、11 项集成测试）、严格 `cargo clippy --locked --all-targets -- -D warnings` 和 diff 检查通过。实际运行 64 SPP 玻璃示例并查看了更新的 512×512 RGB8 PNG；默认 release 渲染成功，其余十一张 PNG 与添加抖动前逐字节一致。
+- **范围：** 只做像素区域内的独立均匀采样，不增加镜头景深、运动模糊、分层采样、间接光或透明阴影。有限 SPP 的边缘仍有随机噪声；下一阶段可使用像素内分层采样降低方差。
+
 ## 6. Codex 执行约定
 
 1. **每次只实现当前一个里程碑**，完成后总结修改文件、运行命令、测试结果和下一步；不要抢跑后续阶段。

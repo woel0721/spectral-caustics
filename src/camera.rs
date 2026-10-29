@@ -1,7 +1,7 @@
-//! 针孔透视相机：从相机位置穿过像素中心，生成用于场景求交的主光线。
+//! 针孔透视相机：从相机位置穿过像素中心或指定的像素内采样点。
 
 use crate::{config::cameraconfig::CameraConfig, geometry::ray::Ray};
-use nalgebra::Vector3;
+use nalgebra::{Vector2, Vector3};
 
 /// 已校验的运行时相机，参数只读，预计算结果由所有像素复用。
 #[derive(Debug, Clone, PartialEq)]
@@ -82,14 +82,35 @@ impl Camera {
     /// 光线起点为 position，穿过像素中心，方向由 Ray::new 归一化。
     /// 使用构建时缓存的坐标系与半高；越界或零尺寸返回 None。
     pub fn ray_for_pixel(&self, x: usize, y: usize, width: usize, height: usize) -> Option<Ray> {
-        if width == 0 || height == 0 || x >= width || y >= height {
+        self.ray_for_pixel_sample(x, y, width, height, Vector2::repeat(0.5))
+    }
+
+    /// 从像素 (x, y) 内的 offset 位置生成主光线；offset 两轴必须位于 [0, 1)。
+    ///
+    /// (0, 0) 是像素左上角，(0.5, 0.5) 是中心，x 向右、y 向下。
+    /// 相机位置不变，采样点为 (x + offset.x, y + offset.y)；方向会归一化。
+    /// 调用方负责采样 offset 和管理 RNG；越界、零尺寸或非法偏移返回 None。
+    pub fn ray_for_pixel_sample(
+        &self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        offset: Vector2<f64>,
+    ) -> Option<Ray> {
+        if width == 0
+            || height == 0
+            || x >= width
+            || y >= height
+            || offset.iter().any(|value| !(0.0..1.0).contains(value))
+        {
             return None;
         }
         // 半高由相机构建时计算，半宽根据本次输出图片的宽高比确定。
         let half_width = self.half_height * width as f64 / height as f64;
-        // +0.5 取像素中心；图片 y 向下，因此成像平面的竖直坐标要翻转。
-        let image_x = (2.0 * (x as f64 + 0.5) / width as f64 - 1.0) * half_width;
-        let image_y = (1.0 - 2.0 * (y as f64 + 0.5) / height as f64) * self.half_height;
+        // 图片 y 向下，因此成像平面的竖直坐标要翻转。
+        let image_x = (2.0 * (x as f64 + offset.x) / width as f64 - 1.0) * half_width;
+        let image_y = (1.0 - 2.0 * (y as f64 + offset.y) / height as f64) * self.half_height;
         // 平面上的点为 position + forward + image_x * right + image_y * camera_up。
         let direction = self.forward + image_x * self.right + image_y * self.camera_up;
         Ray::new(self.position, direction)
@@ -139,6 +160,78 @@ mod tests {
             let plane_point = ray.at(-1.0 / ray.direction.z);
             assert!((plane_point - Vector3::new(plane_x, plane_y, 2.0)).norm() < 1e-12);
             assert!((ray.direction.norm() - 1.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn pixel_sample_offsets_preserve_centers_and_match_camera_plane_coordinates() {
+        let camera = front_camera();
+        for y in 0..2 {
+            for x in 0..4 {
+                let center = camera.ray_for_pixel(x, y, 4, 2).unwrap();
+                let sample = camera
+                    .ray_for_pixel_sample(x, y, 4, 2, Vector2::repeat(0.5))
+                    .unwrap();
+                assert_eq!(center.origin, sample.origin);
+                assert_eq!(center.direction, sample.direction);
+            }
+        }
+        for (x, y, width, height, offset, expected) in [
+            (
+                0,
+                0,
+                2,
+                2,
+                Vector2::new(0.0, 0.0),
+                Vector3::new(-1.0, 1.0, 2.0),
+            ),
+            (
+                0,
+                0,
+                2,
+                2,
+                Vector2::new(0.25, 0.75),
+                Vector3::new(-0.75, 0.25, 2.0),
+            ),
+            (
+                2,
+                1,
+                4,
+                2,
+                Vector2::new(0.25, 0.75),
+                Vector3::new(0.25, -0.75, 2.0),
+            ),
+        ] {
+            let ray = camera
+                .ray_for_pixel_sample(x, y, width, height, offset)
+                .unwrap();
+            let on_plane = ray.at(-1.0 / ray.direction.z);
+            assert!((on_plane - expected).norm() < 1e-12);
+            assert_eq!(ray.origin, camera.position());
+            assert!((ray.direction.norm() - 1.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn pixel_samples_reject_invalid_offsets_dimensions_and_indices() {
+        let camera = front_camera();
+        for value in [
+            -f64::EPSILON,
+            1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            for offset in [Vector2::new(value, 0.5), Vector2::new(0.5, value)] {
+                assert!(camera.ray_for_pixel_sample(0, 0, 2, 2, offset).is_none());
+            }
+        }
+        for (x, y, width, height) in [(0, 0, 0, 1), (0, 0, 1, 0), (2, 0, 2, 2), (0, 2, 2, 2)] {
+            assert!(
+                camera
+                    .ray_for_pixel_sample(x, y, width, height, Vector2::repeat(0.5))
+                    .is_none()
+            );
         }
     }
 

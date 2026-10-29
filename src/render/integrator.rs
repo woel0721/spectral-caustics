@@ -9,8 +9,8 @@ use crate::{
     material::{BsdfValue, EvaluateMode, Material, MaterialSample},
     scene::Scene,
 };
-use nalgebra::Vector3;
-use rand::{SeedableRng, rngs::StdRng};
+use nalgebra::{Vector2, Vector3};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{error::Error, mem::size_of};
 
 const MAX_GLASS_BOUNCES: usize = 8;
@@ -56,92 +56,121 @@ pub fn render_camera_lit(
     Ok(framebuffer)
 }
 
-/// 相机路径追踪：每像素一条中心射线，最多采样八次玻璃反射/透射。
+/// 每像素独立追踪 spp 条路径，在线性 RGB 中平均后保存为线性 XYZ。
 ///
-/// seed 初始化本次渲染独有的 RNG，按 y、x 和路径顺序采样，固定种子可复现。
-/// wo = -ray.direction，保留朝外几何法线供玻璃判断进入/离开。
-/// 玻璃只乘 sample.weight，不再乘 Fresnel/余弦或除以 probability。
-/// 每次沿采样方向所在侧的法线偏移 1e-5 米，再构造下一条 Ray。
-/// 未命中时累加 throughput * 背景；命中非 delta 材质时累加带硬阴影的
-/// throughput * 直接光照并终止，不采样漫反射间接光。
-/// 第八次散射后仍查询背景/非 delta 表面，第九个玻璃界面处截断；
-/// 未绑定材质或没有采样结果的路径终止，未获得的贡献为零。
-/// 返回未经曝光的线性 XYZ，不叠加光源焦散，也不模拟透明 shadow ray。
+/// spp 必须大于零，表示每像素路径总数；每个样本在像素内均匀选取
+/// 两个 [0, 1) 偏移，随后独立追踪玻璃路径；spp=1 也包含子像素抖动。
+/// seed 只在渲染开始时初始化 RNG，按 y、x、样本（偏移、路径）顺序消耗随机数。
+/// 路径最多经过八次玻璃散射，其余光照和截断规则见 trace_camera_path。
+/// 返回未经曝光的线性 XYZ，交给 Render::save 统一曝光和 sRGB 编码。
 pub fn render_camera_glass(
     scene: &Scene,
     width: usize,
     height: usize,
+    spp: usize,
     seed: u64,
 ) -> Result<Framebuffer, Box<dyn Error>> {
+    if spp == 0 {
+        return Err("相机 SPP 必须大于零".into());
+    }
     let (light_wi, light) = camera_lighting_setup(scene, width, height)?;
+    width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(spp))
+        .ok_or("相机路径样本总数溢出")?;
     let mut rng = StdRng::seed_from_u64(seed);
     let mut framebuffer = Framebuffer::new(width, height);
     for y in 0..height {
         for x in 0..width {
-            let mut ray = scene
-                .camera
-                .ray_for_pixel(x, y, width, height)
-                .ok_or("无法生成摄像机光线")?;
-            let mut throughput = 1.0;
-            let mut radiance = Vector3::zeros();
-            for bounce in 0..=MAX_GLASS_BOUNCES {
-                let Some(hit) = scene.intersect(&ray) else {
-                    radiance += scene.background_color * throughput;
-                    break;
-                };
-                let Some(material) = hit.material_id.and_then(|id| scene.material(id)) else {
-                    break;
-                };
-                let wo = -ray.direction;
-                if !material.is_delta() {
-                    radiance +=
-                        direct_lighting(scene, &hit, material, wo, light_wi, light)? * throughput;
-                    break;
-                }
-                if bounce == MAX_GLASS_BOUNCES {
-                    break;
-                }
-                let normal_length = hit.normal.norm();
-                if !normal_length.is_finite() || normal_length == 0.0 {
-                    return Err("命中法线无效，无法采样玻璃路径".into());
-                }
-                let normal = hit.normal / normal_length;
-                let Some(sample) = material.sample(wo, normal, &mut rng) else {
-                    break;
-                };
-                let MaterialSample::Glass(sample) = sample else {
-                    return Err("delta 材质必须返回玻璃离散事件采样".into());
-                };
-                if !sample.probability.is_finite()
-                    || sample.probability <= 0.0
-                    || sample.probability > 1.0
-                    || !sample.weight.is_finite()
-                    || sample.weight < 0.0
-                {
-                    return Err("玻璃采样概率或权重无效".into());
-                }
-                throughput *= sample.weight;
-                if !throughput.is_finite() {
-                    return Err("玻璃路径吞吐量计算溢出".into());
-                }
-                if throughput == 0.0 {
-                    break;
-                }
-                let side = if sample.wi.dot(&normal) >= 0.0 {
-                    1.0
-                } else {
-                    -1.0
-                };
-                let origin = hit.coords + normal * (side * 10.0 * INTERSECTION_EPSILON);
-                ray = Ray::new(origin, sample.wi).ok_or("玻璃路径射线起点或方向无效")?;
+            let mut mean_rgb = Vector3::zeros();
+            for _ in 0..spp {
+                let offset = Vector2::new(rng.random::<f64>(), rng.random::<f64>());
+                let ray = scene
+                    .camera
+                    .ray_for_pixel_sample(x, y, width, height, offset)
+                    .ok_or("无法生成子像素摄像机光线")?;
+                // 先缩放每项再相加，避免有限样本之和溢出而平均值仍有限。
+                mean_rgb += trace_camera_path(scene, ray, &mut rng, light_wi, light)? / spp as f64;
             }
-            let xyz = linear_srgb_to_xyz(radiance).ok_or("玻璃路径颜色非法或计算溢出")?;
+            let xyz = linear_srgb_to_xyz(mean_rgb).ok_or("相机样本平均颜色非法或计算溢出")?;
             if !framebuffer.set(x, y, xyz) {
                 return Err("无法写入玻璃路径图像素".into());
             }
         }
     }
     Ok(framebuffer)
+}
+
+/// 追踪一条相机射线，返回未曝光的线性 RGB 辐亮度。
+///
+/// 每条路径重新初始化吞吐量与辐亮度；RNG 由像素采样循环持有，不能逐路径重设种子。
+/// wo = -ray.direction，保留朝外几何法线；玻璃只乘 sample.weight。
+/// 新起点沿采样方向所在侧的法线偏移 1e-5 米，第九个玻璃命中处截断。
+/// 未命中返回背景贡献；非 delta 命中累加带硬阴影的直接光照并终止。
+/// 不采样漫反射间接光、不叠加焦散，也不模拟透明 shadow ray。
+fn trace_camera_path(
+    scene: &Scene,
+    mut ray: Ray,
+    rng: &mut dyn rand::RngCore,
+    light_wi: Vector3<f64>,
+    light: f64,
+) -> Result<Vector3<f64>, Box<dyn Error>> {
+    let mut throughput = 1.0;
+    let mut radiance = Vector3::zeros();
+    for bounce in 0..=MAX_GLASS_BOUNCES {
+        let Some(hit) = scene.intersect(&ray) else {
+            radiance += scene.background_color * throughput;
+            break;
+        };
+        let Some(material) = hit.material_id.and_then(|id| scene.material(id)) else {
+            break;
+        };
+        let wo = -ray.direction;
+        if !material.is_delta() {
+            radiance += direct_lighting(scene, &hit, material, wo, light_wi, light)? * throughput;
+            break;
+        }
+        if bounce == MAX_GLASS_BOUNCES {
+            break;
+        }
+        let normal_length = hit.normal.norm();
+        if !normal_length.is_finite() || normal_length == 0.0 {
+            return Err("命中法线无效，无法采样玻璃路径".into());
+        }
+        let normal = hit.normal / normal_length;
+        let Some(sample) = material.sample(wo, normal, rng) else {
+            break;
+        };
+        let MaterialSample::Glass(sample) = sample else {
+            return Err("delta 材质必须返回玻璃离散事件采样".into());
+        };
+        if !sample.probability.is_finite()
+            || sample.probability <= 0.0
+            || sample.probability > 1.0
+            || !sample.weight.is_finite()
+            || sample.weight < 0.0
+        {
+            return Err("玻璃采样概率或权重无效".into());
+        }
+        throughput *= sample.weight;
+        if !throughput.is_finite() {
+            return Err("玻璃路径吞吐量计算溢出".into());
+        }
+        if throughput == 0.0 {
+            break;
+        }
+        let side = if sample.wi.dot(&normal) >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
+        let origin = hit.coords + normal * (side * 10.0 * INTERSECTION_EPSILON);
+        ray = Ray::new(origin, sample.wi).ok_or("玻璃路径射线起点或方向无效")?;
+    }
+    if !radiance.iter().all(|value| value.is_finite()) {
+        return Err("玻璃路径颜色非法或计算溢出".into());
+    }
+    Ok(radiance)
 }
 
 /// 两个相机入口共享尺寸和方向光校验，以及同一相对光强约定。
@@ -299,24 +328,181 @@ mod tests {
         })
     }
 
+    fn trace_center_pixel(scene: &Scene, seed: u64) -> Vector3<f64> {
+        let (light_wi, light) = camera_lighting_setup(scene, 1, 1).unwrap();
+        let ray = scene.camera.ray_for_pixel(0, 0, 1, 1).unwrap();
+        trace_camera_path(
+            scene,
+            ray,
+            &mut StdRng::seed_from_u64(seed),
+            light_wi,
+            light,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn camera_spp_averages_independent_paths_and_is_reproducible() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct AlternatingGlass(Arc<AtomicUsize>);
+        impl Material for AlternatingGlass {
+            fn evaluate(
+                &self,
+                _wi: Vector3<f64>,
+                _wo: Vector3<f64>,
+                _normal: Vector3<f64>,
+                mode: EvaluateMode,
+            ) -> BsdfValue {
+                match mode {
+                    EvaluateMode::Rgb => BsdfValue::Rgb(Vector3::zeros()),
+                    EvaluateMode::Spectral { .. } => BsdfValue::Spectral(0.0),
+                }
+            }
+            fn sample(
+                &self,
+                _wo: Vector3<f64>,
+                _normal: Vector3<f64>,
+                _rng: &mut dyn rand::RngCore,
+            ) -> Option<MaterialSample> {
+                let index = self.0.fetch_add(1, Ordering::Relaxed);
+                Some(MaterialSample::Glass(GlassSample {
+                    wi: Vector3::z(),
+                    event: GlassEvent::Reflection,
+                    probability: 0.5,
+                    weight: if index & 1 == 0 { 0.25 } else { 1.75 },
+                }))
+            }
+            fn is_delta(&self) -> bool {
+                true
+            }
+        }
+        for (spp, expected_weight) in [(1, 0.25), (3, 0.75), (4, 1.0), (64, 1.0)] {
+            let count = Arc::new(AtomicUsize::new(0));
+            let mut scene = glass_background_scene();
+            scene.add_with_material(
+                Box::new(Ground::new(1.0).unwrap()),
+                Box::new(AlternatingGlass(count.clone())),
+            );
+            let image = render_camera_glass(&scene, 1, 1, spp, 42).unwrap();
+            let rgb = xyz_to_linear_srgb(image.pixels[0]).unwrap();
+            assert!((rgb - scene.background_color * expected_weight).norm() < 1e-12);
+            assert_eq!(count.load(Ordering::Relaxed), spp);
+        }
+        let mut scene = glass_background_scene();
+        scene.add_with_material(
+            Box::new(Ground::new(1.0).unwrap()),
+            Box::new(Dielectric::new(1.5).unwrap()),
+        );
+        let reference = render_camera_glass(&scene, 16, 8, 64, 42).unwrap();
+        assert_eq!(
+            reference.pixels,
+            render_camera_glass(&scene, 16, 8, 64, 42).unwrap().pixels
+        );
+        assert_ne!(
+            reference.pixels,
+            render_camera_glass(&scene, 16, 8, 64, 43).unwrap().pixels
+        );
+    }
+
+    #[test]
+    fn jittered_camera_filters_half_pixel_coverage_in_linear_light() {
+        struct LeftHalfPlane;
+        impl Hittable for LeftHalfPlane {
+            fn intersect(&self, ray: &Ray) -> Option<Hit> {
+                let hit = Ground::new(0.0).unwrap().intersect(ray)?;
+                (hit.coords.x < 0.0).then_some(hit)
+            }
+        }
+        let mut scene = glass_background_scene();
+        scene.background_color = Vector3::repeat(1.0);
+        // 左半像素命中无材质黑色表面，右半像素看到白色背景，面积均值应为线性 0.5。
+        scene.add(Box::new(LeftHalfPlane));
+        let image = render_camera_glass(&scene, 1, 1, 4096, 42).unwrap();
+        let rgb = xyz_to_linear_srgb(image.pixels[0]).unwrap();
+        assert!((rgb - Vector3::repeat(0.5)).norm() < 0.03);
+        assert_eq!(
+            image.pixels,
+            render_camera_glass(&scene, 1, 1, 4096, 42).unwrap().pixels
+        );
+    }
+
+    #[test]
+    fn camera_spp_preserves_deterministic_brightness_and_rejects_invalid_counts() {
+        let scene = ground_scene();
+        let reference = render_camera_lit(&scene, 3, 2).unwrap();
+        for spp in [1, 3, 64] {
+            let image = render_camera_glass(&scene, 3, 2, spp, 42).unwrap();
+            for (actual, expected) in image.pixels.iter().zip(&reference.pixels) {
+                assert!((actual - expected).norm() < 1e-12);
+            }
+        }
+        assert!(render_camera_glass(&scene, 1, 1, 0, 42).is_err());
+        assert!(render_camera_glass(&scene, 2, 1, usize::MAX, 42).is_err());
+    }
+
+    #[test]
+    fn camera_spp_reduces_error_against_analytic_fresnel_expectation() {
+        use crate::material::dielectric::fresnel_dielectric;
+        let mut scene = glass_background_scene();
+        scene.add_with_material(
+            Box::new(Ground::new(1.0).unwrap()),
+            Box::new(Dielectric::new(1.5).unwrap()),
+        );
+        let error = |spp| {
+            let image = render_camera_glass(&scene, 32, 16, spp, 42).unwrap();
+            let mut sum = 0.0;
+            for y in 0..16 {
+                for x in 0..32 {
+                    let mut f = 0.0;
+                    for sy in 0..4 {
+                        for sx in 0..4 {
+                            let offset = Vector2::new(
+                                (f64::from(sx) + 0.5) / 4.0,
+                                (f64::from(sy) + 0.5) / 4.0,
+                            );
+                            let ray = scene
+                                .camera
+                                .ray_for_pixel_sample(x, y, 32, 16, offset)
+                                .unwrap();
+                            f += fresnel_dielectric(-ray.direction.z, 1.0, 1.5).unwrap() / 16.0;
+                        }
+                    }
+                    let expected = scene.background_color * (f + (1.0 - f) * (4.0 / 9.0));
+                    let rgb = xyz_to_linear_srgb(*image.get(x, y).unwrap()).unwrap();
+                    sum += (rgb - expected).norm_squared();
+                }
+            }
+            sum / (32.0 * 16.0)
+        };
+        let single = error(1);
+        let multiple = error(64);
+        assert!(
+            multiple < single / 8.0,
+            "1 SPP MSE={single}, 64 SPP MSE={multiple}"
+        );
+    }
+
     #[test]
     fn glass_renderer_matches_direct_lighting_without_glass_and_respects_unbound_hits() {
         let mut scene = ground_scene();
         for seed in [0, 42] {
             assert_eq!(
-                render_camera_glass(&scene, 3, 2, seed).unwrap().pixels,
+                render_camera_glass(&scene, 3, 2, 1, seed).unwrap().pixels,
                 render_camera_lit(&scene, 3, 2).unwrap().pixels
             );
         }
         scene.add(Box::new(Ground::new(1.0).unwrap()));
         assert_eq!(
-            render_camera_glass(&scene, 1, 1, 42).unwrap().pixels,
+            render_camera_glass(&scene, 1, 1, 1, 42).unwrap().pixels,
             vec![Vector3::zeros()]
         );
         scene.objects.clear();
         scene.background_color = Vector3::new(0.1, 0.3, 0.7);
         assert_eq!(
-            render_camera_glass(&scene, 3, 2, 42).unwrap().pixels,
+            render_camera_glass(&scene, 3, 2, 1, 42).unwrap().pixels,
             render_camera_lit(&scene, 3, 2).unwrap().pixels
         );
     }
@@ -350,8 +536,7 @@ mod tests {
                 };
                 saw_reflection |= sample.event == GlassEvent::Reflection;
                 saw_transmission |= sample.event == GlassEvent::Transmission;
-                let image = render_camera_glass(&scene, 1, 1, seed).unwrap();
-                let rgb = xyz_to_linear_srgb(image.pixels[0]).unwrap();
+                let rgb = trace_center_pixel(&scene, seed);
                 assert!((rgb - scene.background_color * sample.weight).norm() < 1e-12);
             }
             assert!(saw_reflection);
@@ -361,14 +546,14 @@ mod tests {
         }
         let mut scene = glass_background_scene();
         scene.add_with_material(Box::new(Ground::new(1.0).unwrap()), Box::new(glass));
-        let reference = render_camera_glass(&scene, 32, 16, 42).unwrap();
+        let reference = render_camera_glass(&scene, 32, 16, 1, 42).unwrap();
         assert_eq!(
             reference.pixels,
-            render_camera_glass(&scene, 32, 16, 42).unwrap().pixels
+            render_camera_glass(&scene, 32, 16, 1, 42).unwrap().pixels
         );
         assert_ne!(
             reference.pixels,
-            render_camera_glass(&scene, 32, 16, 43).unwrap().pixels
+            render_camera_glass(&scene, 32, 16, 1, 43).unwrap().pixels
         );
     }
 
@@ -394,9 +579,7 @@ mod tests {
         );
         // 入射/出射的 eta² 权重互为倒数；内部反射后离开也应恢复背景。
         for seed in 0..64 {
-            let rgb =
-                xyz_to_linear_srgb(render_camera_glass(&scene, 1, 1, seed).unwrap().pixels[0])
-                    .unwrap();
+            let rgb = trace_center_pixel(&scene, seed);
             assert!((rgb - scene.background_color).norm() < 1e-12);
         }
     }
@@ -417,16 +600,12 @@ mod tests {
         );
         // 斜向 shadow ray 绕过有限玻璃面；概率与余弦不能再乘到吞吐量上。
         scene.light.direction = Vector3::new(0.8, 0.0, -0.6);
-        let rgb =
-            xyz_to_linear_srgb(render_camera_glass(&scene, 1, 1, 42).unwrap().pixels[0]).unwrap();
+        let rgb = trace_center_pixel(&scene, 42);
         let expected = Vector3::new(0.2, 0.5, 0.8) * (0.5 * 0.6 * 0.5 / PI);
         assert!((rgb - expected).norm() < 1e-12);
         // 向上的 shadow ray 被玻璃遮挡，仍按现有的二值硬阴影处理。
         scene.light.direction = -Vector3::z();
-        assert_eq!(
-            render_camera_glass(&scene, 1, 1, 42).unwrap().pixels,
-            vec![Vector3::zeros()]
-        );
+        assert_eq!(trace_center_pixel(&scene, 42), Vector3::zeros());
     }
 
     #[test]
@@ -451,8 +630,9 @@ mod tests {
             } else {
                 Vector3::zeros()
             };
-            let rgb = xyz_to_linear_srgb(render_camera_glass(&scene, 1, 1, 42).unwrap().pixels[0])
-                .unwrap();
+            let rgb =
+                xyz_to_linear_srgb(render_camera_glass(&scene, 1, 1, 1, 42).unwrap().pixels[0])
+                    .unwrap();
             assert!((rgb - expected).norm() < 1e-12);
         }
     }
@@ -466,7 +646,7 @@ mod tests {
                 Box::new(TestGlass(sample)),
             );
             assert_eq!(
-                render_camera_glass(&scene, 1, 1, 42).unwrap().pixels,
+                render_camera_glass(&scene, 1, 1, 1, 42).unwrap().pixels,
                 vec![Vector3::zeros()]
             );
         }
@@ -491,7 +671,7 @@ mod tests {
                 Box::new(Ground::new(1.0).unwrap()),
                 Box::new(TestGlass(Some(sample))),
             );
-            assert!(render_camera_glass(&scene, 1, 1, 42).is_err());
+            assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
         }
         let mut scene = glass_background_scene();
         for height in [1.0, 1.5] {
@@ -500,17 +680,17 @@ mod tests {
                 Box::new(TestGlass(Some(transmission(-Vector3::z(), 1.0, 1e308)))),
             );
         }
-        assert!(render_camera_glass(&scene, 1, 1, 42).is_err());
+        assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
         for (width, height) in [
             (0, 1),
             (1, 0),
             (usize::MAX, 2),
             (u32::MAX as usize, u32::MAX as usize),
         ] {
-            assert!(render_camera_glass(&scene, width, height, 42).is_err());
+            assert!(render_camera_glass(&scene, width, height, 1, 42).is_err());
         }
         scene.light.direction = Vector3::zeros();
-        assert!(render_camera_glass(&scene, 1, 1, 42).is_err());
+        assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
     }
 
     #[test]
