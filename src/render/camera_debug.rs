@@ -47,8 +47,8 @@ mod tests {
     #[test]
     fn camera_debug_visualizes_world_normals_and_preserves_background() {
         let mut config = crate::config::sceneconfig::SceneConfig::default();
-        config.camera.position = [0.0, -4.0, 2.0];
-        config.camera.target = [0.0, 0.0, 1.0];
+        config.camera.position = [0.0, -2.0, 1.2];
+        config.camera.target = [0.0, 0.0, 0.4];
         config.camera.fov_y_degrees = 90.0;
         let scene = Scene::from_config(&config).unwrap();
         let image = render_camera_debug(&scene, 5, 3).unwrap();

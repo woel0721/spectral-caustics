@@ -1765,8 +1765,8 @@ mod tests {
             },
             ..SceneConfig::default()
         };
-        // 相机从侧面看到三棱镜正下方的地面，只有向上的 shadow ray 命中玻璃。
-        config.camera.position = [3.0, 0.0, 2.0];
+        // 相机位于 3 cm 间隙内，只有向上的 shadow ray 命中玻璃。
+        config.camera.position = [1.5, 0.0, 0.02];
         config.camera.target = [0.25, 0.0, 0.0];
         config.camera.up = [0.0, 1.0, 0.0];
         config.background_linear_rgb = [0.2, 0.3, 0.4];

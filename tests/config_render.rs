@@ -514,7 +514,7 @@ fn traced_prism_caustics_light_the_geometric_glass_shadow_independently() {
     // 相机放在玻璃底面下方，以便单独检查同一地面位置的直射/焦散。
     scene.camera = spectral_caustics::camera::Camera::from_config(
         &spectral_caustics::config::cameraconfig::CameraConfig {
-            position: [p.x, p.y, 0.5],
+            position: [p.x, p.y, 0.015],
             target: [p.x, p.y, 0.0],
             up: [0.0, 1.0, 0.0],
             fov_y_degrees: 0.001,
@@ -537,7 +537,7 @@ fn json_camera_generates_rays_that_hit_the_configured_scene() {
     let mut config = small_config();
     // 这条已知主光线指向棱镜内部，独立于展示场景的新构图。
     config.scene.camera.position = [3.0, -5.0, 3.0];
-    config.scene.camera.target = [0.0, 0.0, 1.3];
+    config.scene.camera.target = [0.0, 0.0, 0.4];
     config.render.width = 5;
     config.render.height = 3;
     // JSON 往返后，由真实的 Scene 构建相机，再用主光线查询现有几何。
@@ -788,7 +788,7 @@ fn runtime_scene_builds_configured_vertices_ground_light_receiver_and_ids() {
     let ray = Ray::new(Vector3::new(1.0, 0.4, 4.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
     let hit = scene.intersect(&ray).unwrap();
     assert_eq!(hit.object_id, scene.prism_id);
-    assert!((hit.coords - Vector3::new(1.0, 0.4, 1.4)).norm() < 1e-12);
+    assert!((hit.coords - Vector3::new(1.0, 0.4, 0.43)).norm() < 1e-12);
     let outside = Ray::new(Vector3::new(-1.5, 0.0, 4.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
     assert_eq!(scene.intersect(&outside).unwrap().coords.z, -0.5);
     assert_eq!(scene.receiver.area(), 24.0);
@@ -1092,10 +1092,10 @@ fn executable_reads_json_from_argument_and_respects_output_size_mode_exposure_an
     // (1/π) × 1 × cos(0) × (π/2) = 0.5，sRGB 编码为 188。
     assert!(lit.pixels().all(|p| p.0 == [188, 0, 0]));
 
-    // 从侧面看玻璃下方的红色地面：主光线不经过玻璃，shadow ray 被玻璃挡住。
-    config.scene.camera.position = [3.0, 0.0, 2.0];
+    // 从 3 cm 间隙内看红色地面：主光线不经过玻璃，shadow ray 被玻璃挡住。
+    config.scene.camera.position = [1.5, 0.0, 0.02];
     config.scene.camera.target = [0.25, 0.0, 0.0];
-    config.scene.camera.fov_y_degrees = 1.0;
+    config.scene.camera.fov_y_degrees = 0.01;
     config.save(&path).unwrap();
     let output = run();
     assert!(output.status.success(), "{:?}", output);

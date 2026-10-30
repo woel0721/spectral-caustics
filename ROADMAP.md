@@ -398,6 +398,13 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（221 项单元测试、18 项集成测试）、严格 `cargo clippy --locked --all-targets -- -D warnings` 及 `git diff --check` 通过。release 主程序和三个相机 examples 实际运行成功，已查看 512×512、64 SPP 的 Combined 与单路径直接光调试图；16 张已有 PNG 均为 RGB8，仅五张含环境照明的相机图变化，纯 Caustics、光子图和法线调试等十一张逐字节不变。
 - **范围与限制：** 环境遮挡为二值，玻璃也遮挡；不追踪透明环境阴影、环境透射焦散或漫反射间接反弹。默认每路径 1 个环境样本，有 Monte Carlo 噪声；下一阶段可单独改善方差或实现玻璃环境透射。
 
+### V0.4 阶段 20 — 默认棱镜保留 3 cm 离地间隙
+
+- [x] 以用户指定的 3 cm 间隙为目标，将默认场景六顶点整体下移 `0.97 m`（97 cm）：底面 `z=0.03 m`，顶棱 `z=0.83 m`，棱镜形状和尺寸保持不变。配置坐标单位为米。
+- [x] 同步 JSON 与 `SceneConfig::default`，更新依赖旧棱镜高度的法线/阴影/求交测试参考位置；`Prism::new` 几何示例保留原坐标。
+- **验收：** 六顶点位移、3 cm 离地间隙及 0.8 m 截面高度核对通过；`cargo fmt`、`cargo fmt --check`、221 项单元测试、18 项集成测试、严格 `cargo clippy --locked --all-targets -- -D warnings` 和 `git diff --check` 通过。release 主程序及三个相机 examples 实际运行成功，已查看更新的 512×512、64 SPP Combined。
+- **范围与限制：** 本次仅调整配置场景位置；相机、光源、采样参数和光照模型保持原设置。下一步可按新的棱镜高度单独调整相机构图。
+
 ## 6. Codex 执行约定
 
 1. **每次只实现当前一个里程碑**，完成后总结修改文件、运行命令、测试结果和下一步；不要抢跑后续阶段。
