@@ -148,7 +148,7 @@ pub fn to_world(local: Vector3<f64>, normal: Vector3<f64>) -> Option<Vector3<f64
     world.iter().all(|value| value.is_finite()).then_some(world)
 }
 
-fn unit_vector(vector: Vector3<f64>) -> Option<Vector3<f64>> {
+pub(crate) fn unit_vector(vector: Vector3<f64>) -> Option<Vector3<f64>> {
     if !vector.iter().all(|value| value.is_finite()) {
         return None;
     }

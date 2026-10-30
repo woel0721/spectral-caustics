@@ -21,6 +21,12 @@ impl Config {
     pub fn validate(&self) -> Result<(), String> {
         self.render.validate()?;
         self.scene.validate()?;
+        self.render
+            .width
+            .checked_mul(self.render.height)
+            .and_then(|pixels| pixels.checked_mul(self.render.camera_spp))
+            .and_then(|paths| paths.checked_mul(self.scene.environment_samples))
+            .ok_or("环境方向样本总数溢出")?;
         Ok(())
     }
 
@@ -134,17 +140,12 @@ mod tests {
             legacy
         );
         json["scene"]["environment"] = serde_json::json!({
-            "sky_radiance_linear_rgb": [0.1, 0.2, 4.0],
             "horizon_linear_rgb": [0.2, 0.3, 2.0],
             "zenith_linear_rgb": [0.3, 0.4, 3.0]
         });
         let valid = Config::from_json(&json.to_string()).unwrap();
         assert_eq!(Config::from_json(&valid.to_json().unwrap()).unwrap(), valid);
-        for field in [
-            "sky_radiance_linear_rgb",
-            "horizon_linear_rgb",
-            "zenith_linear_rgb",
-        ] {
+        for field in ["horizon_linear_rgb", "zenith_linear_rgb"] {
             let mut invalid = json.clone();
             invalid["scene"]["environment"][field] = json!([-0.1, 0.0, 0.0]);
             assert!(Config::from_json(&invalid.to_string()).is_err());
@@ -153,13 +154,12 @@ mod tests {
         }
         let path = temporary_path();
         fs::write(&path, "keep").unwrap();
-        for channel in 0..3 {
+        for channel in 0..2 {
             for value in [f64::NAN, f64::INFINITY, -1.0] {
                 let mut config = valid.clone();
                 let sky = config.scene.environment.as_mut().unwrap();
                 match channel {
-                    0 => sky.sky_radiance_linear_rgb[0] = value,
-                    1 => sky.horizon_linear_rgb[0] = value,
+                    0 => sky.horizon_linear_rgb[0] = value,
                     _ => sky.zenith_linear_rgb[0] = value,
                 }
                 assert!(config.save(&path).is_err());
@@ -167,6 +167,37 @@ mod tests {
             }
         }
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn environment_sample_count_defaults_roundtrips_and_checks_total_work() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
+        json["scene"]
+            .as_object_mut()
+            .unwrap()
+            .remove("environment_samples");
+        assert_eq!(
+            Config::from_json(&json.to_string())
+                .unwrap()
+                .scene
+                .environment_samples,
+            1
+        );
+        json["scene"]["environment_samples"] = json!(7);
+        let config = Config::from_json(&json.to_string()).unwrap();
+        assert_eq!(
+            Config::from_json(&config.to_json().unwrap()).unwrap(),
+            config
+        );
+        for count in [json!(0), json!(-1), json!(1.5), json!(usize::MAX)] {
+            json["scene"]["environment_samples"] = count;
+            assert!(Config::from_json(&json.to_string()).is_err());
+        }
+        // 独立天空亮度已删除，旧参数不能被静默忽略。
+        let mut json = serde_json::to_value(&config).unwrap();
+        json["scene"]["environment"]["sky_radiance_linear_rgb"] = json!([0.1, 0.1, 0.1]);
+        assert!(Config::from_json(&json.to_string()).is_err());
     }
 
     #[test]

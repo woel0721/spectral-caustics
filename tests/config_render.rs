@@ -124,7 +124,10 @@ fn sky_from_json_is_added_once_in_all_camera_entries_without_changing_sun_or_pho
     let photons = renderer.render(&unlit).unwrap();
     // 解析太阳不能再叠加这张已包含太阳的采样直射图。
     lighting.direct.pixels.fill(Vector3::repeat(100.0));
-    config.scene.environment = Some(Default::default());
+    config.scene.environment = Some(spectral_caustics::config::sceneconfig::EnvironmentConfig {
+        horizon_linear_rgb: [0.03, 0.04, 0.06],
+        zenith_linear_rgb: [0.03, 0.04, 0.06],
+    });
     let loaded = Config::from_json(&config.to_json().unwrap()).unwrap();
     let scene = Scene::from_config(&loaded.scene).unwrap();
     assert_eq!(photons.pixels, renderer.render(&scene).unwrap().pixels);
@@ -148,7 +151,7 @@ fn sky_from_json_is_added_once_in_all_camera_entries_without_changing_sun_or_pho
             .unwrap(),
         ]
     };
-    let expected_sky = linear_srgb_to_xyz(scene.environment.unwrap().sky_radiance * 0.8).unwrap();
+    let expected_sky = linear_srgb_to_xyz(scene.environment.unwrap().horizon_color * 0.8).unwrap();
     let baseline = render_entries(&unlit);
     let with_sky = render_entries(&scene);
     for (entry, (before, after)) in baseline.iter().zip(&with_sky).enumerate() {
@@ -246,6 +249,7 @@ fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
     let combined = camera(GroundLightingComponent::Combined);
     let mut solar_scene = Scene::from_config(&config.scene).unwrap();
     solar_scene.environment = None;
+    solar_scene.environment_samples = 7;
     assert_eq!(
         caustics.pixels,
         render_camera_glass_with_lighting(
@@ -386,7 +390,10 @@ fn finite_ground_keeps_lighting_beyond_receiver_and_shows_sky_beyond_its_edge() 
         .scene
         .objects
         .retain(|object| matches!(object, ObjectConfig::Ground { .. }));
-    config.scene.environment = Some(Default::default());
+    config.scene.environment = Some(spectral_caustics::config::sceneconfig::EnvironmentConfig {
+        horizon_linear_rgb: [0.03, 0.04, 0.06],
+        zenith_linear_rgb: [0.03, 0.04, 0.06],
+    });
     config.scene.ground_checkerboard = Some(Default::default());
     config.scene.camera.up = [0.0, 1.0, 0.0];
     config.scene.camera.fov_y_degrees = 0.001;
@@ -397,7 +404,7 @@ fn finite_ground_keeps_lighting_beyond_receiver_and_shows_sky_beyond_its_edge() 
     let e_caustics = Vector3::new(0.1, 0.2, 0.4);
     lighting.caustics.pixels.fill(e_caustics);
     let environment = config.scene.environment.as_ref().unwrap();
-    let sky = linear_srgb_to_xyz(Vector3::from(environment.sky_radiance_linear_rgb) * 0.8).unwrap();
+    let sky = linear_srgb_to_xyz(Vector3::from(environment.horizon_linear_rgb) * 0.8).unwrap();
     let background = linear_srgb_to_xyz(Vector3::from(environment.horizon_linear_rgb)).unwrap();
     let sun = lighting.sun_irradiance_xyz * (lighting.light_wi.z * 0.8 / std::f64::consts::PI);
     for (x, expected_direct, expected_caustics) in [

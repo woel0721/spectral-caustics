@@ -11,6 +11,9 @@ pub struct SceneConfig {
     /// 缺省/null 保留旧常量背景且关闭天空照明；显式配置时启用天空。
     #[serde(default)]
     pub environment: Option<EnvironmentConfig>,
+    /// 每条相机路径在漫反射终点采样的环境方向数，默认 1。
+    #[serde(default = "default_environment_samples")]
+    pub environment_samples: usize,
     /// 唯一接收地面的灰度反射率纹理；省略/null 保留纯色材质。
     #[serde(default)]
     pub ground_checkerboard: Option<CheckerboardConfig>,
@@ -61,9 +64,7 @@ impl CheckerboardConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentConfig {
-    /// 用于照明的均匀上半球入射辐亮度 L_sky，不是辐照度 E。
-    pub sky_radiance_linear_rgb: [f64; 3],
-    /// 渐变只用于背景/玻璃可见性，不参与天空照明积分。
+    /// 背景和照明共用的方向相关线性 RGB 辐亮度。
     pub horizon_linear_rgb: [f64; 3],
     pub zenith_linear_rgb: [f64; 3],
 }
@@ -71,7 +72,6 @@ pub struct EnvironmentConfig {
 impl Default for EnvironmentConfig {
     fn default() -> Self {
         Self {
-            sky_radiance_linear_rgb: [0.03, 0.04, 0.06],
             horizon_linear_rgb: [0.16, 0.20, 0.28],
             zenith_linear_rgb: [0.04, 0.08, 0.18],
         }
@@ -81,9 +81,8 @@ impl Default for EnvironmentConfig {
 impl EnvironmentConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self
-            .sky_radiance_linear_rgb
+            .horizon_linear_rgb
             .iter()
-            .chain(self.horizon_linear_rgb.iter())
             .chain(self.zenith_linear_rgb.iter())
             .any(|value| !value.is_finite() || *value < 0.0)
         {
@@ -138,6 +137,7 @@ impl Default for SceneConfig {
             camera: CameraConfig::default(),
             background_linear_rgb: [0.08, 0.10, 0.14],
             environment: Some(EnvironmentConfig::default()),
+            environment_samples: default_environment_samples(),
             ground_checkerboard: Some(CheckerboardConfig::default()),
             ground_margin_m: default_ground_margin_m(),
             objects: vec![
@@ -215,6 +215,9 @@ impl SceneConfig {
         if let Some(environment) = &self.environment {
             environment.validate()?;
         }
+        if self.environment_samples == 0 {
+            return Err("scene.environment_samples 必须大于零".into());
+        }
         if let Some(checkerboard) = &self.ground_checkerboard {
             checkerboard.validate()?;
         }
@@ -266,6 +269,10 @@ impl SceneConfig {
 
 fn default_ground_margin_m() -> f64 {
     0.5
+}
+
+fn default_environment_samples() -> usize {
+    1
 }
 
 fn validate_bounds(min: [f64; 2], max: [f64; 2]) -> Result<(), &'static str> {

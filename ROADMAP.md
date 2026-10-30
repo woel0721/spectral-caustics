@@ -388,6 +388,16 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（218 项单元测试、18 项集成测试）、严格 `cargo clippy --locked --all-targets -- -D warnings` 与 `git diff --check` 通过。release 主程序及三个相机 examples 实际运行成功，已查看 512×512、64 SPP 的有限地面 Combined；纯 Caustics 与所有光源输出保持逐字节一致。
 - **范围与限制：** 地面仍是无厚度水平矩形，没有侧面、倒角或边框；下一阶段可单独增加厚度或边框。
 
+### V0.4 阶段 19 — 统一方向环境与 Monte Carlo 照明
+
+- [x] `Environment` 只保留地平线色/天顶色；`radiance(direction)` 统一方向归一化、z 渐变、HDR/非法数值保护。背景和环境积分使用同一函数，删除独立 `sky_radiance` 配置及旧解析均匀上半球近似。
+- [x] 复用 `Material::sample` / `pdf` 的 Lambertian 余弦加权半球采样，累加 `f_r * L_env(wi) * V * cos/pdf`；Lambertian 时恢复 `rho * L_env(wi) * V`。沿法线偏移并查询完整场景，被遮挡样本记零且仍计入总分母。
+- [x] `scene.environment_samples` 默认 1，控制每条相机路径的环境方向数，配合 SPP 平均；校验非零及总样本数溢出。环境 RNG 与像素/玻璃 RNG 分离，保持相同玻璃路径下 Direct + Caustics = Combined，以及固定种子可复现。
+- [x] 四个相机照明入口共用估计器；保留玻璃吞吐量、棋盘格单次调制、有限地面、解析太阳/焦散互斥分支。环境不含太阳，也不写入光子能量图。
+- **验证范围：** 背景与积分查询统一、全方向均匀环境 `rho*L`、朝上渐变解析参考 `rho*(horizon/3+2*zenith/3)`、样本数增加时 MSE 下降、半遮挡/全遮挡与分母、自遮挡偏移、HDR/非法参数、配置迁移、相机随机流独立性、分量相加及光子输出独立性。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（221 项单元测试、18 项集成测试）、严格 `cargo clippy --locked --all-targets -- -D warnings` 及 `git diff --check` 通过。release 主程序和三个相机 examples 实际运行成功，已查看 512×512、64 SPP 的 Combined 与单路径直接光调试图；16 张已有 PNG 均为 RGB8，仅五张含环境照明的相机图变化，纯 Caustics、光子图和法线调试等十一张逐字节不变。
+- **范围与限制：** 环境遮挡为二值，玻璃也遮挡；不追踪透明环境阴影、环境透射焦散或漫反射间接反弹。默认每路径 1 个环境样本，有 Monte Carlo 噪声；下一阶段可单独改善方差或实现玻璃环境透射。
+
 ## 6. Codex 执行约定
 
 1. **每次只实现当前一个里程碑**，完成后总结修改文件、运行命令、测试结果和下一步；不要抢跑后续阶段。

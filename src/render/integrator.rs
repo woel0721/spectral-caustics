@@ -10,7 +10,7 @@ use crate::{
         hit::Hit,
         ray::{INTERSECTION_EPSILON, PARALLEL_EPSILON, Ray},
     },
-    material::{BsdfValue, EvaluateMode, Material, MaterialSample},
+    material::{BsdfValue, EvaluateMode, Material, MaterialSample, unit_vector},
     scene::{GroundReceiver, Scene},
 };
 use nalgebra::{Vector2, Vector3};
@@ -18,6 +18,8 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{error::Error, f64::consts::PI, mem::size_of};
 
 const MAX_GLASS_BOUNCES: usize = 8;
+// 环境采样独立于像素抖动/玻璃事件；启停天空或切换调试分量不改变相机路径。
+const ENVIRONMENT_SEED_OFFSET: u64 = 0x9e37_79b9_7f4a_7c15;
 
 /// 调试分量；Direct 包含解析太阳、天空照明与背景，Caustics 只显示焦散。
 /// 三种模式复用相同相机 RNG/玻璃路径，Combined 为两者在线性空间中的和。
@@ -117,7 +119,8 @@ struct GroundLighting<'a> {
 /// 不做有限孔径裁切或方向投影校正；这不是绝对辐射度标定。
 /// 对有直接光贡献的命中，沿法线偏移起点后向 wi 发射 shadow ray；
 /// 平行光位于无穷远，沿途任意表面（包括玻璃）均令可见性 V = 0。
-/// 漫反射命中额外接收一次均匀天空照明，未命中查询渐变/常量背景。
+/// 漫反射命中采样方向相关环境并查询可见性；未命中查询同一环境/备用常量背景。
+/// 本调试入口的环境 RNG 固定种子 42；玻璃入口使用调用方 seed 的独立环境流。
 /// 未绑定材质的命中和理想玻璃为黑色；不追踪反射/折射或叠加地面焦散。
 /// 返回未经曝光的线性 XYZ，交给 Render::save 统一曝光和 sRGB 编码。
 pub fn render_camera_lit(
@@ -126,6 +129,7 @@ pub fn render_camera_lit(
     height: usize,
 ) -> Result<Framebuffer, Box<dyn Error>> {
     let (wi, light) = camera_lighting_setup(scene, width, height)?;
+    let mut environment_rng = StdRng::seed_from_u64(42 ^ ENVIRONMENT_SEED_OFFSET);
     let mut framebuffer = Framebuffer::new(width, height);
     for y in 0..height {
         for x in 0..width {
@@ -145,7 +149,13 @@ pub fn render_camera_lit(
                         .ground_reflectance_scale(&hit)
                         .ok_or("地面棋盘格坐标无效")?;
                     (direct_lighting(scene, &hit, material, -ray.direction, wi, light)?
-                        + environment_lighting(scene, &hit, material, -ray.direction)?)
+                        + environment_lighting(
+                            scene,
+                            &hit,
+                            material,
+                            -ray.direction,
+                            &mut environment_rng,
+                        )?)
                         * scale
                 }
             };
@@ -291,8 +301,10 @@ fn render_camera_glass_impl(
     width
         .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(spp))
+        .and_then(|paths| paths.checked_mul(scene.environment_samples))
         .ok_or("相机路径样本总数溢出")?;
     let mut rng = StdRng::seed_from_u64(seed);
+    let mut environment_rng = StdRng::seed_from_u64(seed ^ ENVIRONMENT_SEED_OFFSET);
     let mut framebuffer = Framebuffer::new(width, height);
     for y in 0..height {
         for x in 0..width {
@@ -304,8 +316,15 @@ fn render_camera_glass_impl(
                     .ray_for_pixel_sample(x, y, width, height, offset)
                     .ok_or("无法生成子像素摄像机光线")?;
                 // 先缩放每项再相加，避免有限样本之和溢出而平均值仍有限。
-                mean_rgb +=
-                    trace_camera_path(scene, ray, &mut rng, light_wi, light, ground)? / spp as f64;
+                mean_rgb += trace_camera_path(
+                    scene,
+                    ray,
+                    &mut rng,
+                    light_wi,
+                    light,
+                    ground,
+                    &mut environment_rng,
+                )? / spp as f64;
             }
             let xyz = linear_srgb_to_xyz(mean_rgb).ok_or("相机样本平均颜色非法或计算溢出")?;
             if !framebuffer.set(x, y, xyz) {
@@ -331,10 +350,11 @@ fn trace_camera_path(
     light_wi: Vector3<f64>,
     light: f64,
     ground: Option<&GroundLighting<'_>>,
+    environment_rng: &mut dyn rand::RngCore,
 ) -> Result<Vector3<f64>, Box<dyn Error>> {
     let mut throughput = 1.0;
     let mut radiance = Vector3::zeros();
-    // 天空及可见背景归入 Direct；不改 RNG，三张调试图仍共享完全相同的玻璃路径。
+    // 天空及可见背景归入 Direct；不改相机 RNG，三张调试图共享相同玻璃路径。
     let include_environment = ground
         .and_then(|g| g.sun.as_ref())
         .is_none_or(|sun| sun.component != GroundLightingComponent::Caustics);
@@ -360,7 +380,7 @@ fn trace_camera_path(
                 .ok_or("地面棋盘格坐标无效")?
         };
         let environment = if include_environment {
-            environment_lighting(scene, &hit, material, wo)?
+            environment_lighting(scene, &hit, material, wo, environment_rng)?
         } else {
             Vector3::zeros()
         };
@@ -483,6 +503,13 @@ fn camera_lighting_setup(
     width: usize,
     height: usize,
 ) -> Result<(Vector3<f64>, f64), Box<dyn Error>> {
+    if scene.environment_samples == 0 {
+        return Err("环境方向样本数必须大于零".into());
+    }
+    width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(scene.environment_samples))
+        .ok_or("环境方向样本总数溢出")?;
     if scene
         .environment
         .as_ref()
@@ -549,31 +576,53 @@ fn direct_lighting(
     Ok(direct_rgb)
 }
 
-/// 对当前 Lambertian 材质解析积分均匀上半球天空，不查询太阳或地面图。
-/// E_sky = pi * L_sky * (1+n.z)/2；水平朝上的地面 L_o = rho * L_sky。
-/// 这是无遮挡天空近似，不追踪环境阴影、玻璃透射或漫反射间接反弹。
+/// 复用材质的连续方向采样，估计 mean(f_r * L_env(wi) * V * cos / pdf)。
+/// Lambertian 余弦采样时 f_r*cos/pdf = rho；遮挡样本为零，仍计入总样本数。
+/// 仅查询环境，不包含太阳或地面光子图；玻璃也按二值环境遮挡处理。
 fn environment_lighting(
     scene: &Scene,
     hit: &Hit,
     material: &dyn Material,
     wo: Vector3<f64>,
+    rng: &mut dyn rand::RngCore,
 ) -> Result<Vector3<f64>, Box<dyn Error>> {
     let Some(environment) = &scene.environment else {
         return Ok(Vector3::zeros());
     };
-    if material.is_delta() || environment.sky_radiance == Vector3::zeros() {
+    if material.is_delta() {
         return Ok(Vector3::zeros());
     }
-    let length = hit.normal.norm();
-    if !length.is_finite() || length == 0.0 {
-        return Err("命中法线无效，无法计算天空照明".into());
+    if scene.environment_samples == 0 {
+        return Err("环境方向样本数必须大于零".into());
     }
-    let normal = hit.normal / length;
-    let BsdfValue::Rgb(f_r) = material.evaluate(normal, wo, normal, EvaluateMode::Rgb) else {
-        return Err("材质 RGB 求值必须返回 RGB BSDF".into());
-    };
-    let sky_factor = 0.5 * (1.0 + normal.z.clamp(-1.0, 1.0));
-    let rgb = (f_r * (PI * sky_factor)).component_mul(&environment.sky_radiance);
+    let normal = unit_vector(hit.normal).ok_or("环境采样的命中法线无效")?;
+    let wo = unit_vector(wo).ok_or("环境采样的出射方向无效")?;
+    let mut rgb = Vector3::zeros();
+    for _ in 0..scene.environment_samples {
+        let Some(sample) = material.sample(wo, normal, rng) else {
+            continue;
+        };
+        let MaterialSample::Continuous { wi } = sample else {
+            return Err("非 delta 材质的环境采样必须返回连续方向".into());
+        };
+        let wi = unit_vector(wi).ok_or("环境采样方向无效")?;
+        let cosine = normal.dot(&wi).clamp(0.0, 1.0);
+        let pdf = material.pdf(wi, wo, normal);
+        if !pdf.is_finite() || pdf <= 0.0 || cosine <= 0.0 {
+            return Err("环境采样 PDF 或入射半球无效".into());
+        }
+        let BsdfValue::Rgb(f_r) = material.evaluate(wi, wo, normal, EvaluateMode::Rgb) else {
+            return Err("材质 RGB 求值必须返回 RGB BSDF".into());
+        };
+        let li = environment.radiance(wi).ok_or("环境辐亮度无效")?;
+        let contribution = (f_r * (cosine / pdf)).component_mul(&li);
+        if contribution.iter().any(|value| !value.is_finite()) {
+            return Err("环境采样贡献计算溢出".into());
+        }
+        if visible_to_light(scene, hit.coords, normal, wi)? {
+            rgb += contribution / scene.environment_samples as f64;
+        }
+    }
     if !rgb.iter().all(|value| value.is_finite()) {
         return Err("天空照明颜色非法或计算溢出".into());
     }
@@ -652,52 +701,135 @@ mod tests {
         map
     }
 
+    fn estimate_environment(
+        scene: &Scene,
+        hit: &Hit,
+        material: &dyn Material,
+        wo: Vector3<f64>,
+        seed: u64,
+    ) -> Vector3<f64> {
+        environment_lighting(scene, hit, material, wo, &mut StdRng::seed_from_u64(seed)).unwrap()
+    }
+
     #[test]
-    fn uniform_upper_sky_integrates_lambertian_once_with_surface_orientation() {
-        let mut scene = ground_scene();
-        scene.environment = Scene::new().environment;
-        scene.environment.as_mut().unwrap().sky_radiance = Vector3::new(0.1, 0.2, 4.0);
-        let sky = scene.environment.unwrap().sky_radiance;
+    fn constant_environment_recovers_albedo_for_every_surface_orientation_and_sample_count() {
+        let mut scene = Scene::new();
+        let sky = Vector3::new(0.1, 0.2, 4.0);
+        scene.environment = Some(crate::scene::Environment {
+            horizon_color: sky,
+            zenith_color: sky,
+        });
         let albedo = Vector3::new(0.2, 0.5, 0.8);
         let diffuse = Lambertian::new(albedo).unwrap();
-        for (normal, fraction) in [
-            (Vector3::z(), 1.0),
-            (Vector3::x(), 0.5),
-            (-Vector3::z(), 0.0),
-            (Vector3::new(0.6, 0.0, 0.8), 0.9),
-        ] {
-            let hit = Hit {
-                normal: normal * 3.0,
-                ..Hit::default()
-            };
-            let actual = environment_lighting(&scene, &hit, &diffuse, normal).unwrap();
-            assert!((actual - albedo.component_mul(&sky) * fraction).norm() < 1e-12);
-            assert_eq!(
-                environment_lighting(&scene, &hit, &diffuse, -normal).unwrap(),
-                Vector3::zeros()
-            );
+        for samples in [1, 16, 1024] {
+            scene.environment_samples = samples;
+            for normal in [
+                Vector3::z(),
+                Vector3::x(),
+                -Vector3::z(),
+                Vector3::new(0.6, 0.0, 0.8),
+            ] {
+                let hit = Hit {
+                    normal: normal * 3.0,
+                    ..Hit::default()
+                };
+                let actual = estimate_environment(&scene, &hit, &diffuse, normal, 42);
+                assert!((actual - albedo.component_mul(&sky)).norm() < 1e-10);
+                assert_eq!(
+                    estimate_environment(&scene, &hit, &diffuse, -normal, 42),
+                    Vector3::zeros()
+                );
+                assert_eq!(
+                    estimate_environment(&scene, &hit, &TestGlass(None), normal, 42),
+                    Vector3::zeros()
+                );
+            }
         }
-        let hit = Hit {
-            normal: Vector3::z(),
-            ..Hit::default()
-        };
-        // Delta 玻璃不能被漫反射环境公式着色，也不能调用普通 evaluate。
-        assert_eq!(
-            environment_lighting(&scene, &hit, &TestGlass(None), Vector3::z()).unwrap(),
-            Vector3::zeros()
-        );
-        let expected = albedo.component_mul(&sky);
+        let environment = scene.environment;
+        let mut scene = ground_scene();
+        scene.environment = environment;
         scene.light.total_flux = 0.0;
-        for spp in [1, 8] {
-            let image = render_camera_glass(&scene, 3, 2, spp, 42).unwrap();
-            for xyz in image.pixels {
-                assert!((xyz_to_linear_srgb(xyz).unwrap() - expected).norm() < 1e-12);
+        for samples in [1, 8] {
+            scene.environment_samples = samples;
+            for spp in [1, 8] {
+                let image = render_camera_glass(&scene, 3, 2, spp, 42).unwrap();
+                for xyz in image.pixels {
+                    assert!(
+                        (xyz_to_linear_srgb(xyz).unwrap() - albedo.component_mul(&sky)).norm()
+                            < 1e-12
+                    );
+                }
             }
         }
     }
 
     #[test]
-    fn sky_fills_sun_shadows_and_glass_throughput_weights_it_once() {
+    fn gradient_environment_converges_to_the_cosine_weighted_integral() {
+        let mut scene = Scene::new(); // 空场景，所有环境方向可见。
+        let sky = scene.environment.unwrap();
+        let albedo = Vector3::new(0.2, 0.5, 0.8);
+        let material = Lambertian::new(albedo).unwrap();
+        let hit = Hit {
+            normal: Vector3::z(),
+            ..Hit::default()
+        };
+        // 余弦分布下 E[wi.z]=2/3；直接积分渐变可得到独立解析参考值。
+        let expected =
+            albedo.component_mul(&(sky.horizon_color / 3.0 + sky.zenith_color * (2.0 / 3.0)));
+        let mut errors = [0.0; 2];
+        for (index, samples) in [1, 256].into_iter().enumerate() {
+            scene.environment_samples = samples;
+            for seed in 0..64 {
+                let estimate = estimate_environment(&scene, &hit, &material, Vector3::z(), seed);
+                errors[index] += (estimate - expected).norm_squared() / 64.0;
+            }
+        }
+        assert!(errors[1] < errors[0] / 32.0, "MSE: {errors:?}");
+        scene.environment_samples = 65536;
+        let estimate = estimate_environment(&scene, &hit, &material, Vector3::z(), 42);
+        assert!((estimate - expected).norm() < 0.001);
+        assert_eq!(
+            estimate,
+            estimate_environment(&scene, &hit, &material, Vector3::z(), 42)
+        );
+    }
+
+    #[test]
+    fn environment_visibility_keeps_blocked_samples_in_the_denominator() {
+        struct HalfPlane(Ground);
+        impl Hittable for HalfPlane {
+            fn intersect(&self, ray: &Ray) -> Option<Hit> {
+                let hit = self.0.intersect(ray)?;
+                (hit.coords.y > 0.0).then_some(hit)
+            }
+        }
+        let mut scene = Scene::new();
+        let li = Vector3::new(0.25, 0.5, 1.0);
+        scene.environment = Some(crate::scene::Environment {
+            horizon_color: li,
+            zenith_color: li,
+        });
+        scene.environment_samples = 32768;
+        scene.add(Box::new(Ground::new(0.0).unwrap())); // 起点偏移必须避免地面自遮挡。
+        scene.add(Box::new(HalfPlane(Ground::new(1.0).unwrap())));
+        let albedo = Vector3::new(0.2, 0.5, 0.8);
+        let material = Lambertian::new(albedo).unwrap();
+        let hit = Hit {
+            normal: Vector3::z(),
+            ..Hit::default()
+        };
+        let actual = estimate_environment(&scene, &hit, &material, Vector3::z(), 42);
+        let expected = albedo.component_mul(&li) * 0.5;
+        assert!((actual - expected).norm() < 0.01);
+        scene.add(Box::new(Ground::new(2.0).unwrap()));
+        assert_eq!(
+            estimate_environment(&scene, &hit, &material, Vector3::z(), 42),
+            Vector3::zeros()
+        );
+    }
+
+    #[test]
+    fn opaque_visibility_blocks_sky_below_a_glass_plane() {
         let mut scene = neutral_ground_scene(0.8);
         scene.environment = Scene::new().environment;
         scene.add_with_material(
@@ -711,7 +843,7 @@ mod tests {
         let direct = render(GroundLightingComponent::Direct);
         let combined = render(GroundLightingComponent::Combined);
         assert_eq!(direct.pixels, combined.pixels);
-        let expected = scene.environment.unwrap().sky_radiance * (0.8 * 0.5);
+        let expected = Vector3::zeros(); // 向上的环境射线全部被无限玻璃面遮挡。
         for xyz in direct.pixels {
             assert!((xyz_to_linear_srgb(xyz).unwrap() - expected).norm() < 1e-12);
         }
@@ -760,9 +892,7 @@ mod tests {
         let mut lighting = split_ground_map(&scene);
         let e = Vector3::new(0.1, 0.2, 0.4);
         lighting.caustics.pixels.fill(e);
-        let expected_sky =
-            linear_srgb_to_xyz(scene.environment.unwrap().sky_radiance * (0.8 * 0.25 * 0.5))
-                .unwrap();
+        let expected_sky = Vector3::zeros(); // 二值可见性：上方玻璃面遮挡所有环境方向。
         let expected_caustics = e * (0.8 / PI * 0.25 * 0.5);
         for (component, expected) in [
             (GroundLightingComponent::Direct, expected_sky),
@@ -782,13 +912,18 @@ mod tests {
     #[test]
     fn camera_rejects_invalid_runtime_sky_parameters() {
         let mut scene = ground_scene();
-        for channel in 0..3 {
+        for samples in [0, usize::MAX] {
+            scene.environment_samples = samples;
+            assert!(render_camera_lit(&scene, 2, 1).is_err());
+            assert!(render_camera_glass(&scene, 1, 1, 2, 42).is_err());
+        }
+        scene.environment_samples = 1;
+        for channel in 0..2 {
             for value in [-1.0, f64::NAN, f64::INFINITY] {
                 scene.environment = Scene::new().environment;
                 let sky = scene.environment.as_mut().unwrap();
                 match channel {
-                    0 => sky.sky_radiance.x = value,
-                    1 => sky.horizon_color.x = value,
+                    0 => sky.horizon_color.x = value,
                     _ => sky.zenith_color.x = value,
                 }
                 assert!(render_camera_lit(&scene, 1, 1).is_err());
@@ -797,7 +932,8 @@ mod tests {
         }
         let mut scene = neutral_ground_scene(1.0);
         scene.environment = Scene::new().environment;
-        scene.environment.as_mut().unwrap().sky_radiance = Vector3::repeat(f64::MAX);
+        scene.environment.as_mut().unwrap().horizon_color = Vector3::repeat(f64::MAX);
+        scene.environment.as_mut().unwrap().zenith_color = Vector3::repeat(f64::MAX);
         // 有限 HDR 参数也可能在颜色空间变换中溢出，必须返回错误。
         assert!(render_camera_lit(&scene, 1, 1).is_err());
     }
@@ -1231,6 +1367,7 @@ mod tests {
             light_wi,
             light,
             None,
+            &mut StdRng::seed_from_u64(seed ^ ENVIRONMENT_SEED_OFFSET),
         )
         .unwrap()
     }

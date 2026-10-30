@@ -23,10 +23,10 @@
     },
     "background_linear_rgb": [0.08, 0.10, 0.14],
     "environment": {
-      "sky_radiance_linear_rgb": [0.03, 0.04, 0.06],
       "horizon_linear_rgb": [0.16, 0.20, 0.28],
       "zenith_linear_rgb": [0.04, 0.08, 0.18]
     },
+    "environment_samples": 1,
     "ground_checkerboard": {
       "cell_size_m": 0.5,
       "even_scale": 1.0,
