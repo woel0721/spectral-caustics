@@ -86,6 +86,8 @@ impl Drop for TemporaryDirectory {
 fn small_config() -> Config {
     let mut config = Config::default();
     config.scene.environment = None; // 原有太阳/光子回归测试显式关闭天空。
+    config.scene.ground_checkerboard = None;
+    config.scene.light.direction = [0.0, 0.0, -1.0];
     config.render.width = 24;
     config.render.height = 12;
     config.render.samples_per_pixel_axis = 2;
@@ -213,6 +215,7 @@ fn spectral_irradiance_flows_through_gray_ground_camera_paths_and_png_output() {
 fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
     let mut config = small_config();
     config.scene.environment = Some(Default::default());
+    config.scene.ground_checkerboard = Some(Default::default());
     let scene = Scene::from_config(&config.scene).unwrap();
     let renderer = Render::new(config.render.clone()).unwrap();
     let lighting = renderer.render_lighting(&scene).unwrap();
@@ -285,6 +288,187 @@ fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
 }
 
 #[test]
+fn checkerboard_modulates_all_camera_lighting_once_without_changing_irradiance() {
+    let mut config = small_config();
+    config.scene.environment = Some(Default::default());
+    config
+        .scene
+        .objects
+        .retain(|object| matches!(object, ObjectConfig::Ground { .. }));
+    config.scene.camera.up = [0.0, 1.0, 0.0];
+    config.scene.camera.fov_y_degrees = 0.001;
+    let renderer = Render::new(config.render.clone()).unwrap();
+    let reference = Scene::from_config(&config.scene).unwrap();
+    let photons = renderer.render(&reference).unwrap();
+    let mut lighting = renderer.render_lighting(&reference).unwrap();
+    let ground_map = Framebuffer {
+        width: 1,
+        height: 1,
+        pixels: vec![Vector3::new(0.1, 0.2, 0.4)],
+    };
+    lighting.caustics.pixels.fill(ground_map.pixels[0]);
+    let entries = |scene: &Scene| {
+        [
+            render_camera_lit(scene, 2, 2).unwrap(),
+            render_camera_glass(scene, 2, 2, 8, 42).unwrap(),
+            render_camera_glass_with_ground(scene, &ground_map, 2, 2, 8, 42).unwrap(),
+            render_camera_glass_with_lighting(
+                scene,
+                &lighting,
+                2,
+                2,
+                8,
+                42,
+                GroundLightingComponent::Direct,
+            )
+            .unwrap(),
+            render_camera_glass_with_lighting(
+                scene,
+                &lighting,
+                2,
+                2,
+                8,
+                42,
+                GroundLightingComponent::Caustics,
+            )
+            .unwrap(),
+            render_camera_glass_with_lighting(
+                scene,
+                &lighting,
+                2,
+                2,
+                8,
+                42,
+                GroundLightingComponent::Combined,
+            )
+            .unwrap(),
+        ]
+    };
+    for (x, y, scale) in [
+        (0.25, 0.25, 1.0),
+        (0.75, 0.25, 0.25),
+        (-0.25, 0.25, 0.25),
+        (-0.25, -0.25, 1.0),
+    ] {
+        config.scene.camera.position = [x, y, 2.0];
+        config.scene.camera.target = [x, y, 0.0];
+        config.scene.ground_checkerboard = None;
+        let before = entries(&Scene::from_config(&config.scene).unwrap());
+        config.scene.ground_checkerboard = Some(Default::default());
+        // 经 JSON 往返再建场景，纹理必须进入实际相机着色流程。
+        let loaded = Config::from_json(&config.to_json().unwrap()).unwrap();
+        let scene = Scene::from_config(&loaded.scene).unwrap();
+        let after = entries(&scene);
+        for (entry, (before, after)) in before.iter().zip(&after).enumerate() {
+            for (before, after) in before.pixels.iter().zip(&after.pixels) {
+                assert!(
+                    (after - before * scale).norm() < 1e-12,
+                    "entry {entry} at ({x},{y})"
+                );
+            }
+        }
+        for ((direct, caustics), combined) in after[3]
+            .pixels
+            .iter()
+            .zip(&after[4].pixels)
+            .zip(&after[5].pixels)
+        {
+            assert!((combined - direct - caustics).norm() < 1e-12);
+        }
+        assert_eq!(renderer.render(&scene).unwrap().pixels, photons.pixels);
+    }
+}
+
+#[test]
+fn finite_ground_keeps_lighting_beyond_receiver_and_shows_sky_beyond_its_edge() {
+    let mut config = small_config();
+    config
+        .scene
+        .objects
+        .retain(|object| matches!(object, ObjectConfig::Ground { .. }));
+    config.scene.environment = Some(Default::default());
+    config.scene.ground_checkerboard = Some(Default::default());
+    config.scene.camera.up = [0.0, 1.0, 0.0];
+    config.scene.camera.fov_y_degrees = 0.001;
+    let renderer = Render::new(config.render.clone()).unwrap();
+    let mut lighting = renderer
+        .render_lighting(&Scene::from_config(&config.scene).unwrap())
+        .unwrap();
+    let e_caustics = Vector3::new(0.1, 0.2, 0.4);
+    lighting.caustics.pixels.fill(e_caustics);
+    let environment = config.scene.environment.as_ref().unwrap();
+    let sky = linear_srgb_to_xyz(Vector3::from(environment.sky_radiance_linear_rgb) * 0.8).unwrap();
+    let background = linear_srgb_to_xyz(Vector3::from(environment.horizon_linear_rgb)).unwrap();
+    let sun = lighting.sun_irradiance_xyz * (lighting.light_wi.z * 0.8 / std::f64::consts::PI);
+    for (x, expected_direct, expected_caustics) in [
+        (
+            1.75,
+            (sun + sky) * 0.25,
+            e_caustics * (0.8 / std::f64::consts::PI * 0.25),
+        ),
+        (2.25, sun + sky, Vector3::zeros()),
+        (2.75, background, Vector3::zeros()),
+    ] {
+        config.scene.camera.position = [x, 0.25, 2.0];
+        config.scene.camera.target = [x, 0.25, 0.0];
+        let loaded = Config::from_json(&config.to_json().unwrap()).unwrap();
+        let scene = Scene::from_config(&loaded.scene).unwrap();
+        let ray = scene.camera.ray_for_pixel(0, 0, 1, 1).unwrap();
+        assert_eq!(scene.intersect(&ray).is_some(), x < 2.5);
+        for (component, expected) in [
+            (GroundLightingComponent::Direct, expected_direct),
+            (GroundLightingComponent::Caustics, expected_caustics),
+            (
+                GroundLightingComponent::Combined,
+                expected_direct + expected_caustics,
+            ),
+        ] {
+            let image =
+                render_camera_glass_with_lighting(&scene, &lighting, 1, 1, 8, 42, component)
+                    .unwrap();
+            assert!(
+                (image.pixels[0] - expected).norm() < 1e-12,
+                "x={x}, {component:?}"
+            );
+        }
+        if x > 2.5 {
+            for image in [
+                render_camera_lit(&scene, 1, 1).unwrap(),
+                render_camera_glass(&scene, 1, 1, 8, 42).unwrap(),
+                render_camera_glass_with_ground(&scene, &lighting.caustics, 1, 1, 8, 42).unwrap(),
+            ] {
+                assert!((image.pixels[0] - background).norm() < 1e-12);
+            }
+        }
+    }
+}
+
+#[test]
+fn ground_larger_than_receiver_preserves_photon_energy_maps() {
+    let mut config = small_config();
+    config.scene.light.direction = [0.45, 0.0, -1.0];
+    let scene = Scene::from_config(&config.scene).unwrap();
+    let mut infinite_reference = Scene::from_config(&config.scene).unwrap();
+    infinite_reference.objects[scene.ground_id.unwrap()].geometry =
+        Box::new(Ground::new(0.0).unwrap());
+    let renderer = Render::new(config.render.clone()).unwrap();
+    for mode in [IorMode::Constant, IorMode::Dispersion] {
+        assert_eq!(
+            renderer.render_mode(&scene, mode).unwrap().pixels,
+            renderer
+                .render_mode(&infinite_reference, mode)
+                .unwrap()
+                .pixels
+        );
+    }
+    let finite = renderer.render_lighting(&scene).unwrap();
+    let infinite = renderer.render_lighting(&infinite_reference).unwrap();
+    assert_eq!(finite.direct.pixels, infinite.direct.pixels);
+    assert_eq!(finite.caustics.pixels, infinite.caustics.pixels);
+    assert_eq!(finite.sun_irradiance_xyz, infinite.sun_irradiance_xyz);
+}
+
+#[test]
 fn traced_prism_caustics_light_the_geometric_glass_shadow_independently() {
     let mut config = small_config();
     config.render.width = 48;
@@ -344,6 +528,9 @@ fn traced_prism_caustics_light_the_geometric_glass_shadow_independently() {
 #[test]
 fn json_camera_generates_rays_that_hit_the_configured_scene() {
     let mut config = small_config();
+    // 这条已知主光线指向棱镜内部，独立于展示场景的新构图。
+    config.scene.camera.position = [3.0, -5.0, 3.0];
+    config.scene.camera.target = [0.0, 0.0, 1.3];
     config.render.width = 5;
     config.render.height = 3;
     // JSON 往返后，由真实的 Scene 构建相机，再用主光线查询现有几何。

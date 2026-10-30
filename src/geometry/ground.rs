@@ -1,25 +1,46 @@
-//! 无限水平地面 z = height；几何求交通过 Hittable 返回记录。
+//! 水平地面 z = height；可选择有限矩形边界，几何求交通过 Hittable 返回记录。
 
 use super::{
     hit::Hit,
     object::Hittable,
     ray::{INTERSECTION_EPSILON, PARALLEL_EPSILON, Ray},
 };
-use nalgebra::Vector3;
+use nalgebra::{Vector2, Vector3};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Ground {
     /// 地面高度，单位为米；第一周场景使用 height = 0。
     height: f64,
+    bounds: Option<(Vector2<f64>, Vector2<f64>)>,
 }
 
 impl Ground {
-    /// 创建 z = height 的地面；非有限高度返回 None。
+    /// 创建无限平面，保留几何示例/测试接口；配置场景使用 with_bounds。
     pub fn new(height: f64) -> Option<Self> {
         if !height.is_finite() {
             return None;
         }
-        Some(Self { height })
+        Some(Self {
+            height,
+            bounds: None,
+        })
+    }
+
+    /// 创建有限矩形 [min.x,max.x] × [min.y,max.y]，边缘也参与求交。
+    /// 非法高度、边界、跨度或面积返回 None。
+    pub fn with_bounds(height: f64, min: Vector2<f64>, max: Vector2<f64>) -> Option<Self> {
+        let span = max - min;
+        let area = span.x * span.y;
+        if min.iter().chain(max.iter()).any(|value| !value.is_finite())
+            || span.iter().any(|value| !value.is_finite() || *value <= 0.0)
+            || !area.is_finite()
+            || area <= 0.0
+        {
+            return None;
+        }
+        let mut ground = Self::new(height)?;
+        ground.bounds = Some((min, max));
+        Some(ground)
     }
 }
 
@@ -46,6 +67,11 @@ impl Hittable for Ground {
         if !coords.iter().all(|v| v.is_finite()) {
             return None;
         }
+        if let Some((min, max)) = self.bounds
+            && (coords.x < min.x || coords.x > max.x || coords.y < min.y || coords.y > max.y)
+        {
+            return None;
+        }
 
         // Hit 只保存数据；计算、正向命中检查和法线约定由 Ground 负责。
         Some(Hit {
@@ -63,6 +89,59 @@ mod tests {
 
     fn downward_ray(origin: Vector3<f64>) -> Ray {
         Ray::new(origin, Vector3::new(0.0, 0.0, -5.0)).unwrap()
+    }
+
+    #[test]
+    fn finite_ground_includes_edges_and_rejects_points_outside_all_four_sides() {
+        let ground =
+            Ground::with_bounds(0.0, Vector2::new(-2.5, -1.5), Vector2::new(3.0, 2.5)).unwrap();
+        for (x, y, inside) in [
+            (0.0, 0.0, true),
+            (-2.5, -1.5, true),
+            (3.0, 2.5, true),
+            (-2.5, 2.5, true),
+            (3.0, -1.5, true),
+            (-2.500001, 0.0, false),
+            (3.000001, 0.0, false),
+            (0.0, -1.500001, false),
+            (0.0, 2.500001, false),
+        ] {
+            for height in [-2.0_f64, 2.0] {
+                let ray = Ray::new(Vector3::new(x, y, height), Vector3::z() * -height).unwrap();
+                let hit = ground.intersect(&ray);
+                assert_eq!(hit.is_some(), inside, "({x},{y}), height={height}");
+                if let Some(hit) = hit {
+                    assert_eq!(hit.normal, Vector3::z());
+                    assert_eq!(hit.distance, 2.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn finite_ground_clips_the_hit_position_instead_of_the_ray_origin() {
+        let ground = Ground::with_bounds(0.0, Vector2::repeat(-1.0), Vector2::repeat(1.0)).unwrap();
+        let from_outside =
+            Ray::new(Vector3::new(2.0, 0.0, 2.0), Vector3::new(-1.0, 0.0, -1.0)).unwrap();
+        assert!(ground.intersect(&from_outside).unwrap().coords.norm() < 1e-12);
+        let towards_outside =
+            Ray::new(Vector3::new(0.0, 0.0, 2.0), Vector3::new(1.0, 0.0, -1.0)).unwrap();
+        assert!(ground.intersect(&towards_outside).is_none());
+    }
+
+    #[test]
+    fn finite_ground_rejects_invalid_bounds_and_overflow() {
+        for (min, max) in [
+            (Vector2::zeros(), Vector2::zeros()),
+            (Vector2::repeat(1.0), Vector2::repeat(-1.0)),
+            (Vector2::repeat(f64::NAN), Vector2::repeat(1.0)),
+            (Vector2::zeros(), Vector2::repeat(f64::INFINITY)),
+            (Vector2::repeat(-f64::MAX), Vector2::repeat(f64::MAX)),
+            (Vector2::zeros(), Vector2::repeat(f64::MAX)),
+        ] {
+            assert!(Ground::with_bounds(0.0, min, max).is_none());
+        }
+        assert!(Ground::with_bounds(f64::NAN, Vector2::zeros(), Vector2::repeat(1.0)).is_none());
     }
 
     #[test]

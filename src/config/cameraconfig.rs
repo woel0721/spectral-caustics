@@ -16,10 +16,10 @@ pub struct CameraConfig {
 impl Default for CameraConfig {
     fn default() -> Self {
         Self {
-            position: [3.0, -5.0, 3.0],
-            target: [0.0, 0.0, 1.3],
+            position: [2.5, -4.5, 2.6],
+            target: [0.0, 0.0, 0.9],
             up: [0.0, 0.0, 1.0],
-            fov_y_degrees: 45.0,
+            fov_y_degrees: 35.0,
         }
     }
 }

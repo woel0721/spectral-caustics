@@ -11,9 +11,50 @@ pub struct SceneConfig {
     /// 缺省/null 保留旧常量背景且关闭天空照明；显式配置时启用天空。
     #[serde(default)]
     pub environment: Option<EnvironmentConfig>,
+    /// 唯一接收地面的灰度反射率纹理；省略/null 保留纯色材质。
+    #[serde(default)]
+    pub ground_checkerboard: Option<CheckerboardConfig>,
+    /// 地面矩形相对 receiver 各边向外扩展的米数，须为正。
+    #[serde(default = "default_ground_margin_m")]
+    pub ground_margin_m: f64,
     pub objects: Vec<ObjectConfig>,
     pub light: ParallelLightConfig,
     pub receiver: GroundReceiverConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckerboardConfig {
+    /// 世界 x/y 轴上每格的边长，单位米；原点固定在 (0,0)。
+    pub cell_size_m: f64,
+    /// 两种格子相对于地面材质 albedo 的乘数，范围 [0,1]。
+    pub even_scale: f64,
+    pub odd_scale: f64,
+}
+
+impl Default for CheckerboardConfig {
+    fn default() -> Self {
+        Self {
+            cell_size_m: 0.5,
+            even_scale: 1.0,
+            odd_scale: 0.25,
+        }
+    }
+}
+
+impl CheckerboardConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.cell_size_m.is_finite() || self.cell_size_m <= 0.0 {
+            return Err("scene.ground_checkerboard.cell_size_m 必须有限且大于零".into());
+        }
+        if [self.even_scale, self.odd_scale]
+            .iter()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+        {
+            return Err("scene.ground_checkerboard 的反射率乘数必须有限且位于 [0,1]".into());
+        }
+        Ok(())
+    }
 }
 
 /// 简单天空的相对线性 RGB 参数；均不包含解析太阳或太阳光盘。
@@ -97,6 +138,8 @@ impl Default for SceneConfig {
             camera: CameraConfig::default(),
             background_linear_rgb: [0.08, 0.10, 0.14],
             environment: Some(EnvironmentConfig::default()),
+            ground_checkerboard: Some(CheckerboardConfig::default()),
+            ground_margin_m: default_ground_margin_m(),
             objects: vec![
                 ObjectConfig::Prism {
                     vertices_m: [
@@ -124,7 +167,7 @@ impl Default for ParallelLightConfig {
     fn default() -> Self {
         Self {
             height_m: 3.0,
-            direction: [0.0, 0.0, -1.0],
+            direction: [0.45, 0.0, -1.0],
             aperture_min_m: [-2.0; 2],
             aperture_max_m: [2.0; 2],
             total_flux: 8.0,
@@ -142,11 +185,38 @@ impl Default for GroundReceiverConfig {
 }
 
 impl SceneConfig {
+    /// 物理地面始终完整包住 receiver；两者都在世界 x/y 坐标中定义。
+    pub fn ground_bounds(&self) -> Result<GroundReceiverConfig, String> {
+        validate_bounds(self.receiver.min_m, self.receiver.max_m)
+            .map_err(|message| format!("scene.receiver 接收区域：{message}"))?;
+        if !self.ground_margin_m.is_finite() || self.ground_margin_m <= 0.0 {
+            return Err("scene.ground_margin_m 必须有限且大于零".into());
+        }
+        let min_m = self
+            .receiver
+            .min_m
+            .map(|value| value - self.ground_margin_m);
+        let max_m = self
+            .receiver
+            .max_m
+            .map(|value| value + self.ground_margin_m);
+        validate_bounds(min_m, max_m).map_err(|message| format!("scene 地面范围：{message}"))?;
+        if (0..2).any(|axis| {
+            min_m[axis] >= self.receiver.min_m[axis] || max_m[axis] <= self.receiver.max_m[axis]
+        }) {
+            return Err("scene.ground_margin_m 太小，无法在 f64 精度下扩展 receiver".into());
+        }
+        Ok(GroundReceiverConfig { min_m, max_m })
+    }
+
     /// 校验描述中的数值；几何拓扑和实际求交对象的构建留给运行时 Scene。
     pub fn validate(&self) -> Result<(), String> {
         self.camera.validate()?;
         if let Some(environment) = &self.environment {
             environment.validate()?;
+        }
+        if let Some(checkerboard) = &self.ground_checkerboard {
+            checkerboard.validate()?;
         }
         if self
             .background_linear_rgb
@@ -189,10 +259,13 @@ impl SceneConfig {
         }
         validate_bounds(self.light.aperture_min_m, self.light.aperture_max_m)
             .map_err(|message| format!("scene.light 发射孔径：{message}"))?;
-        validate_bounds(self.receiver.min_m, self.receiver.max_m)
-            .map_err(|message| format!("scene.receiver 接收区域：{message}"))?;
+        self.ground_bounds()?;
         Ok(())
     }
+}
+
+fn default_ground_margin_m() -> f64 {
+    0.5
 }
 
 fn validate_bounds(min: [f64; 2], max: [f64; 2]) -> Result<(), &'static str> {

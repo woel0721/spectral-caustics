@@ -141,8 +141,12 @@ pub fn render_camera_lit(
                     let Some(material) = hit.material_id.and_then(|id| scene.material(id)) else {
                         continue;
                     };
-                    direct_lighting(scene, &hit, material, -ray.direction, wi, light)?
-                        + environment_lighting(scene, &hit, material, -ray.direction)?
+                    let scale = scene
+                        .ground_reflectance_scale(&hit)
+                        .ok_or("地面棋盘格坐标无效")?;
+                    (direct_lighting(scene, &hit, material, -ray.direction, wi, light)?
+                        + environment_lighting(scene, &hit, material, -ray.direction)?)
+                        * scale
                 }
             };
             let xyz = linear_srgb_to_xyz(linear_rgb).ok_or("直接光照颜色非法或计算溢出")?;
@@ -348,6 +352,13 @@ fn trace_camera_path(
             break;
         };
         let wo = -ray.direction;
+        let reflectance_scale = if material.is_delta() {
+            1.0
+        } else {
+            scene
+                .ground_reflectance_scale(&hit)
+                .ok_or("地面棋盘格坐标无效")?
+        };
         let environment = if include_environment {
             environment_lighting(scene, &hit, material, wo)?
         } else {
@@ -369,7 +380,7 @@ fn trace_camera_path(
             // 保留超出 sRGB 色域的线性值，最终输出时才裁剪；中性反射直接缩放 XYZ。
             radiance += (xyz_to_linear_srgb(lo_xyz).ok_or("地面 XYZ 辐亮度转换失败")?
                 + environment)
-                * throughput;
+                * (reflectance_scale * throughput);
             break;
         }
         if !material.is_delta() {
@@ -381,7 +392,7 @@ fn trace_camera_path(
                     ),
                 None => direct_lighting(scene, &hit, material, wo, light_wi, light)?,
             };
-            radiance += (direct + environment) * throughput;
+            radiance += (direct + environment) * (reflectance_scale * throughput);
             break;
         }
         if bounce == MAX_GLASS_BOUNCES {
@@ -577,7 +588,7 @@ mod tests {
         config::{
             cameraconfig::CameraConfig,
             materialconfig::MaterialConfig,
-            sceneconfig::{ObjectConfig, SceneConfig},
+            sceneconfig::{ObjectConfig, ParallelLightConfig, SceneConfig},
         },
         geometry::{ground::Ground, hit::Hit, object::Hittable, prism::Prism, triangle::Triangle},
         material::{
@@ -590,6 +601,11 @@ mod tests {
     fn ground_scene() -> Scene {
         Scene::from_config(&SceneConfig {
             environment: None, // 隔离历史太阳/阴影测试的输入。
+            ground_checkerboard: None,
+            light: ParallelLightConfig {
+                direction: [0.0, 0.0, -1.0],
+                ..Default::default()
+            },
             camera: CameraConfig {
                 position: [0.0, 0.0, 2.0],
                 target: [0.0; 3],
@@ -610,6 +626,11 @@ mod tests {
     fn neutral_ground_scene(rho: f64) -> Scene {
         Scene::from_config(&SceneConfig {
             environment: None,
+            ground_checkerboard: None,
+            light: ParallelLightConfig {
+                direction: [0.0, 0.0, -1.0],
+                ..Default::default()
+            },
             camera: CameraConfig {
                 position: [0.0, 0.0, 2.0],
                 target: [0.0; 3],
@@ -721,6 +742,44 @@ mod tests {
     }
 
     #[test]
+    fn checkerboard_is_applied_once_after_glass_with_sky_and_caustics() {
+        let mut scene = neutral_ground_scene(0.8);
+        scene.environment = Scene::new().environment;
+        scene.ground_checkerboard = Scene::new().ground_checkerboard;
+        scene.camera = Camera::from_config(&CameraConfig {
+            position: [0.75, 0.25, 2.0],
+            target: [0.75, 0.25, 0.0],
+            up: [0.0, 1.0, 0.0],
+            fov_y_degrees: 0.001,
+        })
+        .unwrap();
+        scene.add_with_material(
+            Box::new(Ground::new(1.0).unwrap()),
+            Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.25, 0.5)))),
+        );
+        let mut lighting = split_ground_map(&scene);
+        let e = Vector3::new(0.1, 0.2, 0.4);
+        lighting.caustics.pixels.fill(e);
+        let expected_sky =
+            linear_srgb_to_xyz(scene.environment.unwrap().sky_radiance * (0.8 * 0.25 * 0.5))
+                .unwrap();
+        let expected_caustics = e * (0.8 / PI * 0.25 * 0.5);
+        for (component, expected) in [
+            (GroundLightingComponent::Direct, expected_sky),
+            (GroundLightingComponent::Caustics, expected_caustics),
+            (
+                GroundLightingComponent::Combined,
+                expected_sky + expected_caustics,
+            ),
+        ] {
+            let image =
+                render_camera_glass_with_lighting(&scene, &lighting, 1, 1, 8, 42, component)
+                    .unwrap();
+            assert!((image.pixels[0] - expected).norm() < 1e-12);
+        }
+    }
+
+    #[test]
     fn camera_rejects_invalid_runtime_sky_parameters() {
         let mut scene = ground_scene();
         for channel in 0..3 {
@@ -777,19 +836,19 @@ mod tests {
         lighting.direct.pixels.fill(Vector3::repeat(100.0));
         let expected = lighting.sun_irradiance_xyz * lighting.light_wi.z * (0.8 / PI);
         for x in [
-            -3.0,
+            -2.25, // 发射窗口外，但仍在有限地面内。
             -0.10000001,
             -0.09999999,
             0.0,
             0.09999999,
             0.10000001,
-            3.0,
+            2.25,
         ] {
             scene.camera = Camera::from_config(&CameraConfig {
                 position: [x, 0.0, 2.0],
                 target: [x, 0.0, 0.0],
                 up: [0.0, 1.0, 0.0],
-                fov_y_degrees: 10.0,
+                fov_y_degrees: 1.0,
             })
             .unwrap();
             for spp in [1, 8] {
@@ -1060,7 +1119,7 @@ mod tests {
         let mut scene = neutral_ground_scene(0.8);
         for (position, target) in [
             ([0.0, 0.0, -2.0], [0.0; 3]),
-            ([4.0, 0.0, 2.0], [4.0, 0.0, 0.0]),
+            ([2.25, 0.0, 2.0], [2.25, 0.0, 0.0]), // receiver 外、有限地面内。
         ] {
             scene.camera = Camera::from_config(&CameraConfig {
                 position,
@@ -1562,6 +1621,11 @@ mod tests {
     fn shadow_ray_blocks_light_through_glass_without_hiding_the_ground_from_camera() {
         let mut config = SceneConfig {
             environment: None,
+            ground_checkerboard: None,
+            light: ParallelLightConfig {
+                direction: [0.0, 0.0, -1.0],
+                ..Default::default()
+            },
             ..SceneConfig::default()
         };
         // 相机从侧面看到三棱镜正下方的地面，只有向上的 shadow ray 命中玻璃。
@@ -1635,6 +1699,11 @@ mod tests {
     fn camera_lighting_uses_nearest_material_and_linear_background() {
         let mut config = SceneConfig {
             environment: None,
+            ground_checkerboard: None,
+            light: ParallelLightConfig {
+                direction: [0.0, 0.0, -1.0],
+                ..Default::default()
+            },
             ..SceneConfig::default()
         };
         config.camera.position = [0.0, -4.0, 2.0];

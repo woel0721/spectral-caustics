@@ -2,7 +2,7 @@
 
 use crate::{
     camera::Camera,
-    config::sceneconfig::{EnvironmentConfig, ObjectConfig, SceneConfig},
+    config::sceneconfig::{CheckerboardConfig, EnvironmentConfig, ObjectConfig, SceneConfig},
     geometry::{
         ground::Ground,
         hit::Hit,
@@ -35,6 +35,8 @@ pub struct Scene {
     pub background_color: Vector3<f64>,
     /// 独立于太阳的天空参数；None 使用原常量背景且没有环境照明。
     pub environment: Option<Environment>,
+    /// 只调制唯一接收地面的漫反射率，光源辐照度图保持独立。
+    pub ground_checkerboard: Option<Checkerboard>,
     /// 每项绑定一个几何和可选材质编号，查询期间不能重排集合。
     pub objects: Vec<SceneObject>,
     /// 场景拥有材质，Hit.material_id 只保存本表的下标。
@@ -44,6 +46,52 @@ pub struct Scene {
     /// 配置构建时记录的物体编号，手动 add 的场景也可显式传编号给追踪入口。
     pub prism_id: Option<usize>,
     pub ground_id: Option<usize>,
+}
+
+/// 世界 x/y 坐标中的程序化灰度棋盘格，输出地面 albedo 的乘数。
+#[derive(Debug, Clone, Copy)]
+pub struct Checkerboard {
+    cell_size_m: f64,
+    even_scale: f64,
+    odd_scale: f64,
+}
+
+impl TryFrom<&CheckerboardConfig> for Checkerboard {
+    type Error = String;
+
+    fn try_from(config: &CheckerboardConfig) -> Result<Self, Self::Error> {
+        config.validate()?;
+        Ok(Self {
+            cell_size_m: config.cell_size_m,
+            even_scale: config.even_scale,
+            odd_scale: config.odd_scale,
+        })
+    }
+}
+
+impl Checkerboard {
+    /// 每格为 [i*s,(i+1)*s)，负坐标同样向下取整；不使用会饱和的整数转换。
+    /// 拒绝非法坐标、除法溢出或超出 f64 整数奇偶可分辨范围的格子。
+    pub fn scale_at(&self, position: Vector3<f64>) -> Option<f64> {
+        if !position.iter().all(|value| value.is_finite()) {
+            return None;
+        }
+        let x = (position.x / self.cell_size_m).floor();
+        let y = (position.y / self.cell_size_m).floor();
+        const MAX_EXACT_CELL: f64 = (1_u64 << 53) as f64;
+        if !x.is_finite()
+            || !y.is_finite()
+            || x.abs() >= MAX_EXACT_CELL
+            || y.abs() >= MAX_EXACT_CELL
+        {
+            return None;
+        }
+        Some(if x.rem_euclid(2.0) == y.rem_euclid(2.0) {
+            self.even_scale
+        } else {
+            self.odd_scale
+        })
+    }
 }
 
 /// 用于漫反射照明的均匀上半球天空，以及用于相机可见性的渐变背景。
@@ -157,11 +205,19 @@ impl Scene {
             camera: Camera::from_config(&config.camera).expect("内置默认相机参数必须有效"),
             background_color: Vector3::from(config.background_linear_rgb),
             environment: config.environment.as_ref().map(Environment::from),
+            ground_checkerboard: config
+                .ground_checkerboard
+                .as_ref()
+                .map(Checkerboard::try_from)
+                .transpose()
+                .expect("内置默认棋盘格参数必须有效"),
             objects: Vec::new(),
             materials: Vec::new(),
             light: ParallelLight {
                 height_m: config.light.height_m,
-                direction: Vector3::from(config.light.direction),
+                direction: Ray::new(Vector3::zeros(), Vector3::from(config.light.direction))
+                    .expect("内置默认光源方向必须有效")
+                    .direction,
                 aperture_min_m: Vector2::from(config.light.aperture_min_m),
                 aperture_max_m: Vector2::from(config.light.aperture_max_m),
                 total_flux: config.light.total_flux,
@@ -182,6 +238,11 @@ impl Scene {
         scene.camera = Camera::from_config(&config.camera)?;
         scene.background_color = Vector3::from(config.background_linear_rgb);
         scene.environment = config.environment.as_ref().map(Environment::from);
+        scene.ground_checkerboard = config
+            .ground_checkerboard
+            .as_ref()
+            .map(Checkerboard::try_from)
+            .transpose()?;
         scene.light = ParallelLight {
             height_m: config.light.height_m,
             direction: Ray::new(Vector3::zeros(), Vector3::from(config.light.direction))
@@ -195,6 +256,7 @@ impl Scene {
             min_m: Vector2::from(config.receiver.min_m),
             max_m: Vector2::from(config.receiver.max_m),
         };
+        let ground_bounds = config.ground_bounds()?;
         for object in &config.objects {
             match object {
                 ObjectConfig::Prism {
@@ -217,10 +279,19 @@ impl Scene {
                     if *height_m >= config.light.height_m {
                         return Err("光源发射面必须高于接收地面".into());
                     }
-                    scene.ground_id = Some(scene.add_with_material(
-                        Box::new(Ground::new(*height_m).ok_or("地面高度无效")?),
-                        material::from_config(material)?,
-                    ));
+                    scene.ground_id = Some(
+                        scene.add_with_material(
+                            Box::new(
+                                Ground::with_bounds(
+                                    *height_m,
+                                    Vector2::from(ground_bounds.min_m),
+                                    Vector2::from(ground_bounds.max_m),
+                                )
+                                .ok_or("地面高度或范围无效")?,
+                            ),
+                            material::from_config(material)?,
+                        ),
+                    );
                 }
             }
         }
@@ -256,6 +327,17 @@ impl Scene {
     /// 通过 Hit.material_id 查询配置构建的运行时材质；非法编号返回 None。
     pub fn material(&self, material_id: usize) -> Option<&dyn Material> {
         self.materials.get(material_id).map(Box::as_ref)
+    }
+
+    /// 在相机的漫反射终点调用；反射率调制与光照线性等价，不能写回入射 E 图。
+    pub fn ground_reflectance_scale(&self, hit: &Hit) -> Option<f64> {
+        if self.ground_id.is_some()
+            && hit.object_id == self.ground_id
+            && let Some(checkerboard) = &self.ground_checkerboard
+        {
+            return checkerboard.scale_at(hit.coords);
+        }
+        Some(1.0)
     }
 
     /// 使用当前射线方向查询天空；关闭天空时回退到旧常量背景。
@@ -415,6 +497,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn checkerboard_uses_world_xy_floor_for_both_sides_of_the_origin() {
+        let checkerboard = Checkerboard::try_from(&CheckerboardConfig::default()).unwrap();
+        for (x, y, expected) in [
+            (0.25, 0.25, 1.0),
+            (0.75, 0.25, 0.25),
+            (0.75, 0.75, 1.0),
+            (-0.25, 0.25, 0.25),
+            (-0.25, -0.25, 1.0),
+            (0.5, 0.25, 0.25),
+            (-0.5, 0.25, 0.25),
+            (-0.500000001, 0.25, 1.0),
+        ] {
+            assert_eq!(
+                checkerboard.scale_at(Vector3::new(x, y, 2.0)),
+                Some(expected)
+            );
+        }
+        for position in [
+            Vector3::repeat(f64::NAN),
+            Vector3::repeat(f64::INFINITY),
+            Vector3::repeat(f64::MAX),
+            Vector3::new((1_u64 << 53) as f64, 0.0, 0.0),
+        ] {
+            assert!(checkerboard.scale_at(position).is_none());
+        }
+        let tiny = Checkerboard::try_from(&CheckerboardConfig {
+            cell_size_m: f64::MIN_POSITIVE,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(tiny.scale_at(Vector3::new(f64::MAX, 0.0, 0.0)).is_none());
+    }
+
+    #[test]
+    fn checkerboard_only_modulates_the_bound_ground() {
+        let mut scene = Scene::from_config(&SceneConfig::default()).unwrap();
+        let mut hit = Hit {
+            coords: Vector3::new(0.75, 0.25, 0.0),
+            object_id: scene.ground_id,
+            ..Hit::default()
+        };
+        assert_eq!(scene.ground_reflectance_scale(&hit), Some(0.25));
+        for object_id in [scene.prism_id, None, Some(999)] {
+            hit.object_id = object_id;
+            assert_eq!(scene.ground_reflectance_scale(&hit), Some(1.0));
+        }
+        hit.object_id = scene.ground_id;
+        scene.ground_checkerboard = None;
+        assert_eq!(scene.ground_reflectance_scale(&hit), Some(1.0));
+    }
+
+    #[test]
     fn sky_gradient_uses_world_z_and_keeps_hdr_and_legacy_background() {
         let mut scene = Scene::new();
         let sky = scene.environment.as_mut().unwrap();
@@ -454,6 +588,7 @@ mod tests {
     #[test]
     fn sunlight_uses_projected_window_area_and_rejects_degenerate_inputs() {
         let mut light = Scene::new().light;
+        light.direction = -Vector3::z();
         assert_eq!(light.sunlight(), Some((Vector3::z(), 0.5)));
         light.direction = Vector3::new(-3.0, 0.0, -4.0);
         let (wi, strength) = light.sunlight().unwrap();

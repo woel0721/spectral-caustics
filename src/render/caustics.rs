@@ -581,6 +581,13 @@ mod tests {
     const SAMPLING_SEED: u64 = 42;
     const MAX_SPECTRAL_BLOCKS: usize = 16;
 
+    // 这些能量/落点参考值使用垂直光源，独立于展示场景的默认斜射光。
+    fn vertical_light_scene() -> Scene {
+        let mut scene = Scene::new();
+        scene.light.direction = -Vector3::z();
+        scene
+    }
+
     fn settings_for_size(width: usize, height: usize) -> RenderSetting {
         RenderSetting {
             width,
@@ -634,7 +641,7 @@ mod tests {
     fn split_lighting_recombines_legacy_and_traces_each_photon_only_once() {
         for with_prism in [false, true] {
             let calls = Arc::new(AtomicUsize::new(0));
-            let mut scene = Scene::new();
+            let mut scene = vertical_light_scene();
             let prism_id = with_prism.then(|| scene.add(Box::new(Prism::new().unwrap())));
             let ground_id = scene.add(Box::new(CountedGround {
                 ground: Ground::new(0.0).unwrap(),
@@ -933,7 +940,7 @@ mod tests {
         let white_xyz = Vector3::new(0.9501416822353593, 1.0, 1.087976622255359);
         for (width, height) in [(1, 1), (1, 4), (4, 1), (12, 8)] {
             let settings = settings_for_size(width, height);
-            let mut scene = Scene::new();
+            let mut scene = vertical_light_scene();
             let prism_id = scene.add(Box::new(Prism::new().unwrap()));
             // 测试地面在三棱镜上方、光源下方，所有光线直接落地。
             let ground_id = scene.add(Box::new(Ground::new(2.0).unwrap()));
@@ -1226,7 +1233,7 @@ mod tests {
     #[test]
     fn unblocked_ground_preserves_total_energy_and_more_samples_reduce_noise() {
         let settings = settings_for_size(32, 16);
-        let mut scene = Scene::new();
+        let mut scene = vertical_light_scene();
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         let coarse = render_ground_hits(
             &scene,
@@ -1306,7 +1313,7 @@ mod tests {
     #[test]
     fn prism_shadow_has_bilinear_edges_and_preserves_flux_in_either_object_order() {
         let settings = settings_for_size(16, 8);
-        let mut reference_scene = Scene::new();
+        let mut reference_scene = vertical_light_scene();
         let reference_ground_id = reference_scene.add(Box::new(Ground::new(0.0).unwrap()));
         let reference = render_ground_hits(
             &reference_scene,
@@ -1316,7 +1323,7 @@ mod tests {
         .unwrap();
         let mut previous_image = None;
         for ground_first in [false, true] {
-            let mut scene = Scene::new();
+            let mut scene = vertical_light_scene();
             if !ground_first {
                 scene.add(Box::new(Prism::new().unwrap()));
             }
@@ -1400,7 +1407,7 @@ mod tests {
         use std::cell::Cell;
 
         let settings = settings_for_size(16, 8);
-        let mut scene = Scene::new();
+        let mut scene = vertical_light_scene();
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         let white_xyz = Vector3::new(0.3127 / 0.3290, 1.0, (1.0 - 0.3127 - 0.3290) / 0.3290);
         let expected = white_xyz * (0.5 * (settings.width * settings.height) as f64);
@@ -1712,7 +1719,7 @@ mod tests {
     #[test]
     fn ground_hit_png_contains_gray_ground_and_black_shadow() -> Result<(), Box<dyn Error>> {
         let settings = settings_for_size(32, 16);
-        let mut scene = Scene::new();
+        let mut scene = vertical_light_scene();
         scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         let framebuffer = render_ground_hits(
@@ -1802,7 +1809,7 @@ mod tests {
     fn refracted_png_preserves_grayscale_and_contains_brighter_landing_regions()
     -> Result<(), Box<dyn Error>> {
         let settings = settings_for_size(64, 32);
-        let mut scene = Scene::new();
+        let mut scene = vertical_light_scene();
         let prism_id = scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         let [framebuffer] = render_refracted_ground_hits(

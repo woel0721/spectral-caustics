@@ -170,6 +170,86 @@ mod tests {
     }
 
     #[test]
+    fn ground_checkerboard_roundtrips_and_validates_parameters() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
+        json["scene"]
+            .as_object_mut()
+            .unwrap()
+            .remove("ground_checkerboard");
+        let legacy = Config::from_json(&json.to_string()).unwrap();
+        assert!(legacy.scene.ground_checkerboard.is_none());
+        assert_eq!(
+            Config::from_json(&legacy.to_json().unwrap()).unwrap(),
+            legacy
+        );
+        let mut config = Config::default();
+        let checkerboard = config.scene.ground_checkerboard.as_mut().unwrap();
+        checkerboard.cell_size_m = 0.75;
+        checkerboard.even_scale = 0.0;
+        checkerboard.odd_scale = 1.0;
+        assert_eq!(
+            Config::from_json(&config.to_json().unwrap()).unwrap(),
+            config
+        );
+        for (field, value) in [
+            ("cell_size_m", 0.0),
+            ("cell_size_m", -0.5),
+            ("even_scale", -0.1),
+            ("even_scale", 1.01),
+            ("odd_scale", -0.1),
+            ("odd_scale", 1.01),
+        ] {
+            let mut invalid = serde_json::to_value(&config).unwrap();
+            invalid["scene"]["ground_checkerboard"][field] = json!(value);
+            assert!(Config::from_json(&invalid.to_string()).is_err());
+        }
+        for field in 0..3 {
+            for value in [f64::NAN, f64::INFINITY] {
+                let mut invalid = config.clone();
+                let checkerboard = invalid.scene.ground_checkerboard.as_mut().unwrap();
+                match field {
+                    0 => checkerboard.cell_size_m = value,
+                    1 => checkerboard.even_scale = value,
+                    _ => checkerboard.odd_scale = value,
+                }
+                assert!(invalid.to_json().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn ground_margin_defaults_and_expands_receiver_with_valid_finite_bounds() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
+        json["scene"]
+            .as_object_mut()
+            .unwrap()
+            .remove("ground_margin_m");
+        let mut config = Config::from_json(&json.to_string()).unwrap();
+        assert_eq!(config.scene.ground_margin_m, 0.5);
+        config.scene.receiver.min_m = [-3.0, -1.0];
+        config.scene.receiver.max_m = [2.0, 4.0];
+        config.scene.ground_margin_m = 0.75;
+        let bounds = config.scene.ground_bounds().unwrap();
+        assert_eq!(bounds.min_m, [-3.75, -1.75]);
+        assert_eq!(bounds.max_m, [2.75, 4.75]);
+        assert_eq!(
+            Config::from_json(&config.to_json().unwrap()).unwrap(),
+            config
+        );
+        for margin in [0.0, -0.5, f64::NAN, f64::INFINITY, f64::MAX] {
+            config.scene.ground_margin_m = margin;
+            assert!(config.validate().is_err());
+            assert!(config.to_json().is_err());
+        }
+        config.scene.ground_margin_m = 0.5;
+        config.scene.receiver.min_m = [1e16, 0.0];
+        config.scene.receiver.max_m = [1e16 + 4.0, 1.0];
+        assert!(config.validate().is_err()); // 0.5 无法在该量级产生可表示的外扩。
+    }
+
+    #[test]
     fn finite_geometry_coordinates_roundtrip_without_losing_f64_bits() {
         let mut config = Config::default();
         for height_m in [
@@ -386,11 +466,11 @@ mod tests {
         let original: serde_json::Value =
             serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
         for (field, value) in [
-            ("position", json!([0.0, 0.0, 1.3])), // position == target。
-            ("position", json!([1e308, 1e308, 1e308])), // 模长溢出。
-            ("target", json!([3.0, -5.0, 3.0])),
+            ("position", original["scene"]["camera"]["target"].clone()), // position == target。
+            ("position", json!([1e308, 1e308, 1e308])),                  // 模长溢出。
+            ("target", original["scene"]["camera"]["position"].clone()),
             ("up", json!([0.0, 0.0, 0.0])),
-            ("up", json!([-3.0, 5.0, -1.7])), // up 平行于观察方向。
+            ("up", json!([-2.5, 4.5, -1.7])), // up 平行于观察方向。
             ("position", json!([0.0, 0.0])),
             ("target", json!("origin")),
             ("fov_y_degrees", json!(0.0)),
