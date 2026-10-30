@@ -8,9 +8,48 @@ use serde::{Deserialize, Serialize};
 pub struct SceneConfig {
     pub camera: CameraConfig,
     pub background_linear_rgb: [f64; 3],
+    /// 缺省/null 保留旧常量背景且关闭天空照明；显式配置时启用天空。
+    #[serde(default)]
+    pub environment: Option<EnvironmentConfig>,
     pub objects: Vec<ObjectConfig>,
     pub light: ParallelLightConfig,
     pub receiver: GroundReceiverConfig,
+}
+
+/// 简单天空的相对线性 RGB 参数；均不包含解析太阳或太阳光盘。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentConfig {
+    /// 用于照明的均匀上半球入射辐亮度 L_sky，不是辐照度 E。
+    pub sky_radiance_linear_rgb: [f64; 3],
+    /// 渐变只用于背景/玻璃可见性，不参与天空照明积分。
+    pub horizon_linear_rgb: [f64; 3],
+    pub zenith_linear_rgb: [f64; 3],
+}
+
+impl Default for EnvironmentConfig {
+    fn default() -> Self {
+        Self {
+            sky_radiance_linear_rgb: [0.03, 0.04, 0.06],
+            horizon_linear_rgb: [0.16, 0.20, 0.28],
+            zenith_linear_rgb: [0.04, 0.08, 0.18],
+        }
+    }
+}
+
+impl EnvironmentConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self
+            .sky_radiance_linear_rgb
+            .iter()
+            .chain(self.horizon_linear_rgb.iter())
+            .chain(self.zenith_linear_rgb.iter())
+            .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return Err("scene.environment 的天空辐亮度和背景颜色必须有限且非负".into());
+        }
+        Ok(())
+    }
 }
 
 /// 这里只描述物体类型和原始参数，不包含求交函数、法线缓存或 trait object。
@@ -57,6 +96,7 @@ impl Default for SceneConfig {
         Self {
             camera: CameraConfig::default(),
             background_linear_rgb: [0.08, 0.10, 0.14],
+            environment: Some(EnvironmentConfig::default()),
             objects: vec![
                 ObjectConfig::Prism {
                     vertices_m: [
@@ -105,6 +145,9 @@ impl SceneConfig {
     /// 校验描述中的数值；几何拓扑和实际求交对象的构建留给运行时 Scene。
     pub fn validate(&self) -> Result<(), String> {
         self.camera.validate()?;
+        if let Some(environment) = &self.environment {
+            environment.validate()?;
+        }
         if self
             .background_linear_rgb
             .iter()

@@ -15,6 +15,7 @@ use spectral_caustics::{
     render::{
         GroundLightingComponent, Render, caustics::ground_to_pixel, framebuffer::Framebuffer,
         render_camera_glass, render_camera_glass_with_ground, render_camera_glass_with_lighting,
+        render_camera_lit, utils::linear_srgb_to_xyz,
     },
     scene::Scene,
 };
@@ -84,6 +85,7 @@ impl Drop for TemporaryDirectory {
 
 fn small_config() -> Config {
     let mut config = Config::default();
+    config.scene.environment = None; // 原有太阳/光子回归测试显式关闭天空。
     config.render.width = 24;
     config.render.height = 12;
     config.render.samples_per_pixel_axis = 2;
@@ -101,6 +103,66 @@ fn render(config: &Config) -> Framebuffer {
 
 fn total_y(image: &Framebuffer) -> f64 {
     image.pixels.iter().map(|v| v.y).sum()
+}
+
+#[test]
+fn sky_from_json_is_added_once_in_all_camera_entries_without_changing_sun_or_photons() {
+    let mut config = small_config();
+    config
+        .scene
+        .objects
+        .retain(|object| matches!(object, ObjectConfig::Ground { .. }));
+    config.scene.camera.position = [0.0, 0.0, 2.0];
+    config.scene.camera.target = [0.0; 3];
+    config.scene.camera.up = [0.0, 1.0, 0.0];
+    config.scene.light.direction = [-3.0, 0.0, -4.0];
+    let renderer = Render::new(config.render.clone()).unwrap();
+    let unlit = Scene::from_config(&config.scene).unwrap();
+    let mut lighting = renderer.render_lighting(&unlit).unwrap();
+    let photons = renderer.render(&unlit).unwrap();
+    // 解析太阳不能再叠加这张已包含太阳的采样直射图。
+    lighting.direct.pixels.fill(Vector3::repeat(100.0));
+    config.scene.environment = Some(Default::default());
+    let loaded = Config::from_json(&config.to_json().unwrap()).unwrap();
+    let scene = Scene::from_config(&loaded.scene).unwrap();
+    assert_eq!(photons.pixels, renderer.render(&scene).unwrap().pixels);
+    let sky_lighting = renderer.render_lighting(&scene).unwrap();
+    assert_eq!(sky_lighting.sun_irradiance_xyz, lighting.sun_irradiance_xyz);
+    assert_eq!(sky_lighting.caustics.pixels, lighting.caustics.pixels);
+    let render_entries = |scene: &Scene| {
+        [
+            render_camera_lit(scene, 3, 2).unwrap(),
+            render_camera_glass(scene, 3, 2, 8, 42).unwrap(),
+            render_camera_glass_with_ground(scene, &photons, 3, 2, 8, 42).unwrap(),
+            render_camera_glass_with_lighting(
+                scene,
+                &lighting,
+                3,
+                2,
+                8,
+                42,
+                GroundLightingComponent::Combined,
+            )
+            .unwrap(),
+        ]
+    };
+    let expected_sky = linear_srgb_to_xyz(scene.environment.unwrap().sky_radiance * 0.8).unwrap();
+    let baseline = render_entries(&unlit);
+    let with_sky = render_entries(&scene);
+    for (entry, (before, after)) in baseline.iter().zip(&with_sky).enumerate() {
+        for (before, after) in before.pixels.iter().zip(&after.pixels) {
+            assert!(
+                (after - before - expected_sky).norm() < 1e-12,
+                "entry {entry}"
+            );
+        }
+    }
+    let expected_combined =
+        lighting.sun_irradiance_xyz * lighting.light_wi.z * (0.8 / std::f64::consts::PI)
+            + expected_sky;
+    for xyz in &with_sky[3].pixels {
+        assert!((xyz - expected_combined).norm() < 1e-12);
+    }
 }
 
 #[test]
@@ -149,7 +211,8 @@ fn spectral_irradiance_flows_through_gray_ground_camera_paths_and_png_output() {
 
 #[test]
 fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
-    let config = small_config();
+    let mut config = small_config();
+    config.scene.environment = Some(Default::default());
     let scene = Scene::from_config(&config.scene).unwrap();
     let renderer = Render::new(config.render.clone()).unwrap();
     let lighting = renderer.render_lighting(&scene).unwrap();
@@ -178,6 +241,22 @@ fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
     let direct = camera(GroundLightingComponent::Direct);
     let caustics = camera(GroundLightingComponent::Caustics);
     let combined = camera(GroundLightingComponent::Combined);
+    let mut solar_scene = Scene::from_config(&config.scene).unwrap();
+    solar_scene.environment = None;
+    assert_eq!(
+        caustics.pixels,
+        render_camera_glass_with_lighting(
+            &solar_scene,
+            &lighting,
+            24,
+            16,
+            16,
+            config.render.seed,
+            GroundLightingComponent::Caustics,
+        )
+        .unwrap()
+        .pixels
+    );
     assert_eq!(
         combined.pixels,
         camera(GroundLightingComponent::Combined).pixels

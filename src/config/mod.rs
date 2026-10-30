@@ -123,6 +123,53 @@ mod tests {
     }
 
     #[test]
+    fn environment_is_optional_and_rejects_invalid_colors_without_writing() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
+        json["scene"].as_object_mut().unwrap().remove("environment");
+        let legacy = Config::from_json(&json.to_string()).unwrap();
+        assert!(legacy.scene.environment.is_none());
+        assert_eq!(
+            Config::from_json(&legacy.to_json().unwrap()).unwrap(),
+            legacy
+        );
+        json["scene"]["environment"] = serde_json::json!({
+            "sky_radiance_linear_rgb": [0.1, 0.2, 4.0],
+            "horizon_linear_rgb": [0.2, 0.3, 2.0],
+            "zenith_linear_rgb": [0.3, 0.4, 3.0]
+        });
+        let valid = Config::from_json(&json.to_string()).unwrap();
+        assert_eq!(Config::from_json(&valid.to_json().unwrap()).unwrap(), valid);
+        for field in [
+            "sky_radiance_linear_rgb",
+            "horizon_linear_rgb",
+            "zenith_linear_rgb",
+        ] {
+            let mut invalid = json.clone();
+            invalid["scene"]["environment"][field] = json!([-0.1, 0.0, 0.0]);
+            assert!(Config::from_json(&invalid.to_string()).is_err());
+            invalid["scene"]["environment"][field] = json!([0.0, 0.0]);
+            assert!(Config::from_json(&invalid.to_string()).is_err());
+        }
+        let path = temporary_path();
+        fs::write(&path, "keep").unwrap();
+        for channel in 0..3 {
+            for value in [f64::NAN, f64::INFINITY, -1.0] {
+                let mut config = valid.clone();
+                let sky = config.scene.environment.as_mut().unwrap();
+                match channel {
+                    0 => sky.sky_radiance_linear_rgb[0] = value,
+                    1 => sky.horizon_linear_rgb[0] = value,
+                    _ => sky.zenith_linear_rgb[0] = value,
+                }
+                assert!(config.save(&path).is_err());
+                assert_eq!(fs::read_to_string(&path).unwrap(), "keep");
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn finite_geometry_coordinates_roundtrip_without_losing_f64_bits() {
         let mut config = Config::default();
         for height_m in [

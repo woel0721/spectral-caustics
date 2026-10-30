@@ -2,7 +2,7 @@
 
 use crate::{
     camera::Camera,
-    config::sceneconfig::{ObjectConfig, SceneConfig},
+    config::sceneconfig::{EnvironmentConfig, ObjectConfig, SceneConfig},
     geometry::{
         ground::Ground,
         hit::Hit,
@@ -31,8 +31,10 @@ impl SceneObject {
 pub struct Scene {
     /// 相机法线调试与直接光照使用的主光线相机；地面焦散仍从光源发射光线。
     pub camera: Camera,
-    /// 相机光照使用的线性 RGB 背景色，写入 XYZ Framebuffer 前转换颜色空间。
+    /// 关闭天空时使用的线性 RGB 常量背景色，写入 Framebuffer 前转换为 XYZ。
     pub background_color: Vector3<f64>,
+    /// 独立于太阳的天空参数；None 使用原常量背景且没有环境照明。
+    pub environment: Option<Environment>,
     /// 每项绑定一个几何和可选材质编号，查询期间不能重排集合。
     pub objects: Vec<SceneObject>,
     /// 场景拥有材质，Hit.material_id 只保存本表的下标。
@@ -42,6 +44,47 @@ pub struct Scene {
     /// 配置构建时记录的物体编号，手动 add 的场景也可显式传编号给追踪入口。
     pub prism_id: Option<usize>,
     pub ground_id: Option<usize>,
+}
+
+/// 用于漫反射照明的均匀上半球天空，以及用于相机可见性的渐变背景。
+/// 全部为相对线性 RGB 辐亮度，不含太阳直射，不修改已有材质的 albedo。
+#[derive(Debug, Clone, Copy)]
+pub struct Environment {
+    pub sky_radiance: Vector3<f64>,
+    pub horizon_color: Vector3<f64>,
+    pub zenith_color: Vector3<f64>,
+}
+
+impl From<&EnvironmentConfig> for Environment {
+    fn from(config: &EnvironmentConfig) -> Self {
+        Self {
+            sky_radiance: Vector3::from(config.sky_radiance_linear_rgb),
+            horizon_color: Vector3::from(config.horizon_linear_rgb),
+            zenith_color: Vector3::from(config.zenith_linear_rgb),
+        }
+    }
+}
+
+impl Environment {
+    pub fn is_valid(&self) -> bool {
+        self.sky_radiance
+            .iter()
+            .chain(self.horizon_color.iter())
+            .chain(self.zenith_color.iter())
+            .all(|value| value.is_finite() && *value >= 0.0)
+    }
+
+    /// z 为世界上方向；地平线及其下方使用 horizon，天顶使用 zenith。
+    /// 这里只求可见背景，不加太阳光盘或太阳直射项。
+    pub fn background_radiance(&self, direction: Vector3<f64>) -> Option<Vector3<f64>> {
+        let length = direction.norm();
+        if !self.is_valid() || !length.is_finite() || length == 0.0 {
+            return None;
+        }
+        let t = (direction.z / length).clamp(0.0, 1.0);
+        let rgb = self.horizon_color * (1.0 - t) + self.zenith_color * t;
+        rgb.iter().all(|value| value.is_finite()).then_some(rgb)
+    }
 }
 
 /// 平行太阳光；水平窗口仅用于有限数量的光子采样，不裁切解析直射光。
@@ -107,12 +150,13 @@ impl Default for Scene {
 }
 
 impl Scene {
-    /// 创建空场景，使用默认配置中的相机与线性 RGB 背景。
+    /// 创建空场景，使用默认配置中的相机、天空与备用常量背景。
     pub fn new() -> Self {
         let config = SceneConfig::default();
         Self {
             camera: Camera::from_config(&config.camera).expect("内置默认相机参数必须有效"),
             background_color: Vector3::from(config.background_linear_rgb),
+            environment: config.environment.as_ref().map(Environment::from),
             objects: Vec::new(),
             materials: Vec::new(),
             light: ParallelLight {
@@ -137,6 +181,7 @@ impl Scene {
         let mut scene = Self::new();
         scene.camera = Camera::from_config(&config.camera)?;
         scene.background_color = Vector3::from(config.background_linear_rgb);
+        scene.environment = config.environment.as_ref().map(Environment::from);
         scene.light = ParallelLight {
             height_m: config.light.height_m,
             direction: Ray::new(Vector3::zeros(), Vector3::from(config.light.direction))
@@ -211,6 +256,18 @@ impl Scene {
     /// 通过 Hit.material_id 查询配置构建的运行时材质；非法编号返回 None。
     pub fn material(&self, material_id: usize) -> Option<&dyn Material> {
         self.materials.get(material_id).map(Box::as_ref)
+    }
+
+    /// 使用当前射线方向查询天空；关闭天空时回退到旧常量背景。
+    pub fn background_radiance(&self, direction: Vector3<f64>) -> Option<Vector3<f64>> {
+        match &self.environment {
+            Some(environment) => environment.background_radiance(direction),
+            None => self
+                .background_color
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0)
+                .then_some(self.background_color),
+        }
     }
 
     /// 返回最近命中，并填写 object_id 与可选的 material_id。
@@ -356,6 +413,43 @@ pub(crate) fn take_photon_from_hit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sky_gradient_uses_world_z_and_keeps_hdr_and_legacy_background() {
+        let mut scene = Scene::new();
+        let sky = scene.environment.as_mut().unwrap();
+        sky.horizon_color = Vector3::new(1.0, 2.0, 3.0);
+        sky.zenith_color = Vector3::new(3.0, 4.0, 5.0);
+        let sky = *sky;
+        for (direction, expected) in [
+            (Vector3::z(), sky.zenith_color),
+            (Vector3::x(), sky.horizon_color),
+            (-Vector3::z(), sky.horizon_color),
+            (
+                Vector3::new(3.0_f64.sqrt(), 0.0, 1.0),
+                Vector3::new(2.0, 3.0, 4.0),
+            ),
+        ] {
+            assert!((scene.background_radiance(direction).unwrap() - expected).norm() < 1e-12);
+            assert!(
+                (scene.background_radiance(direction * 3.0).unwrap() - expected).norm() < 1e-12
+            );
+        }
+        for direction in [
+            Vector3::zeros(),
+            Vector3::repeat(f64::NAN),
+            Vector3::repeat(f64::MAX),
+        ] {
+            assert!(scene.background_radiance(direction).is_none());
+        }
+        scene.environment = None;
+        assert_eq!(
+            scene.background_radiance(Vector3::z()),
+            Some(scene.background_color)
+        );
+        scene.background_color.x = f64::NAN;
+        assert!(scene.background_radiance(Vector3::z()).is_none());
+    }
 
     #[test]
     fn sunlight_uses_projected_window_area_and_rejects_degenerate_inputs() {
