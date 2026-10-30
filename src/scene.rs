@@ -10,7 +10,7 @@ use crate::{
         prism::Prism,
         ray::{PARALLEL_EPSILON, Ray},
     },
-    material::{self, Material},
+    material::{self, Material, dielectric::fresnel_dielectric},
     optics::{iormode::IorMode, refract},
 };
 use nalgebra::{Vector2, Vector3};
@@ -250,10 +250,15 @@ pub fn refractive_index(wavelength_nm: Option<f64>, mode: IorMode) -> Option<f64
     index.is_finite().then_some(index)
 }
 
-/// 追踪从空气出发的单条光线，返回最终地面落点。
-/// glass_ior 是无参数闭包，例如 || refractive_index(Some(450.0), IorMode::Dispersion)。
-/// 闭包只调用一次，返回的正有限折射率用于两个界面；也可传入 || Some(1.52)。
-/// 只支持一个三棱镜的两次透射；闭包返回 None、折射率非法、全反射、其他遮挡或未命中地面时返回 None。
+/// 正向光子路径的落地结果；weight 是到达地面的通量比例，不是相机 radiance 权重。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PhotonLanding {
+    pub position: Vector3<f64>,
+    /// 直射为 1；双透射为 (1-F_enter)*(1-F_exit)，不含折射率平方因子。
+    pub weight: f64,
+}
+
+/// 兼容的几何落点接口；能量累积应使用 take_photon_landing 获取透射权重。
 pub fn take_photon(
     scene: &Scene,
     ray: Ray,
@@ -261,6 +266,21 @@ pub fn take_photon(
     ground_id: usize,
     glass_ior: impl FnOnce() -> Option<f64>,
 ) -> Option<Vector3<f64>> {
+    take_photon_landing(scene, ray, prism_id, ground_id, glass_ior).map(|landing| landing.position)
+}
+
+/// 追踪从空气出发的单条光线，返回地面落点及确定双透射路径的通量权重。
+/// glass_ior 是无参数闭包，例如 || refractive_index(Some(450.0), IorMode::Dispersion)。
+/// 闭包只调用一次，返回的正有限折射率用于两个界面；也可传入 || Some(1.52)。
+/// 只支持一个三棱镜的两次透射；闭包返回 None、折射率非法、全反射、其他遮挡或未命中地面时返回 None。
+/// 被 Fresnel 反射的通量暂不追踪、不重新分配给透射路径。
+pub fn take_photon_landing(
+    scene: &Scene,
+    ray: Ray,
+    prism_id: usize,
+    ground_id: usize,
+    glass_ior: impl FnOnce() -> Option<f64>,
+) -> Option<PhotonLanding> {
     let glass_ior = glass_ior()?;
     if !glass_ior.is_finite() || glass_ior <= 0.0 {
         return None;
@@ -283,19 +303,24 @@ pub(crate) fn take_photon_from_hit(
     prism_id: usize,
     ground_id: usize,
     glass_ior: f64,
-) -> Option<Vector3<f64>> {
+) -> Option<PhotonLanding> {
     const AIR_IOR: f64 = 1.0;
     const EPSILON: f64 = 1e-5;
 
     // 没有经过玻璃，直接落地。
     if first_hit.object_id == Some(ground_id) {
-        return Some(first_hit.coords);
+        return Some(PhotonLanding {
+            position: first_hit.coords,
+            weight: 1.0,
+        });
     }
     if first_hit.object_id != Some(prism_id) {
         return None;
     }
 
     // 空气 -> 玻璃：朝外法线朝向入射介质。
+    let cos_enter = -ray.direction.dot(&first_hit.normal);
+    let f_enter = fresnel_dielectric(cos_enter, AIR_IOR, glass_ior)?;
     let inside_direction = refract(ray.direction, first_hit.normal, AIR_IOR, glass_ior)?;
     let inside_ray = Ray::new(
         first_hit.coords - first_hit.normal * EPSILON,
@@ -308,6 +333,9 @@ pub(crate) fn take_photon_from_hit(
     }
 
     // 玻璃 -> 空气：法线取反，朝向玻璃内部；全反射由 ? 提前返回 None。
+    // 入射方向来自玻璃内部，故 cos_exit = -d_inside·(-n_outward)。
+    let cos_exit = inside_ray.direction.dot(&exit_hit.normal);
+    let f_exit = fresnel_dielectric(cos_exit, glass_ior, AIR_IOR)?;
     let outside_direction = refract(inside_ray.direction, -exit_hit.normal, glass_ior, AIR_IOR)?;
     let outside_ray = Ray::new(
         exit_hit.coords + exit_hit.normal * EPSILON,
@@ -316,7 +344,10 @@ pub(crate) fn take_photon_from_hit(
 
     let ground_hit = scene.intersect(&outside_ray)?;
     if ground_hit.object_id == Some(ground_id) {
-        Some(ground_hit.coords)
+        Some(PhotonLanding {
+            position: ground_hit.coords,
+            weight: (1.0 - f_enter) * (1.0 - f_exit),
+        })
     } else {
         None
     }
@@ -488,6 +519,118 @@ mod tests {
         let prism_id = scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         (scene, prism_id, ground_id)
+    }
+
+    // 两个平行界面便于使用已知 Fresnel 系数验证通量，而不依赖棱镜聚焦分布。
+    struct GlassSlab {
+        top: Ground,
+        bottom: Ground,
+    }
+
+    impl Hittable for GlassSlab {
+        fn intersect(&self, ray: &Ray) -> Option<Hit> {
+            let top = self.top.intersect(ray);
+            let bottom = self.bottom.intersect(ray).map(|mut hit| {
+                hit.normal = -hit.normal;
+                hit
+            });
+            top.into_iter()
+                .chain(bottom)
+                .min_by(|a, b| a.distance.total_cmp(&b.distance))
+        }
+    }
+
+    fn slab_scene() -> (Scene, usize, usize) {
+        let mut scene = Scene::new();
+        let glass = scene.add(Box::new(GlassSlab {
+            top: Ground::new(2.0).unwrap(),
+            bottom: Ground::new(1.0).unwrap(),
+        }));
+        let ground = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        (scene, glass, ground)
+    }
+
+    #[test]
+    fn photon_landing_direct_and_index_matched_paths_keep_unit_flux() {
+        let (scene, prism, ground) = photon_scene();
+        let direct = Ray::new(Vector3::new(1.0, 0.2, 3.0), -Vector3::z()).unwrap();
+        let landing = take_photon_landing(&scene, direct, prism, ground, || Some(1.52)).unwrap();
+        assert_eq!(landing.position, Vector3::new(1.0, 0.2, 0.0));
+        assert_eq!(landing.weight, 1.0);
+        let through = Ray::new(Vector3::new(0.25, 0.2, 3.0), -Vector3::z()).unwrap();
+        let landing = take_photon_landing(&scene, through, prism, ground, || Some(1.0)).unwrap();
+        assert!((landing.position.x - 0.25).abs() < 2e-5);
+        assert_eq!(landing.weight, 1.0);
+    }
+
+    #[test]
+    fn photon_landing_slab_matches_known_normal_oblique_and_grazing_transmission() {
+        let (scene, glass, ground) = slab_scene();
+        // eta=1.5 的独立 Fresnel 参考值；平行界面的两次能量反射率相同。
+        for (angle, reflectance) in [
+            (0.0_f64, 0.04_f64),
+            (60.0, 0.08918671280221276),
+            (80.0, 0.3877043546914726),
+        ] {
+            let angle = angle.to_radians();
+            let ray = Ray::new(
+                Vector3::new(0.0, 0.2, 3.0),
+                Vector3::new(angle.sin(), 0.0, -angle.cos()),
+            )
+            .unwrap();
+            let landing = take_photon_landing(&scene, ray, glass, ground, || Some(1.5)).unwrap();
+            assert!((landing.weight - (1.0 - reflectance).powi(2)).abs() < 1e-13);
+            assert!(landing.weight.is_finite() && (0.0..=1.0).contains(&landing.weight));
+            assert!(landing.position.z.abs() < 1e-12);
+            assert_eq!(
+                Some(landing.position),
+                take_photon(&scene, ray, glass, ground, || Some(1.5))
+            );
+        }
+    }
+
+    #[test]
+    fn photon_landing_dispersion_computes_a_distinct_flux_for_each_wavelength() {
+        let (scene, glass, ground) = slab_scene();
+        let ray = Ray::new(Vector3::new(0.0, 0.2, 3.0), -Vector3::z()).unwrap();
+        let mut weights = Vec::new();
+        for wavelength in [450.0, 550.0, 650.0] {
+            let n = refractive_index(Some(wavelength), IorMode::Dispersion).unwrap();
+            let calls = std::cell::Cell::new(0);
+            let landing = take_photon_landing(&scene, ray, glass, ground, || {
+                calls.set(calls.get() + 1);
+                Some(n)
+            })
+            .unwrap();
+            let r0 = ((n - 1.0) / (n + 1.0)).powi(2);
+            assert!((landing.weight - (1.0 - r0).powi(2)).abs() < 1e-14);
+            assert_eq!(calls.get(), 1);
+            weights.push(landing.weight);
+        }
+        assert!(weights[0] < weights[1] && weights[1] < weights[2]);
+    }
+
+    #[test]
+    fn photon_landing_prism_uses_the_actual_incidence_at_each_interface() {
+        let (scene, prism, ground) = photon_scene();
+        let ray = Ray::new(Vector3::new(0.25, 0.2, 3.0), -Vector3::z()).unwrap();
+        let landing = take_photon_landing(&scene, ray, prism, ground, || Some(1.52)).unwrap();
+        // 独立代入右斜面与水平底面的 Snell/Fresnel 方程：
+        // cos_enter=0.5299989400031799，cos_exit=0.912945573777874，两个 F 不相同。
+        let f_enter = 0.08346779578839593;
+        let f_exit = 0.04737538624172876;
+        assert!((landing.weight - 0.8731111370340963).abs() < 1e-13);
+        assert!((landing.weight - (1.0 - f_enter) * (1.0 - f_exit)).abs() < 1e-13);
+        assert!((landing.position - Vector3::new(-0.719593104236608, 0.2, 0.0)).norm() < 1e-12);
+
+        // 底面全反射时不再有确定透射落点；被遮挡的路径也不能贡献通量。
+        let tir = Ray::new(Vector3::new(1.05, 0.2, 1.9), Vector3::new(-1.6, 0.0, -1.0)).unwrap();
+        assert!(take_photon_landing(&scene, tir, prism, ground, || Some(1.52)).is_none());
+        for height in [2.5, 1.2, 0.5] {
+            let (mut blocked, prism, ground) = photon_scene();
+            blocked.add(Box::new(Ground::new(height).unwrap()));
+            assert!(take_photon_landing(&blocked, ray, prism, ground, || Some(1.52)).is_none());
+        }
     }
 
     #[test]

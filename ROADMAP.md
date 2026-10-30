@@ -345,6 +345,18 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - **限制：** 相对通量尚无绝对辐射单位标定；有限发射窗口须覆盖能照亮棱镜的入射区域，焦散仍受接收范围裁切、分辨率和采样噪声影响。仅支持水平中性灰地面。光源通道仍为双界面折射，TIR 路径丢弃，**尚无 Fresnel 通量修正或吸收**；相机玻璃仍为 RGB 常量折射率并在八次后截断。背景只对未命中相机射线可见，**不提供环境照明或漫反射间接光**，无直射也无焦散的地面保持黑色。
 - **下一阶段：** 阶段 15 的 Fresnel 光子通量修正留待单独任务，本次不实现。
 
+### V0.4 阶段 15 — 正向光子双透射 Fresnel 通量修正
+
+- [x] 新增 `scene::PhotonLanding { position, weight }` 和 `take_photon_landing`，内部 `take_photon_from_hit` 返回带权重落点。原 `take_photon` 参数与坐标返回接口保留，委托新接口后只取 position。
+- [x] 入射计算 `F_enter = fresnel_dielectric(-d_air·n_enter, 1, n_lambda)`，出射计算 `F_exit = fresnel_dielectric(d_inside·n_exit, n_lambda, 1)`，确定双透射路径的通量权重为 `(1-F_enter)*(1-F_exit)`。不调用相机事件采样，不除透射概率、不乘 radiance 折射率平方项。
+- [x] `Constant` 每条玻璃光路只追踪/计算一次权重；`Dispersion` 对每个波长的折射率和实际内部方向分别计算。首次交点复用、空间采样、固定随机序列、光谱积分、分块合并保持原有流程。
+- [x] 光谱单图、Direct/Caustics 拆分及灰度能量对照均在落地累积时乘一次通量权重；直射权重保持 1。丢弃的反射、TIR、遮挡或 receiver 外通量不重新归一化，完整 D65 归一化和解析太阳标尺不变。
+- [x] 保留相机 Fresnel 路径、八次限制、SPP、抖动、Shadow Ray 和 receiver 外解析直射；仍只先支持水平中性灰地面。
+- **验证范围：** 直射/相同折射率权重 1、`n=1.5` 正入射双透射 `0.9216`、60°/80° 斜入射的独立 Fresnel 参考值、实际棱镜两面不同的入射余弦与权重、逐波长权重差异、TIR/三段遮挡、旧坐标接口和已知落点兼容、加权光谱与独立逐波长追踪一致、仅折射通量减少且不重新分配，以及阶段 14 的拆分、相机和并行回归。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（204 项单元测试、14 项集成测试）、严格 `cargo clippy --locked --all-targets -- -D warnings` 和 `git diff --check` 通过。默认 release 主程序、`camera_direct_caustics`、`camera_glass_with_ground`、`camera_glass` examples 实际运行成功；已查看更新的 512×512 RGB8 Combined。含折射能量的九张 PNG 已更新，Direct、纯相机玻璃、法线/直射调试和无棱镜等七张 PNG 的 SHA-256 与阶段 14 完全一致。
+- **范围与限制：** 本次只追踪确定的透射→透射光路，反射通量被丢弃，不追踪入口反射、内部反射续追、更长光子路径或吸收；不引入环境照明。含折射能量的图像应比阶段 14 的无损基线变暗，直射及只追踪相机的输出应保持一致。
+- **下一阶段：** 是否继续光子反射路径另行确定，本次不自动扩展。
+
 ## 6. Codex 执行约定
 
 1. **每次只实现当前一个里程碑**，完成后总结修改文件、运行命令、测试结果和下一步；不要抢跑后续阶段。
