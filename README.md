@@ -23,7 +23,7 @@
 
 **V0.4 已接入相机单次直接光照和硬阴影。** `render_camera_lit` 从相机生成主光线，按最近命中的材质和 shadow ray 可见性计算 `L_o = V f_r L_light max(n · wi, 0)`，经线性 RGB→XYZ 写入 Framebuffer，再复用曝光和 sRGB 输出 `output/camera_lit.png`。
 
-**已实现玻璃 Fresnel 离散事件采样、有界相机路径、SPP 与子像素抖动。** `Material::sample` 统一返回 `Option<MaterialSample>`，Lambertian 返回 `Continuous { wi }`，Dielectric 返回 `Glass(GlassSample { wi, event, probability, weight })`；`GlassEvent` 区分反射与透射。`render_camera_glass` 负责像素内随机位置的多样本平均，`trace_camera_path` 负责单条最多八次散射的路径；运行 `camera_glass` 示例可生成独立的相机玻璃图，默认 64 SPP。
+**已实现玻璃 Fresnel 离散事件采样、有界相机路径、SPP 与子像素抖动。** `Material::sample` 统一返回 `Option<MaterialSample>`，Lambertian 返回 `Continuous { wi }`，Dielectric 返回 `Glass(GlassSample { wi, event, probability, weight })`；`GlassEvent` 区分反射与透射。`render_camera_glass` 负责像素内随机位置的多样本平均，`trace_camera_path` 负责单条最多八次散射的路径；运行 `camera_glass` 示例可生成独立的相机玻璃图，当前示例配置为 256 SPP。
 
 **已接入地面光谱辐照度与相机画面。** `camera_glass_with_ground` 示例先由光源追踪得到未曝光的地面 XYZ 辐照度，再通过 `render_camera_glass_with_ground` 追踪相机路径；命中中性灰地面时双线性读取 E，并按 `L_o = E rho / π` 着色，输出 `output/camera_glass_with_ground.png`。
 
@@ -385,7 +385,7 @@ cargo run --release --locked --example camera_glass -- 1
 cargo run --release --locked --example camera_glass -- 256
 ```
 
-示例读取 `configs/default.json` 的场景、尺寸、`render.camera_spp`、随机种子和曝光，输出 `output/camera_glass.png`。`render.camera_spp` 默认为 64，旧 JSON 缺省该字段时也使用 64；可用示例的可选 SPP 参数覆盖。它与光源发射使用的 `render.samples_per_pixel_axis` 独立，64 SPP 表示每像素总计 64 条相机路径，不是 64×64。默认主程序仍输出原来的对照图。
+示例读取 `configs/default.json` 的场景、尺寸、`render.camera_spp`、随机种子和曝光，输出 `output/camera_glass.png`。当前示例配置将 `render.camera_spp` 设为 256；Rust 默认值及旧 JSON 缺省该字段时仍使用 64，可用示例的可选 SPP 参数覆盖。它与光源发射使用的 `render.samples_per_pixel_axis` 独立，256 SPP 表示每像素总计 256 条相机路径，不是 256×256。默认主程序仍输出原来的对照图。
 
 ![相机视角的八次上限玻璃路径，64 SPP，像素内抖动](output/camera_glass.png)
 
@@ -501,6 +501,9 @@ if let Some(landing) = take_photon_landing(&scene, ray, prism_id, ground_id, || 
 
 ```json
 "environment": {
+  "map_path": "assets/HDRI/autoshop_01_4k.hdr",
+  "rotation_degrees": 0.0,
+  "intensity": 1.0,
   "horizon_linear_rgb": [0.16, 0.20, 0.28],
   "zenith_linear_rgb": [0.04, 0.08, 0.18]
 },
@@ -519,7 +522,7 @@ Lambertian: f_r = rho/pi, pdf = cos(theta)/pi
 
 被遮挡样本贡献为零，仍计入总样本数，不按可见样本数重新归一化。入射方向覆盖表面法线的整个正半球；向下的环境方向按同一个模型查询 horizon，不再对世界 z 做上半球照明裁切。均匀环境且无遮挡时任意朝向的 Lambertian 都得到 `rho * L_env`；朝上表面的无遮挡渐变环境，其解析参考值为 `rho * (horizon/3 + 2*zenith/3)`。
 
-`scene.environment_samples` 表示每条相机路径在漫反射终点采样的方向数，须大于零，默认 1。默认 `camera_spp=64` 会对每像素的 64 条相机路径平均；增大任一采样数可降低噪声，亮度按总样本数归一化。单路径直接光照调试入口也使用该方向数，固定环境种子 42；玻璃入口使用相机 seed 异或固定常量生成独立环境 RNG。环境采样不会消耗像素抖动或玻璃事件 RNG，固定参数和种子可复现。
+`scene.environment_samples` 表示每条相机路径在漫反射终点采样的方向数，须大于零，默认 1。当前示例配置 `camera_spp=256` 会对每像素的 256 条相机路径平均；增大任一采样数可降低噪声，亮度按总样本数归一化。单路径直接光照调试入口也使用该方向数，固定环境种子 42；玻璃入口使用相机 seed 异或固定常量生成独立环境 RNG。环境采样不会消耗像素抖动或玻璃事件 RNG，固定参数和种子可复现。
 
 所有相机照明入口都使用此估计器，棋盘格和玻璃吞吐量仍只乘一次。环境贡献/可见背景归入 Direct，Caustics 保持纯折射焦散，三个分量复用相同玻璃路径，继续满足 `Direct + Caustics = Combined`。环境查询不额外添加解析太阳项，原解析太阳或完整地面图分支保持独立；光子能量图不加入环境。
 
@@ -539,7 +542,7 @@ Lambertian: f_r = rho/pi, pdf = cos(theta)/pi
 }
 ```
 
-将 `example.hdr` 换成实际的 Radiance RGBE `.hdr` 文件。**相对路径相对于程序启动工作目录解析，与 JSON 所在目录无关**；也可以使用绝对路径。`map_path` 缺省或为 `null` 时使用原渐变，`rotation_degrees` 缺省为 `0`，`intensity` 缺省为 `1`，因此仅含原两个颜色字段的 JSON 仍可读取。默认配置保持 `map_path: null`，不依赖本地 HDR 资源。旋转角须有限，强度须有限且非负，两个渐变颜色仍须有限且非负。
+将 `example.hdr` 换成实际的 Radiance RGBE `.hdr` 文件。**相对路径相对于程序启动工作目录解析，与 JSON 所在目录无关**；也可以使用绝对路径。`map_path` 缺省或为 `null` 时使用原渐变，`rotation_degrees` 缺省为 `0`，`intensity` 缺省为 `1`，因此仅含原两个颜色字段的 JSON 仍可读取。仓库的 `configs/default.json` 已显式启用 `assets/HDRI/autoshop_01_4k.hdr`，旋转为 `0°`、强度为 `1`；`EnvironmentConfig::default()` 的 `map_path` 仍为 `None`。将 JSON 的 `map_path` 改回 `null` 可恢复渐变。旋转角须有限，强度须有限且非负，两个渐变颜色仍须有限且非负。
 
 `Scene::from_config` 通过可失败的 `Environment::try_from` 构建环境，有路径时加载一次 HDR；文件不存在或解码失败时返回包含路径的错误。配置读写本身不加载图片。运行时 `environment::Environment` 拥有 `Option<EnvironmentMap>`、渐变颜色、强度及预计算的旋转正弦/余弦，不实现 `Copy` 或整图 `Clone`；原 `scene::Environment` 路径通过重导出保留。查询仅访问内存，加载后删除源文件也不影响已有场景。
 

@@ -79,9 +79,14 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_json_matches_current_defaults_and_roundtrips() {
+    fn checked_in_json_enables_the_hdri_preset_and_roundtrips() {
         let config = Config::from_json(include_str!("../../configs/default.json")).unwrap();
-        assert_eq!(config, Config::default());
+        // 展示配置显式启用本地 HDR，Rust/旧 JSON 的缺省值仍不依赖图片文件。
+        let mut expected = Config::default();
+        expected.render.camera_spp = 256;
+        expected.scene.environment.as_mut().unwrap().map_path =
+            Some(PathBuf::from("assets/HDRI/autoshop_01_4k.hdr"));
+        assert_eq!(config, expected);
         assert_eq!(config.scene.objects.len(), 2);
         assert!(matches!(
             config.scene.objects[0],
@@ -454,8 +459,7 @@ mod tests {
 
     #[test]
     fn missing_materials_use_the_defaults_for_each_object_type() {
-        let mut json: serde_json::Value =
-            serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
+        let mut json = serde_json::to_value(Config::default()).unwrap();
         for object in json["scene"]["objects"].as_array_mut().unwrap() {
             object.as_object_mut().unwrap().remove("material");
         }

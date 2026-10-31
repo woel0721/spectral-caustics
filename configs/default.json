@@ -3,7 +3,7 @@
     "width": 512,
     "height": 512,
     "samples_per_pixel_axis": 4,
-    "camera_spp": 64,
+    "camera_spp": 256,
     "mode": "dispersion",
     "wavelength_min_nm": 380.0,
     "wavelength_max_nm": 780.0,
@@ -23,7 +23,7 @@
     },
     "background_linear_rgb": [0.08, 0.10, 0.14],
     "environment": {
-      "map_path": null,
+      "map_path": "assets/HDRI/autoshop_01_4k.hdr",
       "rotation_degrees": 0.0,
       "intensity": 1.0,
       "horizon_linear_rgb": [0.16, 0.20, 0.28],
