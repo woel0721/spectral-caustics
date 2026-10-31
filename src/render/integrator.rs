@@ -637,7 +637,7 @@ mod tests {
         config::{
             cameraconfig::CameraConfig,
             materialconfig::MaterialConfig,
-            sceneconfig::{ObjectConfig, ParallelLightConfig, SceneConfig},
+            sceneconfig::{EnvironmentConfig, ObjectConfig, ParallelLightConfig, SceneConfig},
         },
         geometry::{ground::Ground, hit::Hit, object::Hittable, prism::Prism, triangle::Triangle},
         material::{
@@ -715,10 +715,14 @@ mod tests {
     fn constant_environment_recovers_albedo_for_every_surface_orientation_and_sample_count() {
         let mut scene = Scene::new();
         let sky = Vector3::new(0.1, 0.2, 4.0);
-        scene.environment = Some(crate::scene::Environment {
-            horizon_color: sky,
-            zenith_color: sky,
-        });
+        scene.environment = Some(
+            crate::scene::Environment::try_from(&EnvironmentConfig {
+                horizon_linear_rgb: sky.into(),
+                zenith_linear_rgb: sky.into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
         let albedo = Vector3::new(0.2, 0.5, 0.8);
         let diffuse = Lambertian::new(albedo).unwrap();
         for samples in [1, 16, 1024] {
@@ -766,7 +770,7 @@ mod tests {
     #[test]
     fn gradient_environment_converges_to_the_cosine_weighted_integral() {
         let mut scene = Scene::new(); // 空场景，所有环境方向可见。
-        let sky = scene.environment.unwrap();
+        let sky = scene.environment.as_ref().unwrap();
         let albedo = Vector3::new(0.2, 0.5, 0.8);
         let material = Lambertian::new(albedo).unwrap();
         let hit = Hit {
@@ -805,10 +809,14 @@ mod tests {
         }
         let mut scene = Scene::new();
         let li = Vector3::new(0.25, 0.5, 1.0);
-        scene.environment = Some(crate::scene::Environment {
-            horizon_color: li,
-            zenith_color: li,
-        });
+        scene.environment = Some(
+            crate::scene::Environment::try_from(&EnvironmentConfig {
+                horizon_linear_rgb: li.into(),
+                zenith_linear_rgb: li.into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
         scene.environment_samples = 32768;
         scene.add(Box::new(Ground::new(0.0).unwrap())); // 起点偏移必须避免地面自遮挡。
         scene.add(Box::new(HalfPlane(Ground::new(1.0).unwrap())));
@@ -859,7 +867,7 @@ mod tests {
     fn glass_misses_use_the_final_direction_for_sky_gradient() {
         let mut scene = glass_background_scene();
         scene.environment = Scene::new().environment;
-        let sky = scene.environment.unwrap();
+        let sky = scene.environment.as_ref().unwrap();
         for (direction, weight, expected) in [
             (Vector3::z(), 0.5, sky.zenith_color),
             (-Vector3::z(), 0.25, sky.horizon_color),

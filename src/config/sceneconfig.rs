@@ -2,6 +2,7 @@
 
 use super::{cameraconfig::CameraConfig, materialconfig::MaterialConfig};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -60,10 +61,19 @@ impl CheckerboardConfig {
     }
 }
 
-/// 简单天空的相对线性 RGB 参数；均不包含解析太阳或太阳光盘。
+/// HDR 贴图或渐变天空的相对线性 RGB 参数；解析太阳仍由独立光源提供。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentConfig {
+    /// 有路径时优先使用 HDR；相对路径相对于程序启动工作目录。
+    #[serde(default)]
+    pub map_path: Option<PathBuf>,
+    /// 环境绕世界 +Z 轴旋转的角度，单位度。
+    #[serde(default)]
+    pub rotation_degrees: f64,
+    /// 采样后在线性空间乘入，不施加曝光或显示裁剪。
+    #[serde(default = "default_environment_intensity")]
+    pub intensity: f64,
     /// 背景和照明共用的方向相关线性 RGB 辐亮度。
     pub horizon_linear_rgb: [f64; 3],
     pub zenith_linear_rgb: [f64; 3],
@@ -72,6 +82,9 @@ pub struct EnvironmentConfig {
 impl Default for EnvironmentConfig {
     fn default() -> Self {
         Self {
+            map_path: None,
+            rotation_degrees: 0.0,
+            intensity: default_environment_intensity(),
             horizon_linear_rgb: [0.16, 0.20, 0.28],
             zenith_linear_rgb: [0.04, 0.08, 0.18],
         }
@@ -80,6 +93,12 @@ impl Default for EnvironmentConfig {
 
 impl EnvironmentConfig {
     pub fn validate(&self) -> Result<(), String> {
+        if !self.rotation_degrees.is_finite() {
+            return Err("scene.environment.rotation_degrees 必须有限".into());
+        }
+        if !self.intensity.is_finite() || self.intensity < 0.0 {
+            return Err("scene.environment.intensity 必须有限且非负".into());
+        }
         if self
             .horizon_linear_rgb
             .iter()
@@ -273,6 +292,10 @@ fn default_ground_margin_m() -> f64 {
 
 fn default_environment_samples() -> usize {
     1
+}
+
+fn default_environment_intensity() -> f64 {
+    1.0
 }
 
 fn validate_bounds(min: [f64; 2], max: [f64; 2]) -> Result<(), &'static str> {

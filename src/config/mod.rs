@@ -170,6 +170,68 @@ mod tests {
     }
 
     #[test]
+    fn environment_map_fields_default_for_legacy_json_and_roundtrip() {
+        let mut json = serde_json::to_value(Config::default()).unwrap();
+        let environment = json["scene"]["environment"].as_object_mut().unwrap();
+        for field in ["map_path", "rotation_degrees", "intensity"] {
+            environment.remove(field);
+        }
+        let legacy = Config::from_json(&json.to_string()).unwrap();
+        assert_eq!(legacy, Config::default());
+        assert_eq!(
+            Config::from_json(&legacy.to_json().unwrap()).unwrap(),
+            legacy
+        );
+
+        // 配置读写不加载 HDR，也不根据配置文件目录改写相对路径。
+        json["scene"]["environment"]["map_path"] = json!("assets/HDRI/example.hdr");
+        json["scene"]["environment"]["rotation_degrees"] = json!(-450.0);
+        json["scene"]["environment"]["intensity"] = json!(2.5);
+        let config = Config::from_json(&json.to_string()).unwrap();
+        let environment = config.scene.environment.as_ref().unwrap();
+        assert_eq!(
+            environment.map_path,
+            Some(PathBuf::from("assets/HDRI/example.hdr"))
+        );
+        assert_eq!(environment.rotation_degrees, -450.0);
+        assert_eq!(environment.intensity, 2.5);
+        let path = temporary_path();
+        config.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap(), config);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn invalid_environment_intensity_and_rotation_are_rejected_without_writing() {
+        let path = temporary_path();
+        fs::write(&path, "keep").unwrap();
+        for field in ["intensity", "rotation_degrees"] {
+            for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut config = Config::default();
+                let environment = config.scene.environment.as_mut().unwrap();
+                match field {
+                    "intensity" => environment.intensity = value,
+                    _ => environment.rotation_degrees = value,
+                }
+                assert!(config.validate().is_err());
+                assert!(config.to_json().is_err());
+                assert!(config.save(&path).is_err());
+                assert_eq!(fs::read_to_string(&path).unwrap(), "keep");
+                assert!(crate::scene::Scene::from_config(&config.scene).is_err());
+            }
+            for value in [json!(null), json!("invalid"), json!(true)] {
+                let mut json = serde_json::to_value(Config::default()).unwrap();
+                json["scene"]["environment"][field] = value;
+                assert!(Config::from_json(&json.to_string()).is_err());
+            }
+        }
+        let mut json = serde_json::to_value(Config::default()).unwrap();
+        json["scene"]["environment"]["intensity"] = json!(-0.01);
+        assert!(Config::from_json(&json.to_string()).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn environment_sample_count_defaults_roundtrips_and_checks_total_work() {
         let mut json: serde_json::Value =
             serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
@@ -501,7 +563,7 @@ mod tests {
             ("position", json!([1e308, 1e308, 1e308])),                  // 模长溢出。
             ("target", original["scene"]["camera"]["position"].clone()),
             ("up", json!([0.0, 0.0, 0.0])),
-            ("up", json!([-2.5, 4.5, -1.7])), // up 平行于观察方向。
+            ("up", json!([-2.5, 4.5, -2.2])), // up 平行于观察方向。
             ("position", json!([0.0, 0.0])),
             ("target", json!("origin")),
             ("fov_y_degrees", json!(0.0)),

@@ -17,7 +17,7 @@ impl Default for CameraConfig {
     fn default() -> Self {
         Self {
             position: [2.5, -4.5, 2.6],
-            target: [0.0, 0.0, 0.9],
+            target: [0.0, 0.0, 0.4],
             up: [0.0, 0.0, 1.0],
             fov_y_degrees: 35.0,
         }

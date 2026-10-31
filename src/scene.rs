@@ -2,7 +2,7 @@
 
 use crate::{
     camera::Camera,
-    config::sceneconfig::{CheckerboardConfig, EnvironmentConfig, ObjectConfig, SceneConfig},
+    config::sceneconfig::{CheckerboardConfig, ObjectConfig, SceneConfig},
     geometry::{
         ground::Ground,
         hit::Hit,
@@ -10,11 +10,14 @@ use crate::{
         prism::Prism,
         ray::{PARALLEL_EPSILON, Ray},
     },
-    material::{self, Material, dielectric::fresnel_dielectric, unit_vector},
+    material::{self, Material, dielectric::fresnel_dielectric},
     optics::{iormode::IorMode, refract},
 };
 use nalgebra::{Vector2, Vector3};
 use std::error::Error;
+
+// 保留原 scene::Environment 的公共访问路径。
+pub use crate::environment::Environment;
 
 /// 几何与场景材质编号的绑定；几何本身不依赖任何材质类型。
 pub struct SceneObject {
@@ -33,7 +36,7 @@ pub struct Scene {
     pub camera: Camera,
     /// 关闭天空时使用的线性 RGB 常量背景色，写入 Framebuffer 前转换为 XYZ。
     pub background_color: Vector3<f64>,
-    /// 独立于太阳的天空参数；None 使用原常量背景且没有环境照明。
+    /// 独立于解析太阳的环境；None 使用原常量背景且没有环境照明。
     pub environment: Option<Environment>,
     /// 每个漫反射终点的环境方向样本数，与相机 SPP 独立。
     pub environment_samples: usize,
@@ -93,44 +96,6 @@ impl Checkerboard {
         } else {
             self.odd_scale
         })
-    }
-}
-
-/// 背景和漫反射照明共用的方向相关环境辐亮度。
-/// 全部为相对线性 RGB 辐亮度，不含太阳直射，不修改已有材质的 albedo。
-#[derive(Debug, Clone, Copy)]
-pub struct Environment {
-    pub horizon_color: Vector3<f64>,
-    pub zenith_color: Vector3<f64>,
-}
-
-impl From<&EnvironmentConfig> for Environment {
-    fn from(config: &EnvironmentConfig) -> Self {
-        Self {
-            horizon_color: Vector3::from(config.horizon_linear_rgb),
-            zenith_color: Vector3::from(config.zenith_linear_rgb),
-        }
-    }
-}
-
-impl Environment {
-    pub fn is_valid(&self) -> bool {
-        self.horizon_color
-            .iter()
-            .chain(self.zenith_color.iter())
-            .all(|value| value.is_finite() && *value >= 0.0)
-    }
-
-    /// z 为世界上方向；地平线及其下方使用 horizon，天顶使用 zenith。
-    /// 相机背景与环境光积分均查询这里，不加太阳光盘或太阳直射项。
-    pub fn radiance(&self, direction: Vector3<f64>) -> Option<Vector3<f64>> {
-        if !self.is_valid() {
-            return None;
-        }
-        let direction = unit_vector(direction)?;
-        let t = direction.z.clamp(0.0, 1.0);
-        let rgb = self.horizon_color * (1.0 - t) + self.zenith_color * t;
-        rgb.iter().all(|value| value.is_finite()).then_some(rgb)
     }
 }
 
@@ -203,7 +168,12 @@ impl Scene {
         Self {
             camera: Camera::from_config(&config.camera).expect("内置默认相机参数必须有效"),
             background_color: Vector3::from(config.background_linear_rgb),
-            environment: config.environment.as_ref().map(Environment::from),
+            environment: config
+                .environment
+                .as_ref()
+                .map(Environment::try_from)
+                .transpose()
+                .expect("内置默认环境参数必须有效"),
             environment_samples: config.environment_samples,
             ground_checkerboard: config
                 .ground_checkerboard
@@ -237,7 +207,12 @@ impl Scene {
         let mut scene = Self::new();
         scene.camera = Camera::from_config(&config.camera)?;
         scene.background_color = Vector3::from(config.background_linear_rgb);
-        scene.environment = config.environment.as_ref().map(Environment::from);
+        // 每次场景构建只加载一次 HDR；所有背景和照明查询共用内存中的像素。
+        scene.environment = config
+            .environment
+            .as_ref()
+            .map(Environment::try_from)
+            .transpose()?;
         scene.environment_samples = config.environment_samples;
         scene.ground_checkerboard = config
             .ground_checkerboard
@@ -555,7 +530,7 @@ mod tests {
         let sky = scene.environment.as_mut().unwrap();
         sky.horizon_color = Vector3::new(1.0, 2.0, 3.0);
         sky.zenith_color = Vector3::new(3.0, 4.0, 5.0);
-        let sky = *sky;
+        let sky = scene.environment.as_ref().unwrap();
         for (direction, expected) in [
             (Vector3::z(), sky.zenith_color),
             (Vector3::x(), sky.horizon_color),

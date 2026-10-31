@@ -17,12 +17,15 @@
   "scene": {
     "camera": {
       "position": [2.5, -4.5, 2.6],
-      "target": [0.0, 0.0, 0.9],
+      "target": [0.0, 0.0, 0.4],
       "up": [0.0, 0.0, 1.0],
       "fov_y_degrees": 35.0
     },
     "background_linear_rgb": [0.08, 0.10, 0.14],
     "environment": {
+      "map_path": null,
+      "rotation_degrees": 0.0,
+      "intensity": 1.0,
       "horizon_linear_rgb": [0.16, 0.20, 0.28],
       "zenith_linear_rgb": [0.04, 0.08, 0.18]
     },

@@ -405,6 +405,21 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - **验收：** 六顶点位移、3 cm 离地间隙及 0.8 m 截面高度核对通过；`cargo fmt`、`cargo fmt --check`、221 项单元测试、18 项集成测试、严格 `cargo clippy --locked --all-targets -- -D warnings` 和 `git diff --check` 通过。release 主程序及三个相机 examples 实际运行成功，已查看更新的 512×512、64 SPP Combined。
 - **范围与限制：** 本次仅调整配置场景位置；相机、光源、采样参数和光照模型保持原设置。下一步可按新的棱镜高度单独调整相机构图。
 
+### V0.4 阶段 21 — 相机对准降低后的棱镜
+
+- [x] 按用户参数将默认相机目标调整为 `[0,0,0.4]`，位置 `[2.5,-4.5,2.6]`、up `[0,0,1]` 与 FOV `35°`；同步 JSON、Rust 默认值与文档。
+- **验收：** `cargo fmt`、`cargo fmt --check`、221 项单元测试、18 项集成测试、严格 Clippy 与 `git diff --check` 通过。release 主程序和三个相机 examples 运行成功，已查看更新的 512×512、64 SPP Combined；七张相机图更新，其余九张光源/历史图逐字节不变。
+- **范围与限制：** 仅调整相机朝向并更新相机示例图，光源地面图不受影响；仍使用针孔相机，后续可单独调整构图或景深。
+
+### HDR 阶段 B — 将 Environment Map 接入 Scene
+
+- [x] `EnvironmentConfig` 增加可缺省的 `map_path`、`rotation_degrees`、`intensity`，默认分别为 `None`、`0`、`1`；保留渐变颜色及旧 JSON，验证有限旋转角与有限非负强度。
+- [x] 将运行时 `Environment` 放入 `environment` 模块并保留 `scene::Environment` 重导出；独占可选 `EnvironmentMap`，移除 `Copy/Clone`。`Scene::from_config` 有路径时加载一次 HDR，文件错误向上传递，查询只访问缓存像素。
+- [x] HDR 优先于渐变；使用 `Rz(-rotation)` 将世界方向转入贴图坐标，正角度表示环境绕世界 +Z 旋转。采样后乘线性强度，保留 HDR 并拒绝溢出；没有贴图时保留原渐变公式。
+- [x] 相机背景、玻璃反射/透射背景及 Lambertian 环境照明通过原 `radiance(direction)` 自动使用 HDR；积分公式、太阳与光子焦散实现保持不变。README 说明相对路径以程序启动工作目录为基准。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked`（240 项单元测试、29 项集成测试）、`cargo clippy --locked --all-targets -- -D warnings` 和 `git diff --check` 通过。本阶段新增 2 项配置测试和 11 项合成 HDR 集成测试，覆盖兼容/往返、数据源优先级、旋转/强度、非法输入/溢出、文件错误、删除源文件后的查询、背景、真实玻璃双事件、四个相机照明入口与太阳/光子回归。
+- **范围与限制：** 仅完成阶段 B；不实现 HDRI 重要性采样、MIS、透明环境阴影或环境光子追踪。环境仍用材质余弦采样；下一阶段可单独评估 HDRI 重要性采样，本次不提前实现。
+
 ## 6. Codex 执行约定
 
 1. **每次只实现当前一个里程碑**，完成后总结修改文件、运行命令、测试结果和下一步；不要抢跑后续阶段。

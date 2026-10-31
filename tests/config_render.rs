@@ -127,6 +127,7 @@ fn sky_from_json_is_added_once_in_all_camera_entries_without_changing_sun_or_pho
     config.scene.environment = Some(spectral_caustics::config::sceneconfig::EnvironmentConfig {
         horizon_linear_rgb: [0.03, 0.04, 0.06],
         zenith_linear_rgb: [0.03, 0.04, 0.06],
+        ..Default::default()
     });
     let loaded = Config::from_json(&config.to_json().unwrap()).unwrap();
     let scene = Scene::from_config(&loaded.scene).unwrap();
@@ -151,7 +152,8 @@ fn sky_from_json_is_added_once_in_all_camera_entries_without_changing_sun_or_pho
             .unwrap(),
         ]
     };
-    let expected_sky = linear_srgb_to_xyz(scene.environment.unwrap().horizon_color * 0.8).unwrap();
+    let expected_sky =
+        linear_srgb_to_xyz(scene.environment.as_ref().unwrap().horizon_color * 0.8).unwrap();
     let baseline = render_entries(&unlit);
     let with_sky = render_entries(&scene);
     for (entry, (before, after)) in baseline.iter().zip(&with_sky).enumerate() {
@@ -393,6 +395,7 @@ fn finite_ground_keeps_lighting_beyond_receiver_and_shows_sky_beyond_its_edge() 
     config.scene.environment = Some(spectral_caustics::config::sceneconfig::EnvironmentConfig {
         horizon_linear_rgb: [0.03, 0.04, 0.06],
         zenith_linear_rgb: [0.03, 0.04, 0.06],
+        ..Default::default()
     });
     config.scene.ground_checkerboard = Some(Default::default());
     config.scene.camera.up = [0.0, 1.0, 0.0];
