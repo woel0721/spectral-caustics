@@ -441,15 +441,17 @@ cargo run --release --locked --example camera_glass_with_ground -- 128
 `render_camera_glass_with_lighting` 在 `trace_camera_path` 命中地面时计算解析直射，再读取焦散专用图；**不读取 sampled direct 图**。解析直射的 Shadow Ray 检查完整场景，包括玻璃，查询至无穷远；焦散图已包含折射路径的可见性，不能再乘直射方向的二值阴影。receiver 只限制焦散数据查询，范围外焦散为零，普通地面仍接受太阳直射；未模糊 receiver 边缘，也未跳过玻璃遮挡。
 
 ```rust
-use spectral_caustics::render::{GroundLightingComponent, Render, render_camera_glass_with_lighting};
+use spectral_caustics::render::{Render, render_camera_glass_components};
 
 let renderer = Render::new(config.render.clone())?;
 let lighting = renderer.render_lighting(&scene)?;
-let image = render_camera_glass_with_lighting(
+let images = render_camera_glass_components(
     &scene, &lighting, config.render.width, config.render.height,
-    config.render.camera_spp, config.render.seed, GroundLightingComponent::Combined,
+    config.render.camera_spp, config.render.seed,
 )?;
-renderer.save(&image, "output/camera_combined.png")?;
+renderer.save(&images.direct, "output/camera_direct.png")?;
+renderer.save(&images.caustics, "output/camera_caustics.png")?;
+renderer.save(&images.combined, "output/camera_combined.png")?;
 ```
 
 ```bash
@@ -458,7 +460,11 @@ cargo run --release --locked --example camera_direct_caustics
 cargo run --release --locked --example camera_direct_caustics -- 128
 ```
 
-示例只调用一次 `render_lighting`，然后以相同相机种子、SPP 和子像素抖动输出三张 512×512 图。阶段 16 起，Direct 包含太阳、天空照明及可见背景；Caustics 只显示折射焦散，未命中时为零，因此固定路径样本满足 **Direct + Caustics = Combined（线性 XYZ/辐亮度）**。保存后的 sRGB PNG 已经过曝光、裁剪和非线性编码，不能直接相加字节。
+示例只调用一次 `render_lighting`，再调用一次 `render_camera_glass_components` 输出三张 512×512 图。每个像素仅遍历一次 SPP，每条相机路径同时返回 Direct/Caustics 线性 RGB；地面解析太阳辐照度与焦散图查询各计算一次，分别乘 `rho/pi`，再各乘一次棋盘格系数和玻璃吞吐量。环境背景、Lambertian 环境照明和非地面表面的太阳照明全部进入 Direct；Caustics 只接收焦散图的地面反射。两个分量分别平均，平均后的 RGB 相加并转 XYZ 得到 Combined，允许颜色转换/求和顺序产生的微小浮点误差。
+
+子像素与 Fresnel 采样继续使用 `StdRng(seed)`；环境方向继续使用独立的 `StdRng(seed ^ ENVIRONMENT_SEED_OFFSET)`，不重复消耗玻璃 RNG。生成三图所需的相机路径数由 `3 * width * height * spp` 减至 `width * height * spp`，减少三分之二；光源端光子追踪保持不变。旧 `render_camera_glass_with_lighting(..., component)` 接口仍可用，只分配一张结果图，并跳过未选择分量的光照查询；新接口保存三张 XYZ 图，512×512 时结果缓冲约 18 MiB。
+
+固定路径样本继续满足 **Direct + Caustics = Combined（线性 XYZ/辐亮度，浮点容差内）**。保存后的 sRGB PNG 已经过曝光、裁剪和非线性编码，不能直接相加字节。
 
 | Direct：玻璃硬阴影 | Caustics：仅折射照明 | Combined：两者相加 |
 | --- | --- | --- |
@@ -666,7 +672,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-当前 240 项单元测试和 29 项集成测试通过，严格 Clippy 通过。环境积分测试覆盖方向查询统一、均匀环境归一化、渐变解析参考与收敛、部分/完全遮挡、固定种子、样本计数及分量相加。有限地面测试覆盖矩形边界/斜射交点、receiver 外扩、地面外背景与记录区内光子能量不变。棋盘格测试覆盖世界坐标/负坐标、边界、JSON 兼容、地面绑定、全部相机照明入口的一次反射率调制及玻璃路径分量。天空测试覆盖Monte Carlo 积分/材质反射率、太阳不重复计数、四个相机入口只加一次天空、玻璃吞吐量/最终方向背景、分量相加、光子输出独立性及旧配置兼容。方向采样测试覆盖 PDF 归一化、余弦分布矩、固定种子复现、BSDF 权重、材质/方向约定与非法输入。局部方向转换测试覆盖法线对齐、右手正交基、长度与角度保持、非法输入和溢出。新增材质测试覆盖 RGB/标量光谱两个接口、PBRT 反射基谱参考值与波长响应、非法输入、端点延拓和漫反射能量积分；颜色工具测试覆盖线性 sRGB→XYZ 的 D65 白点、三原色和往返转换。彩色合成测试覆盖 XYZ 通量与采样数归一化、独立单波长合成及遮挡丢失通量、固定模式中性白、色散分色与可复现、非法配置以及彩色 PNG 读回。新增光谱测试检查官方表格完整性及列和、已知 CMF/SPD 值、非整数波长插值、端点与表外行为、积分权重、D65 白点、不同积分步长的稳定性，以及非法输入和溢出。统一入口测试覆盖单张固定模式图与多张固定模式图的通量一致性、两模式共享采样、固定模式各波长分布相同而色散模式不同，以及色散波长缺失、非法或溢出时返回错误。测试覆盖固定模式忽略波长、色散模式要求有效波长、闭包只求值一次并复用于两个界面、闭包返回非法折射率时拒绝追踪、Cauchy 单位换算、可见光区间折射率单调性、非法波长与溢出、两种波长通过双界面后的已知落点，以及传入光子追踪的非法波长。三波长测试检查共享空间采样、完整 XYZ 能量守恒、采样数归一化、丢失通量不重分配、各波长结果与独立单波长追踪一致，以及图像分布不同且可复现。采样测试逐格检查每层恰有一个点、点不越出所属层、两轴随机偏移，以及固定种子下的发射位置和图像完全重复。增加采样数时检查总能量守恒与无玻璃图的噪声降低；两种光路通过同种子对照验证发射位置一致。其余测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。双线性测试覆盖已知小数位置的四点权重、像素中心、权重和、边缘与单像素尺寸、完整 XYZ 总能量守恒及遮挡边缘的平滑分配。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地；`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、编号与添加顺序。
+当前 242 项单元测试和 30 项集成测试通过，严格 Clippy 通过。环境积分测试覆盖方向查询统一、均匀环境归一化、渐变解析参考与收敛、部分/完全遮挡、固定种子、样本计数及分量相加。有限地面测试覆盖矩形边界/斜射交点、receiver 外扩、地面外背景与记录区内光子能量不变。棋盘格测试覆盖世界坐标/负坐标、边界、JSON 兼容、地面绑定、全部相机照明入口的一次反射率调制及玻璃路径分量。天空测试覆盖Monte Carlo 积分/材质反射率、太阳不重复计数、四个相机入口只加一次天空、玻璃吞吐量/最终方向背景、分量相加、光子输出独立性及旧配置兼容。方向采样测试覆盖 PDF 归一化、余弦分布矩、固定种子复现、BSDF 权重、材质/方向约定与非法输入。局部方向转换测试覆盖法线对齐、右手正交基、长度与角度保持、非法输入和溢出。新增材质测试覆盖 RGB/标量光谱两个接口、PBRT 反射基谱参考值与波长响应、非法输入、端点延拓和漫反射能量积分；颜色工具测试覆盖线性 sRGB→XYZ 的 D65 白点、三原色和往返转换。彩色合成测试覆盖 XYZ 通量与采样数归一化、独立单波长合成及遮挡丢失通量、固定模式中性白、色散分色与可复现、非法配置以及彩色 PNG 读回。新增光谱测试检查官方表格完整性及列和、已知 CMF/SPD 值、非整数波长插值、端点与表外行为、积分权重、D65 白点、不同积分步长的稳定性，以及非法输入和溢出。统一入口测试覆盖单张固定模式图与多张固定模式图的通量一致性、两模式共享采样、固定模式各波长分布相同而色散模式不同，以及色散波长缺失、非法或溢出时返回错误。测试覆盖固定模式忽略波长、色散模式要求有效波长、闭包只求值一次并复用于两个界面、闭包返回非法折射率时拒绝追踪、Cauchy 单位换算、可见光区间折射率单调性、非法波长与溢出、两种波长通过双界面后的已知落点，以及传入光子追踪的非法波长。三波长测试检查共享空间采样、完整 XYZ 能量守恒、采样数归一化、丢失通量不重分配、各波长结果与独立单波长追踪一致，以及图像分布不同且可复现。采样测试逐格检查每层恰有一个点、点不越出所属层、两轴随机偏移，以及固定种子下的发射位置和图像完全重复。增加采样数时检查总能量守恒与无玻璃图的噪声降低；两种光路通过同种子对照验证发射位置一致。其余测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。双线性测试覆盖已知小数位置的四点权重、像素中心、权重和、边缘与单像素尺寸、完整 XYZ 总能量守恒及遮挡边缘的平滑分配。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地；`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、编号与添加顺序。
 
 7 项三棱镜测试覆盖 8 个面的已知交点和朝外单位法线、最近面选择、棱边命中、内外求交、自相交与非有限光线；场景测试验证同一集合中不同物体的求交，以及改变添加顺序后仍选择最近交点。
 

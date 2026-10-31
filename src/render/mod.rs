@@ -10,9 +10,9 @@ pub mod utils;
 pub use camera_debug::render_camera_debug;
 pub use caustics::SpectralLighting;
 pub use integrator::{
-    GroundLightingComponent, lambertian_radiance, render_camera_glass,
-    render_camera_glass_with_ground, render_camera_glass_with_lighting, render_camera_lit,
-    sample_ground_irradiance,
+    CameraLightingImages, GroundLightingComponent, lambertian_radiance, render_camera_glass,
+    render_camera_glass_components, render_camera_glass_with_ground,
+    render_camera_glass_with_lighting, render_camera_lit, sample_ground_irradiance,
 };
 
 use self::{

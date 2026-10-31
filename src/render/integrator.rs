@@ -30,6 +30,42 @@ pub enum GroundLightingComponent {
     Combined,
 }
 
+/// 同一批相机路径的三个结果，均为未曝光的线性 XYZ 辐亮度。
+pub struct CameraLightingImages {
+    pub direct: Framebuffer,
+    pub caustics: Framebuffer,
+    pub combined: Framebuffer,
+}
+
+/// 单条路径或像素均值的线性 RGB 分量，共享玻璃路径和吞吐量。
+#[derive(Default)]
+struct CameraPathComponents {
+    direct: Vector3<f64>,
+    caustics: Vector3<f64>,
+}
+
+impl CameraPathComponents {
+    fn select(&self, component: GroundLightingComponent) -> Vector3<f64> {
+        match component {
+            GroundLightingComponent::Direct => self.direct,
+            GroundLightingComponent::Caustics => self.caustics,
+            GroundLightingComponent::Combined => self.direct + self.caustics,
+        }
+    }
+}
+
+/// primary 保存单图入口所选分量，或三图入口的 Combined；仅三图入口分配 split。
+struct CameraBuffers {
+    primary: Framebuffer,
+    split: Option<(Framebuffer, Framebuffer)>,
+}
+
+#[derive(Default)]
+struct GroundIrradianceComponents {
+    direct_xyz: Vector3<f64>,
+    caustics_xyz: Vector3<f64>,
+}
+
 struct SunGroundLighting {
     wi: Vector3<f64>,
     irradiance_xyz: Vector3<f64>,
@@ -219,6 +255,36 @@ pub fn render_camera_glass_with_lighting(
     seed: u64,
     component: GroundLightingComponent,
 ) -> Result<Framebuffer, Box<dyn Error>> {
+    let ground = bind_spectral_ground_lighting(scene, lighting, component)?;
+    render_camera_glass_impl(scene, width, height, spp, seed, Some(&ground))
+}
+
+/// 一次遍历像素和 SPP，同时估计 Direct 和 Caustics，均值相加得到 Combined。
+/// Direct 包含环境背景、环境照明及解析太阳；Caustics 只包含焦散贴图的地面反射。
+/// 子像素/玻璃 RNG 与独立环境 RNG 的种子和消耗顺序沿用单图入口。
+pub fn render_camera_glass_components(
+    scene: &Scene,
+    lighting: &SpectralLighting,
+    width: usize,
+    height: usize,
+    spp: usize,
+    seed: u64,
+) -> Result<CameraLightingImages, Box<dyn Error>> {
+    let ground = bind_spectral_ground_lighting(scene, lighting, GroundLightingComponent::Combined)?;
+    let buffers = render_camera_buffers(scene, width, height, spp, seed, Some(&ground), true)?;
+    let (direct, caustics) = buffers.split.expect("三图入口必须分配分量缓冲");
+    Ok(CameraLightingImages {
+        direct,
+        caustics,
+        combined: buffers.primary,
+    })
+}
+
+fn bind_spectral_ground_lighting<'a>(
+    scene: &Scene,
+    lighting: &'a SpectralLighting,
+    component: GroundLightingComponent,
+) -> Result<GroundLighting<'a>, Box<dyn Error>> {
     if lighting.light_wi.iter().any(|v| !v.is_finite())
         || (lighting.light_wi.norm() - 1.0).abs() > 1e-12
         || lighting.light_wi.z <= PARALLEL_EPSILON
@@ -235,7 +301,7 @@ pub fn render_camera_glass_with_lighting(
         irradiance_xyz: lighting.sun_irradiance_xyz,
         component,
     });
-    render_camera_glass_impl(scene, width, height, spp, seed, Some(&ground))
+    Ok(ground)
 }
 
 fn bind_ground_lighting<'a>(
@@ -294,6 +360,18 @@ fn render_camera_glass_impl(
     seed: u64,
     ground: Option<&GroundLighting<'_>>,
 ) -> Result<Framebuffer, Box<dyn Error>> {
+    Ok(render_camera_buffers(scene, width, height, spp, seed, ground, false)?.primary)
+}
+
+fn render_camera_buffers(
+    scene: &Scene,
+    width: usize,
+    height: usize,
+    spp: usize,
+    seed: u64,
+    ground: Option<&GroundLighting<'_>>,
+    split: bool,
+) -> Result<CameraBuffers, Box<dyn Error>> {
     if spp == 0 {
         return Err("相机 SPP 必须大于零".into());
     }
@@ -305,10 +383,28 @@ fn render_camera_glass_impl(
         .ok_or("相机路径样本总数溢出")?;
     let mut rng = StdRng::seed_from_u64(seed);
     let mut environment_rng = StdRng::seed_from_u64(seed ^ ENVIRONMENT_SEED_OFFSET);
-    let mut framebuffer = Framebuffer::new(width, height);
+    if split {
+        width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(3 * size_of::<Vector3<f64>>()))
+            .filter(|&bytes| bytes <= isize::MAX as usize)
+            .ok_or("三张相机图的像素缓冲总大小溢出")?;
+    }
+    let mut buffers = CameraBuffers {
+        primary: Framebuffer::new(width, height),
+        split: split.then(|| {
+            (
+                Framebuffer::new(width, height),
+                Framebuffer::new(width, height),
+            )
+        }),
+    };
+    let component = ground
+        .and_then(|g| g.sun.as_ref())
+        .map_or(GroundLightingComponent::Combined, |sun| sun.component);
     for y in 0..height {
         for x in 0..width {
-            let mut mean_rgb = Vector3::zeros();
+            let mut mean = CameraPathComponents::default();
             for _ in 0..spp {
                 let offset = Vector2::new(rng.random::<f64>(), rng.random::<f64>());
                 let ray = scene
@@ -316,7 +412,7 @@ fn render_camera_glass_impl(
                     .ray_for_pixel_sample(x, y, width, height, offset)
                     .ok_or("无法生成子像素摄像机光线")?;
                 // 先缩放每项再相加，避免有限样本之和溢出而平均值仍有限。
-                mean_rgb += trace_camera_path(
+                let path = trace_camera_path(
                     scene,
                     ray,
                     &mut rng,
@@ -324,18 +420,34 @@ fn render_camera_glass_impl(
                     light,
                     ground,
                     &mut environment_rng,
-                )? / spp as f64;
+                )?;
+                mean.direct += path.direct / spp as f64;
+                mean.caustics += path.caustics / spp as f64;
             }
-            let xyz = linear_srgb_to_xyz(mean_rgb).ok_or("相机样本平均颜色非法或计算溢出")?;
-            if !framebuffer.set(x, y, xyz) {
-                return Err("无法写入玻璃路径图像素".into());
+            set_camera_pixel(&mut buffers.primary, x, y, mean.select(component))?;
+            if let Some((direct, caustics)) = &mut buffers.split {
+                set_camera_pixel(direct, x, y, mean.direct)?;
+                set_camera_pixel(caustics, x, y, mean.caustics)?;
             }
         }
     }
-    Ok(framebuffer)
+    Ok(buffers)
 }
 
-/// 追踪一条相机射线，返回未曝光的线性 RGB 辐亮度。
+fn set_camera_pixel(
+    framebuffer: &mut Framebuffer,
+    x: usize,
+    y: usize,
+    rgb: Vector3<f64>,
+) -> Result<(), Box<dyn Error>> {
+    let xyz = linear_srgb_to_xyz(rgb).ok_or("相机样本平均颜色非法或计算溢出")?;
+    if !framebuffer.set(x, y, xyz) {
+        return Err("无法写入玻璃路径图像素".into());
+    }
+    Ok(())
+}
+
+/// 追踪一条相机射线，返回未曝光的 Direct/Caustics 线性 RGB 辐亮度。
 ///
 /// 每条路径重新初始化吞吐量与辐亮度；RNG 由像素采样循环持有，不能逐路径重设种子。
 /// wo = -ray.direction，保留朝外几何法线；玻璃只乘 sample.weight。
@@ -351,9 +463,9 @@ fn trace_camera_path(
     light: f64,
     ground: Option<&GroundLighting<'_>>,
     environment_rng: &mut dyn rand::RngCore,
-) -> Result<Vector3<f64>, Box<dyn Error>> {
+) -> Result<CameraPathComponents, Box<dyn Error>> {
     let mut throughput = 1.0;
-    let mut radiance = Vector3::zeros();
+    let mut radiance = CameraPathComponents::default();
     // 天空及可见背景归入 Direct；不改相机 RNG，三张调试图共享相同玻璃路径。
     let include_environment = ground
         .and_then(|g| g.sun.as_ref())
@@ -361,7 +473,7 @@ fn trace_camera_path(
     for bounce in 0..=MAX_GLASS_BOUNCES {
         let Some(hit) = scene.intersect(&ray) else {
             if include_environment {
-                radiance += scene
+                radiance.direct += scene
                     .background_radiance(ray.direction)
                     .ok_or("背景辐亮度无效")?
                     * throughput;
@@ -396,11 +508,17 @@ fn trace_camera_path(
                 break;
             }
             let e = ground_irradiance(scene, &hit, ground)?;
-            let lo_xyz = lambertian_radiance(e, ground.rho).ok_or("地面辐亮度计算失败")?;
+            let direct_xyz =
+                lambertian_radiance(e.direct_xyz, ground.rho).ok_or("地面直射辐亮度计算失败")?;
+            let caustics_xyz =
+                lambertian_radiance(e.caustics_xyz, ground.rho).ok_or("地面焦散辐亮度计算失败")?;
             // 保留超出 sRGB 色域的线性值，最终输出时才裁剪；中性反射直接缩放 XYZ。
-            radiance += (xyz_to_linear_srgb(lo_xyz).ok_or("地面 XYZ 辐亮度转换失败")?
+            let weight = reflectance_scale * throughput;
+            radiance.direct += (xyz_to_linear_srgb(direct_xyz).ok_or("地面 XYZ 辐亮度转换失败")?
                 + environment)
-                * (reflectance_scale * throughput);
+                * weight;
+            radiance.caustics +=
+                xyz_to_linear_srgb(caustics_xyz).ok_or("地面焦散 XYZ 辐亮度转换失败")? * weight;
             break;
         }
         if !material.is_delta() {
@@ -412,7 +530,7 @@ fn trace_camera_path(
                     ),
                 None => direct_lighting(scene, &hit, material, wo, light_wi, light)?,
             };
-            radiance += (direct + environment) * (reflectance_scale * throughput);
+            radiance.direct += (direct + environment) * (reflectance_scale * throughput);
             break;
         }
         if bounce == MAX_GLASS_BOUNCES {
@@ -452,7 +570,12 @@ fn trace_camera_path(
         let origin = hit.coords + normal * (side * 10.0 * INTERSECTION_EPSILON);
         ray = Ray::new(origin, sample.wi).ok_or("玻璃路径射线起点或方向无效")?;
     }
-    if !radiance.iter().all(|value| value.is_finite()) {
+    if !radiance
+        .direct
+        .iter()
+        .chain(radiance.caustics.iter())
+        .all(|value| value.is_finite())
+    {
         return Err("玻璃路径颜色非法或计算溢出".into());
     }
     Ok(radiance)
@@ -462,12 +585,16 @@ fn ground_irradiance(
     scene: &Scene,
     hit: &Hit,
     ground: &GroundLighting<'_>,
-) -> Result<Vector3<f64>, Box<dyn Error>> {
+) -> Result<GroundIrradianceComponents, Box<dyn Error>> {
     let Some(sun) = &ground.sun else {
-        return sample_ground_irradiance(ground.irradiance, ground.receiver, hit.coords)
-            .ok_or_else(|| "地面辐照度采样失败".into());
+        // 旧完整地面图入口无法分解直射/焦散，保留其整图照明行为。
+        return Ok(GroundIrradianceComponents {
+            direct_xyz: sample_ground_irradiance(ground.irradiance, ground.receiver, hit.coords)
+                .ok_or("地面辐照度采样失败")?,
+            ..Default::default()
+        });
     };
-    let mut e = Vector3::zeros();
+    let mut e = GroundIrradianceComponents::default();
     if sun.component != GroundLightingComponent::Caustics {
         let normal = hit.normal / hit.normal.norm();
         let cosine = normal.dot(&sun.wi).clamp(0.0, 1.0);
@@ -475,12 +602,12 @@ fn ground_irradiance(
             && sun.irradiance_xyz != Vector3::zeros()
             && visible_to_light(scene, hit.coords, normal, sun.wi)?
         {
-            e += sun.irradiance_xyz * cosine;
+            e.direct_xyz = sun.irradiance_xyz * cosine;
         }
     }
     if sun.component != GroundLightingComponent::Direct {
         // 已包含折射路径的可见性和入射几何；不能再用直射方向的阴影清零。
-        e += sample_ground_irradiance(ground.irradiance, ground.receiver, hit.coords)
+        e.caustics_xyz = sample_ground_irradiance(ground.irradiance, ground.receiver, hit.coords)
             .ok_or("焦散辐照度采样失败")?;
     }
     Ok(e)
@@ -902,6 +1029,10 @@ mod tests {
         lighting.caustics.pixels.fill(e);
         let expected_sky = Vector3::zeros(); // 二值可见性：上方玻璃面遮挡所有环境方向。
         let expected_caustics = e * (0.8 / PI * 0.25 * 0.5);
+        let images = render_camera_glass_components(&scene, &lighting, 1, 1, 8, 42).unwrap();
+        assert!((images.direct.pixels[0] - expected_sky).norm() < 1e-12);
+        assert!((images.caustics.pixels[0] - expected_caustics).norm() < 1e-12);
+        assert!((images.combined.pixels[0] - expected_sky - expected_caustics).norm() < 1e-12);
         for (component, expected) in [
             (GroundLightingComponent::Direct, expected_sky),
             (GroundLightingComponent::Caustics, expected_caustics),
@@ -962,6 +1093,147 @@ mod tests {
     }
 
     #[test]
+    fn camera_components_trace_once_and_keep_glass_and_environment_rng_independent() {
+        use std::sync::{Arc, Mutex};
+
+        type Event = (Vector3<f64>, Vector3<f64>, GlassEvent, f64);
+        struct RecordingGlass {
+            glass: Dielectric,
+            events: Arc<Mutex<Vec<Event>>>,
+        }
+        impl Material for RecordingGlass {
+            fn evaluate(
+                &self,
+                wi: Vector3<f64>,
+                wo: Vector3<f64>,
+                normal: Vector3<f64>,
+                mode: EvaluateMode,
+            ) -> BsdfValue {
+                self.glass.evaluate(wi, wo, normal, mode)
+            }
+            fn sample(
+                &self,
+                wo: Vector3<f64>,
+                normal: Vector3<f64>,
+                rng: &mut dyn rand::RngCore,
+            ) -> Option<MaterialSample> {
+                let sample = self.glass.sample(wo, normal, rng)?;
+                let MaterialSample::Glass(glass) = sample else {
+                    unreachable!()
+                };
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push((wo, glass.wi, glass.event, glass.weight));
+                Some(sample)
+            }
+            fn is_delta(&self) -> bool {
+                true
+            }
+        }
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut scene = neutral_ground_scene(0.8);
+        scene.environment = Scene::new().environment;
+        scene.environment_samples = 3;
+        scene.add_with_material(
+            Box::new(Ground::new(1.0).unwrap()),
+            Box::new(RecordingGlass {
+                glass: Dielectric::new(1.5).unwrap(),
+                events: events.clone(),
+            }),
+        );
+        let mut lighting = split_ground_map(&scene);
+        lighting.caustics.pixels.fill(Vector3::new(0.1, 0.2, 0.4));
+        let (width, height, spp, seed) = (4, 3, 32, 42);
+        let mut reference_events = None;
+        for component in [
+            GroundLightingComponent::Direct,
+            GroundLightingComponent::Caustics,
+            GroundLightingComponent::Combined,
+        ] {
+            events.lock().unwrap().clear();
+            render_camera_glass_with_lighting(
+                &scene, &lighting, width, height, spp, seed, component,
+            )
+            .unwrap();
+            let actual = events.lock().unwrap().clone();
+            assert_eq!(actual.len(), width * height * spp);
+            if let Some(reference) = &reference_events {
+                assert_eq!(&actual, reference);
+            } else {
+                reference_events = Some(actual);
+            }
+        }
+        let reference_events = reference_events.unwrap();
+        assert!(
+            reference_events
+                .iter()
+                .any(|e| e.2 == GlassEvent::Reflection)
+        );
+        assert!(
+            reference_events
+                .iter()
+                .any(|e| e.2 == GlassEvent::Transmission)
+        );
+        events.lock().unwrap().clear();
+        let images =
+            render_camera_glass_components(&scene, &lighting, width, height, spp, seed).unwrap();
+        // 三张图共计只产生 N 次玻璃采样，而三个旧调用共计 3N 次。
+        assert_eq!(*events.lock().unwrap(), reference_events);
+        for environment_samples in [1, 7] {
+            scene.environment_samples = environment_samples;
+            events.lock().unwrap().clear();
+            let changed =
+                render_camera_glass_components(&scene, &lighting, width, height, spp, seed)
+                    .unwrap();
+            assert_eq!(*events.lock().unwrap(), reference_events);
+            assert_eq!(changed.caustics.pixels, images.caustics.pixels);
+        }
+        scene.environment = None;
+        events.lock().unwrap().clear();
+        let without_environment =
+            render_camera_glass_components(&scene, &lighting, width, height, spp, seed).unwrap();
+        assert_eq!(*events.lock().unwrap(), reference_events);
+        assert_eq!(without_environment.caustics.pixels, images.caustics.pixels);
+    }
+
+    #[test]
+    fn non_ground_lambertian_sun_and_environment_only_enter_direct() {
+        let mut scene = neutral_ground_scene(0.8);
+        let sky = Vector3::new(0.1, 0.2, 0.4);
+        scene.environment = Some(
+            crate::environment::Environment::try_from(&EnvironmentConfig {
+                horizon_linear_rgb: sky.into(),
+                zenith_linear_rgb: sky.into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let albedo = Vector3::new(0.2, 0.5, 0.8);
+        scene.add_with_material(
+            Box::new(Ground::new(1.0).unwrap()),
+            Box::new(Lambertian::new(albedo).unwrap()),
+        );
+        let mut lighting = split_ground_map(&scene);
+        lighting.caustics.pixels.fill(Vector3::repeat(100.0));
+        let expected_rgb = albedo
+            .component_mul(&(xyz_to_linear_srgb(lighting.sun_irradiance_xyz).unwrap() / PI + sky));
+        let expected_xyz = linear_srgb_to_xyz(expected_rgb).unwrap();
+        let images = render_camera_glass_components(&scene, &lighting, 3, 2, 8, 42).unwrap();
+        for ((direct, caustics), combined) in images
+            .direct
+            .pixels
+            .iter()
+            .zip(&images.caustics.pixels)
+            .zip(&images.combined.pixels)
+        {
+            assert!((direct - expected_xyz).norm() < 1e-12);
+            assert_eq!(*caustics, Vector3::zeros());
+            assert_eq!(direct, combined);
+        }
+    }
+
+    #[test]
     fn analytic_direct_is_continuous_across_receiver_and_window_without_double_counting() {
         let mut scene = neutral_ground_scene(0.8);
         scene.receiver.min_m = Vector2::repeat(-0.1);
@@ -1016,6 +1288,17 @@ mod tests {
                     GroundLightingComponent::Combined,
                 )
                 .unwrap();
+                let images =
+                    render_camera_glass_components(&scene, &lighting, 3, 2, spp, 42).unwrap();
+                assert_eq!(images.direct.pixels, direct.pixels);
+                assert_eq!(images.combined.pixels, direct.pixels);
+                assert!(
+                    images
+                        .caustics
+                        .pixels
+                        .iter()
+                        .all(|p| *p == Vector3::zeros())
+                );
                 assert_eq!(direct.pixels, combined.pixels);
                 for xyz in direct.pixels {
                     assert!((xyz - expected).norm() < 1e-12, "x={x}: {xyz:?}");
@@ -1103,6 +1386,7 @@ mod tests {
         let scene = neutral_ground_scene(0.8);
         let mut lighting = split_ground_map(&scene);
         let render = |s: &Scene, l: &SpectralLighting| {
+            assert!(render_camera_glass_components(s, l, 1, 1, 1, 42).is_err());
             render_camera_glass_with_lighting(s, l, 1, 1, 1, 42, GroundLightingComponent::Combined)
         };
         assert!(render(&ground_scene(), &lighting).is_err());
@@ -1114,6 +1398,18 @@ mod tests {
         lighting.light_wi = Vector3::z();
         lighting.caustics.pixels[0].x = -1.0;
         assert!(render(&scene, &lighting).is_err());
+        let lighting = split_ground_map(&scene);
+        for (width, height, spp) in [
+            (0, 1, 1),
+            (1, 0, 1),
+            (1, 1, 0),
+            (usize::MAX, 2, 1),
+            (2, 1, usize::MAX),
+        ] {
+            assert!(
+                render_camera_glass_components(&scene, &lighting, width, height, spp, 42).is_err()
+            );
+        }
     }
 
     #[test]
@@ -1378,6 +1674,7 @@ mod tests {
             &mut StdRng::seed_from_u64(seed ^ ENVIRONMENT_SEED_OFFSET),
         )
         .unwrap()
+        .select(GroundLightingComponent::Combined)
     }
 
     #[test]

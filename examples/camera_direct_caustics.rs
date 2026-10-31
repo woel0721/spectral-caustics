@@ -2,7 +2,7 @@
 
 use spectral_caustics::{
     config::Config,
-    render::{GroundLightingComponent, Render, render_camera_glass_with_lighting},
+    render::{Render, render_camera_glass_components},
     scene::Scene,
 };
 use std::error::Error;
@@ -22,28 +22,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     let renderer = Render::new(config.render.clone())?;
     // 只发射一批光子，三张相机图共享未曝光的焦散数据和太阳光谱。
     let lighting = renderer.render_lighting(&scene)?;
-    for (component, path) in [
-        (GroundLightingComponent::Direct, "output/camera_direct.png"),
-        (
-            GroundLightingComponent::Caustics,
-            "output/camera_caustics.png",
-        ),
-        (
-            GroundLightingComponent::Combined,
-            "output/camera_combined.png",
-        ),
+    // 只追踪一批相机路径，同时得到两个分量，在线性 RGB 均值相加生成 Combined。
+    let images = render_camera_glass_components(
+        &scene,
+        &lighting,
+        config.render.width,
+        config.render.height,
+        spp,
+        config.render.seed,
+    )?;
+    for (component, image, path) in [
+        ("Direct", &images.direct, "output/camera_direct.png"),
+        ("Caustics", &images.caustics, "output/camera_caustics.png"),
+        ("Combined", &images.combined, "output/camera_combined.png"),
     ] {
-        let image = render_camera_glass_with_lighting(
-            &scene,
-            &lighting,
-            config.render.width,
-            config.render.height,
-            spp,
-            config.render.seed,
-            component,
-        )?;
-        renderer.save(&image, path)?;
-        println!("{component:?}: {path}，SPP={spp}");
+        renderer.save(image, path)?;
+        println!("{component}: {path}，SPP={spp}");
     }
     Ok(())
 }

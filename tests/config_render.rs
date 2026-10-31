@@ -14,8 +14,8 @@ use spectral_caustics::{
     optics::{iormode::IorMode, spectrum::rgb_reflectance},
     render::{
         GroundLightingComponent, Render, caustics::ground_to_pixel, framebuffer::Framebuffer,
-        render_camera_glass, render_camera_glass_with_ground, render_camera_glass_with_lighting,
-        render_camera_lit, utils::linear_srgb_to_xyz,
+        render_camera_glass, render_camera_glass_components, render_camera_glass_with_ground,
+        render_camera_glass_with_lighting, render_camera_lit, utils::linear_srgb_to_xyz,
     },
     scene::Scene,
 };
@@ -249,6 +249,35 @@ fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
     let direct = camera(GroundLightingComponent::Direct);
     let caustics = camera(GroundLightingComponent::Caustics);
     let combined = camera(GroundLightingComponent::Combined);
+    let images =
+        render_camera_glass_components(&scene, &lighting, 24, 16, 16, config.render.seed).unwrap();
+    let repeated =
+        render_camera_glass_components(&scene, &lighting, 24, 16, 16, config.render.seed).unwrap();
+    for (actual, reference, repeated) in [
+        (&images.direct, &direct, &repeated.direct),
+        (&images.caustics, &caustics, &repeated.caustics),
+        (&images.combined, &combined, &repeated.combined),
+    ] {
+        assert_eq!(actual.pixels, repeated.pixels);
+        for (actual, reference) in actual.pixels.iter().zip(&reference.pixels) {
+            assert!((actual - reference).norm() < 1e-12);
+        }
+    }
+    for ((direct, caustics), combined) in images
+        .direct
+        .pixels
+        .iter()
+        .zip(&images.caustics.pixels)
+        .zip(&images.combined.pixels)
+    {
+        assert!((direct + caustics - combined).norm() < 1e-12);
+    }
+    // 相机查询不能修改光源端的照明数据或随机序列。
+    let after = renderer.render_lighting(&scene).unwrap();
+    assert_eq!(lighting.direct.pixels, after.direct.pixels);
+    assert_eq!(lighting.caustics.pixels, after.caustics.pixels);
+    assert_eq!(lighting.sun_irradiance_xyz, after.sun_irradiance_xyz);
+    assert_eq!(renderer.render(&scene).unwrap().pixels, legacy.pixels);
     let mut solar_scene = Scene::from_config(&config.scene).unwrap();
     solar_scene.environment = None;
     solar_scene.environment_samples = 7;
@@ -281,9 +310,9 @@ fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
     }
     let directory = TemporaryDirectory::new();
     for (name, image) in [
-        ("direct", direct),
-        ("caustics", caustics),
-        ("combined", combined),
+        ("direct", images.direct),
+        ("caustics", images.caustics),
+        ("combined", images.combined),
     ] {
         let path = directory.0.join(format!("{name}.png"));
         renderer.save(&image, &path).unwrap();
@@ -314,6 +343,7 @@ fn checkerboard_modulates_all_camera_lighting_once_without_changing_irradiance()
     };
     lighting.caustics.pixels.fill(ground_map.pixels[0]);
     let entries = |scene: &Scene| {
+        let images = render_camera_glass_components(scene, &lighting, 2, 2, 8, 42).unwrap();
         [
             render_camera_lit(scene, 2, 2).unwrap(),
             render_camera_glass(scene, 2, 2, 8, 42).unwrap(),
@@ -348,6 +378,9 @@ fn checkerboard_modulates_all_camera_lighting_once_without_changing_irradiance()
                 GroundLightingComponent::Combined,
             )
             .unwrap(),
+            images.direct,
+            images.caustics,
+            images.combined,
         ]
     };
     for (x, y, scale) in [

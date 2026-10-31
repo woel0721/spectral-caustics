@@ -10,9 +10,9 @@ use spectral_caustics::{
     environment::{Environment, EnvironmentMap},
     material::{GlassEvent, MaterialSample},
     render::{
-        GroundLightingComponent, Render, framebuffer::Framebuffer, render_camera_glass,
-        render_camera_glass_with_ground, render_camera_glass_with_lighting, render_camera_lit,
-        utils::linear_srgb_to_xyz,
+        GroundLightingComponent, Render, SpectralLighting, framebuffer::Framebuffer,
+        render_camera_glass, render_camera_glass_components, render_camera_glass_with_ground,
+        render_camera_glass_with_lighting, render_camera_lit, utils::linear_srgb_to_xyz,
     },
     scene::Scene,
 };
@@ -414,6 +414,14 @@ fn all_camera_entries_integrate_hdr_with_lambertian_without_changing_photon_ligh
     let expected = linear_srgb_to_xyz(Vector3::new(8.0, 4.0, 2.0) * (0.8 * 0.25)).unwrap();
     for samples in [1, 7] {
         scene.environment_samples = samples;
+        let components = render_camera_glass_components(&scene, &lighting, 3, 2, 8, 42).unwrap();
+        assert!(
+            components
+                .caustics
+                .pixels
+                .iter()
+                .all(|p| *p == Vector3::zeros())
+        );
         let images = [
             render_camera_lit(&scene, 3, 2).unwrap(),
             render_camera_glass(&scene, 3, 2, 8, 42).unwrap(),
@@ -428,10 +436,83 @@ fn all_camera_entries_integrate_hdr_with_lambertian_without_changing_photon_ligh
                 GroundLightingComponent::Combined,
             )
             .unwrap(),
+            components.direct,
+            components.combined,
         ];
         for image in images {
             for xyz in image.pixels {
                 assert_rgb(xyz, expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn hdr_camera_components_match_single_entries_for_background_diffuse_and_glass() {
+    let hdr = TemporaryHdr::new(false);
+    for view in 0..3 {
+        let mut config = scene_config(EnvironmentConfig {
+            rotation_degrees: 90.0,
+            intensity: 0.5,
+            ..hdr.config()
+        });
+        config.environment_samples = 3;
+        config.ground_checkerboard = Some(Default::default());
+        if view == 0 {
+            config.camera.target = [0.0, 0.0, 4.0];
+        }
+        let mut scene = Scene::from_config(&config).unwrap();
+        if view == 2 {
+            scene.add_with_material(
+                Box::new(spectral_caustics::geometry::ground::Ground::new(2.0).unwrap()),
+                Box::new(spectral_caustics::material::dielectric::Dielectric::new(1.5).unwrap()),
+            );
+        }
+        let mut lighting = SpectralLighting {
+            direct: Framebuffer::new(1, 1),
+            caustics: Framebuffer::new(1, 1),
+            receiver: scene.receiver,
+            light_wi: Vector3::z(),
+            sun_irradiance_xyz: Vector3::new(0.2, 0.3, 0.4),
+        };
+        // 这张 sampled direct 不能参与相机解析直射。
+        lighting.direct.pixels.fill(Vector3::repeat(100.0));
+        lighting.caustics.pixels.fill(Vector3::new(0.4, 0.2, 0.1));
+        for (spp, seed) in [(1, 0), (16, 42), (7, 123)] {
+            let images =
+                render_camera_glass_components(&scene, &lighting, 7, 5, spp, seed).unwrap();
+            for (component, actual) in [
+                (GroundLightingComponent::Direct, &images.direct),
+                (GroundLightingComponent::Caustics, &images.caustics),
+                (GroundLightingComponent::Combined, &images.combined),
+            ] {
+                let reference = render_camera_glass_with_lighting(
+                    &scene, &lighting, 7, 5, spp, seed, component,
+                )
+                .unwrap();
+                for (actual, expected) in actual.pixels.iter().zip(&reference.pixels) {
+                    assert_rgb(*actual, *expected);
+                }
+            }
+            for ((direct, caustics), combined) in images
+                .direct
+                .pixels
+                .iter()
+                .zip(&images.caustics.pixels)
+                .zip(&images.combined.pixels)
+            {
+                assert_rgb(*direct + caustics, *combined);
+            }
+            if view == 0 {
+                assert!(
+                    images
+                        .caustics
+                        .pixels
+                        .iter()
+                        .all(|p| *p == Vector3::zeros())
+                );
+                let background = render_camera_glass(&scene, 7, 5, spp, seed).unwrap();
+                assert_eq!(images.direct.pixels, background.pixels);
             }
         }
     }
