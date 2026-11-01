@@ -15,11 +15,23 @@ use crate::{
 };
 use nalgebra::{Vector2, Vector3};
 use rand::{Rng, SeedableRng, rngs::StdRng};
+use rayon::prelude::*;
 use std::{error::Error, f64::consts::PI, mem::size_of};
 
 const MAX_GLASS_BOUNCES: usize = 8;
-// 环境采样独立于像素抖动/玻璃事件；启停天空或切换调试分量不改变相机路径。
+// 串行直接光照调试入口保留旧环境随机流。
 const ENVIRONMENT_SEED_OFFSET: u64 = 0x9e37_79b9_7f4a_7c15;
+// 环境 stream_id 与像素混合步长不同，避免相邻像素的相机/环境流使用同一种子。
+const CAMERA_STREAM: u64 = 0;
+const ENVIRONMENT_STREAM: u64 = 0xd1b5_4a32_d192_ed03;
+
+/// SplitMix64 风格混合；只依赖基础种子、行优先像素编号和随机流，与线程调度无关。
+fn pixel_seed(base_seed: u64, pixel_index: usize, stream_id: u64) -> u64 {
+    let mut z = base_seed ^ (pixel_index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ stream_id;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
 
 /// 调试分量；Direct 包含解析太阳、天空照明与背景，Caustics 只显示焦散。
 /// 三种模式复用相同相机 RNG/玻璃路径，Combined 为两者在线性空间中的和。
@@ -208,7 +220,7 @@ pub fn render_camera_lit(
 ///
 /// spp 必须大于零，表示每像素路径总数；每个样本在像素内均匀选取
 /// 两个 [0, 1) 偏移，随后独立追踪玻璃路径；spp=1 也包含子像素抖动。
-/// seed 只在渲染开始时初始化 RNG，按 y、x、样本（偏移、路径）顺序消耗随机数。
+/// seed 为每个行优先像素派生独立 RNG；像素并行，像素内按样本（偏移、路径）顺序采样。
 /// 路径最多经过八次玻璃散射，其余光照和截断规则见 trace_camera_path。
 /// 返回未经曝光的线性 XYZ，交给 Render::save 统一曝光和 sRGB 编码。
 pub fn render_camera_glass(
@@ -381,8 +393,6 @@ fn render_camera_buffers(
         .and_then(|pixels| pixels.checked_mul(spp))
         .and_then(|paths| paths.checked_mul(scene.environment_samples))
         .ok_or("相机路径样本总数溢出")?;
-    let mut rng = StdRng::seed_from_u64(seed);
-    let mut environment_rng = StdRng::seed_from_u64(seed ^ ENVIRONMENT_SEED_OFFSET);
     if split {
         width
             .checked_mul(height)
@@ -402,48 +412,68 @@ fn render_camera_buffers(
     let component = ground
         .and_then(|g| g.sun.as_ref())
         .map_or(GroundLightingComponent::Combined, |sun| sun.component);
-    for y in 0..height {
-        for x in 0..width {
-            let mut mean = CameraPathComponents::default();
-            for _ in 0..spp {
-                let offset = Vector2::new(rng.random::<f64>(), rng.random::<f64>());
-                let ray = scene
-                    .camera
-                    .ray_for_pixel_sample(x, y, width, height, offset)
-                    .ok_or("无法生成子像素摄像机光线")?;
-                // 先缩放每项再相加，避免有限样本之和溢出而平均值仍有限。
-                let path = trace_camera_path(
-                    scene,
-                    ray,
-                    &mut rng,
-                    light_wi,
-                    light,
-                    ground,
-                    &mut environment_rng,
-                )?;
-                mean.direct += path.direct / spp as f64;
-                mean.caustics += path.caustics / spp as f64;
-            }
-            set_camera_pixel(&mut buffers.primary, x, y, mean.select(component))?;
-            if let Some((direct, caustics)) = &mut buffers.split {
-                set_camera_pixel(direct, x, y, mean.direct)?;
-                set_camera_pixel(caustics, x, y, mean.caustics)?;
-            }
+    let render_pixel = |pixel_index: usize| -> Result<CameraPathComponents, String> {
+        let x = pixel_index % width;
+        let y = pixel_index / width;
+        let mut rng = StdRng::seed_from_u64(pixel_seed(seed, pixel_index, CAMERA_STREAM));
+        let mut environment_rng =
+            StdRng::seed_from_u64(pixel_seed(seed, pixel_index, ENVIRONMENT_STREAM));
+        let mut mean = CameraPathComponents::default();
+        // 像素内顺序累积，不做跨线程浮点归约，也不因输出分量重复追踪路径。
+        for _ in 0..spp {
+            let offset = Vector2::new(rng.random::<f64>(), rng.random::<f64>());
+            let ray = scene
+                .camera
+                .ray_for_pixel_sample(x, y, width, height, offset)
+                .ok_or("无法生成子像素摄像机光线")?;
+            // 先缩放每项再相加，避免有限样本之和溢出而平均值仍有限。
+            let path = trace_camera_path(
+                scene,
+                ray,
+                &mut rng,
+                light_wi,
+                light,
+                ground,
+                &mut environment_rng,
+            )
+            .map_err(|error| error.to_string())?;
+            mean.direct += path.direct / spp as f64;
+            mean.caustics += path.caustics / spp as f64;
         }
-    }
+        Ok(mean)
+    };
+    // 每个任务独占对应像素的可变引用；单图入口不分配 split 缓冲。
+    let result: Result<(), String> = match &mut buffers.split {
+        Some((direct, caustics)) => buffers
+            .primary
+            .pixels
+            .par_iter_mut()
+            .zip(direct.pixels.par_iter_mut())
+            .zip(caustics.pixels.par_iter_mut())
+            .enumerate()
+            .try_for_each(|(index, ((primary, direct), caustics))| {
+                let mean = render_pixel(index)?;
+                set_camera_pixel(primary, mean.select(component))?;
+                set_camera_pixel(direct, mean.direct)?;
+                set_camera_pixel(caustics, mean.caustics)
+            }),
+        None => buffers
+            .primary
+            .pixels
+            .par_iter_mut()
+            .enumerate()
+            .try_for_each(|(index, primary)| {
+                set_camera_pixel(primary, render_pixel(index)?.select(component))
+            }),
+    };
+    // Rayon 只传递 Send 的 String，离开并行迭代后恢复原公共错误接口。
+    result.map_err(Box::<dyn Error>::from)?;
     Ok(buffers)
 }
 
-fn set_camera_pixel(
-    framebuffer: &mut Framebuffer,
-    x: usize,
-    y: usize,
-    rgb: Vector3<f64>,
-) -> Result<(), Box<dyn Error>> {
+fn set_camera_pixel(pixel: &mut Vector3<f64>, rgb: Vector3<f64>) -> Result<(), String> {
     let xyz = linear_srgb_to_xyz(rgb).ok_or("相机样本平均颜色非法或计算溢出")?;
-    if !framebuffer.set(x, y, xyz) {
-        return Err("无法写入玻璃路径图像素".into());
-    }
+    *pixel = xyz;
     Ok(())
 }
 
@@ -774,6 +804,18 @@ mod tests {
     };
     use std::f64::consts::PI;
 
+    #[test]
+    fn pixel_seeds_separate_pixels_and_random_streams() {
+        for base_seed in [0, 42, u64::MAX] {
+            let mut seeds = std::collections::HashSet::new();
+            for index in 0..1024 {
+                for stream in [CAMERA_STREAM, ENVIRONMENT_STREAM] {
+                    assert!(seeds.insert(pixel_seed(base_seed, index, stream)));
+                }
+            }
+        }
+    }
+
     fn ground_scene() -> Scene {
         Scene::from_config(&SceneConfig {
             environment: None, // 隔离历史太阳/阴影测试的输入。
@@ -1094,6 +1136,16 @@ mod tests {
 
     #[test]
     fn camera_components_trace_once_and_keep_glass_and_environment_rng_independent() {
+        // 全局事件记录按采样顺序比较，固定单工作线程以免不同像素的记录交错。
+        // 多线程像素一致性与专用池接入由 config_render 集成测试覆盖。
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(check_camera_components_rng);
+    }
+
+    fn check_camera_components_rng() {
         use std::sync::{Arc, Mutex};
 
         type Event = (Vector3<f64>, Vector3<f64>, GlassEvent, f64);

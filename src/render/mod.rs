@@ -69,6 +69,32 @@ impl Render {
         result.map_err(Into::into)
     }
 
+    /// 使用配置尺寸及专用线程池，一批相机路径同时生成三张未曝光的 XYZ 图。
+    pub fn render_camera_glass_components(
+        &self,
+        scene: &Scene,
+        lighting: &SpectralLighting,
+        spp: usize,
+        seed: u64,
+    ) -> Result<CameraLightingImages, Box<dyn Error>> {
+        let work = || {
+            render_camera_glass_components(
+                scene,
+                lighting,
+                self.settings.width,
+                self.settings.height,
+                spp,
+                seed,
+            )
+            .map_err(|error| error.to_string())
+        };
+        let result = match &self.pool {
+            Some(pool) => pool.install(work),
+            None => work(),
+        };
+        result.map_err(Into::into)
+    }
+
     /// 用相同的其余配置生成另一种折射率模式的对照图。
     pub fn render_mode(&self, scene: &Scene, mode: IorMode) -> Result<Framebuffer, Box<dyn Error>> {
         let ground_id = scene.ground_id.ok_or("运行时场景缺少接收地面编号")?;

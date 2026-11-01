@@ -945,6 +945,139 @@ fn configured_thread_pool_and_block_counts_preserve_results_and_flux() {
 }
 
 #[test]
+fn camera_pixels_are_reproducible_across_configured_thread_counts() {
+    let mut config = small_config();
+    config.render.height = 16;
+    config.scene.environment = Some(Default::default());
+    config.scene.environment_samples = 3;
+    config.scene.ground_checkerboard = Some(Default::default());
+    let scene = Scene::from_config(&config.scene).unwrap();
+    let renderer = Render::new(config.render.clone()).unwrap();
+    let lighting = renderer.render_lighting(&scene).unwrap();
+    let reference = renderer
+        .render_camera_glass_components(&scene, &lighting, 8, config.render.seed)
+        .unwrap();
+    assert!(reference.direct.pixels.iter().any(|p| p.y > 0.0));
+    assert!(reference.caustics.pixels.iter().any(|p| p.y > 0.0));
+    for threads in [Some(1), Some(2), Some(4), None] {
+        config.render.thread_count = threads;
+        let renderer = Render::new(config.render.clone()).unwrap();
+        if let Some(threads) = threads {
+            assert_eq!(renderer.thread_count(), threads);
+        }
+        for _ in 0..2 {
+            let images = renderer
+                .render_camera_glass_components(&scene, &lighting, 8, config.render.seed)
+                .unwrap();
+            for (actual, expected, component) in [
+                (
+                    &images.direct,
+                    &reference.direct,
+                    GroundLightingComponent::Direct,
+                ),
+                (
+                    &images.caustics,
+                    &reference.caustics,
+                    GroundLightingComponent::Caustics,
+                ),
+                (
+                    &images.combined,
+                    &reference.combined,
+                    GroundLightingComponent::Combined,
+                ),
+            ] {
+                assert_eq!((actual.width, actual.height), (24, 16));
+                assert_eq!(actual.pixels, expected.pixels);
+                let single = render_camera_glass_with_lighting(
+                    &scene,
+                    &lighting,
+                    24,
+                    16,
+                    8,
+                    config.render.seed,
+                    component,
+                )
+                .unwrap();
+                assert_eq!(actual.pixels, single.pixels);
+            }
+            for ((direct, caustics), combined) in images
+                .direct
+                .pixels
+                .iter()
+                .zip(&images.caustics.pixels)
+                .zip(&images.combined.pixels)
+            {
+                assert!((direct + caustics - combined).norm() < 1e-12);
+            }
+        }
+        // 相机线程池和逐像素 RNG 不影响已有光源通道。
+        let photons = renderer.render_lighting(&scene).unwrap();
+        assert_eq!(photons.direct.pixels, lighting.direct.pixels);
+        assert_eq!(photons.caustics.pixels, lighting.caustics.pixels);
+    }
+}
+
+#[test]
+fn camera_paths_run_inside_the_configured_render_pool() {
+    use spectral_caustics::geometry::{hit::Hit, object::Hittable};
+    // 场景需要拥有静态几何，使用 Arc 共享只记录线程池大小的测试探针。
+    struct OwnedPoolProbe(std::sync::Arc<AtomicUsize>);
+    impl Hittable for OwnedPoolProbe {
+        fn intersect(&self, _ray: &Ray) -> Option<Hit> {
+            self.0
+                .fetch_or(1 << rayon::current_num_threads(), Ordering::Relaxed);
+            None
+        }
+    }
+    let mut config = small_config();
+    let mut scene = Scene::from_config(&config.scene).unwrap();
+    let lighting = Render::new(config.render.clone())
+        .unwrap()
+        .render_lighting(&scene)
+        .unwrap();
+    let observed = std::sync::Arc::new(AtomicUsize::new(0));
+    scene.add(Box::new(OwnedPoolProbe(observed.clone())));
+    for threads in [1, 2, 4] {
+        config.render.thread_count = Some(threads);
+        let renderer = Render::new(config.render.clone()).unwrap();
+        observed.store(0, Ordering::Relaxed);
+        renderer
+            .render_camera_glass_components(&scene, &lighting, 8, 42)
+            .unwrap();
+        assert_eq!(observed.load(Ordering::Relaxed), 1 << threads);
+        assert!(
+            renderer
+                .render_camera_glass_components(&scene, &lighting, 0, 42)
+                .is_err()
+        );
+    }
+    // 让错误发生在像素路径内，验证并行迭代和 install 两层都保留错误消息。
+    scene.environment = None;
+    scene.background_color = Vector3::repeat(f64::NAN);
+    scene.camera = spectral_caustics::camera::Camera::from_config(
+        &spectral_caustics::config::cameraconfig::CameraConfig {
+            position: [0.0, 0.0, 3.0],
+            target: [0.0, 0.0, 4.0],
+            up: [0.0, 1.0, 0.0],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let renderer = Render::new(config.render).unwrap();
+    let split_error = renderer
+        .render_camera_glass_components(&scene, &lighting, 8, 42)
+        .err()
+        .unwrap()
+        .to_string();
+    let single_error = render_camera_glass(&scene, 24, 16, 8, 42)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(!split_error.is_empty());
+    assert_eq!(split_error, single_error);
+}
+
+#[test]
 fn runtime_rejects_unsupported_counts_and_invalid_prism_geometry() {
     let original = SceneConfig::default();
     let mut config = original.clone();

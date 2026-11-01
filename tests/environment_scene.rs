@@ -315,7 +315,8 @@ fn camera_misses_return_rotated_scaled_hdr_background() {
         render_camera_lit(&scene, 1, 1).unwrap().pixels[0],
         linear_srgb_to_xyz(expected).unwrap(),
     );
-    let mut rng = StdRng::seed_from_u64(42);
+    // pixel_seed(0, 0, CAMERA_STREAM=0) = 0，独立推导新逐像素流的首条路径。
+    let mut rng = StdRng::seed_from_u64(0);
     let offset = Vector2::new(rng.random::<f64>(), rng.random::<f64>());
     let direction = scene
         .camera
@@ -325,7 +326,7 @@ fn camera_misses_return_rotated_scaled_hdr_background() {
     let local = Vector3::new(direction.y, -direction.x, direction.z);
     let expected = map.radiance(local).unwrap() * 2.0;
     assert_rgb(
-        render_camera_glass(&scene, 1, 1, 1, 42).unwrap().pixels[0],
+        render_camera_glass(&scene, 1, 1, 1, 0).unwrap().pixels[0],
         linear_srgb_to_xyz(expected).unwrap(),
     );
 }
@@ -342,8 +343,9 @@ fn glass_reflection_and_transmission_query_hdr_in_the_final_direction() {
     let scene = Scene::from_config(&config).unwrap();
     fs::remove_file(&hdr.0).unwrap();
     let mut checked = [false; 2];
-    for seed in 0..256 {
-        let mut rng = StdRng::seed_from_u64(seed);
+    let mut expected = Vector3::zeros();
+    let mut rng = StdRng::seed_from_u64(0);
+    for _ in 0..256 {
         let offset = Vector2::new(rng.random::<f64>(), rng.random::<f64>());
         let ray = scene
             .camera
@@ -357,19 +359,14 @@ fn glass_reflection_and_transmission_query_hdr_in_the_final_direction() {
             panic!("玻璃必须产生离散事件");
         };
         let index = usize::from(sample.event == GlassEvent::Transmission);
-        if !checked[index] {
-            let expected = map.radiance(sample.wi).unwrap() * sample.weight;
-            assert_rgb(
-                render_camera_glass(&scene, 1, 1, 1, seed).unwrap().pixels[0],
-                linear_srgb_to_xyz(expected).unwrap(),
-            );
-            checked[index] = true;
-        }
-        if checked == [true; 2] {
-            break;
-        }
+        expected += map.radiance(sample.wi).unwrap() * sample.weight / 256.0;
+        checked[index] = true;
     }
     assert_eq!(checked, [true; 2]);
+    assert_rgb(
+        render_camera_glass(&scene, 1, 1, 256, 0).unwrap().pixels[0],
+        linear_srgb_to_xyz(expected).unwrap(),
+    );
 }
 
 #[test]
