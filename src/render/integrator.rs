@@ -24,6 +24,8 @@ const ENVIRONMENT_SEED_OFFSET: u64 = 0x9e37_79b9_7f4a_7c15;
 // 环境 stream_id 与像素混合步长不同，避免相邻像素的相机/环境流使用同一种子。
 const CAMERA_STREAM: u64 = 0;
 const ENVIRONMENT_STREAM: u64 = 0xd1b5_4a32_d192_ed03;
+// HDRI 环境的方向策略概率；Environment 内部的 95%/5% 分布已经包含在 p_env 中。
+const ENVIRONMENT_BSDF_FRACTION: f64 = 0.5;
 
 /// SplitMix64 风格混合；只依赖基础种子、行优先像素编号和随机流，与线程调度无关。
 fn pixel_seed(base_seed: u64, pixel_index: usize, stream_id: u64) -> u64 {
@@ -754,24 +756,61 @@ fn environment_lighting(
     }
     let normal = unit_vector(hit.normal).ok_or("环境采样的命中法线无效")?;
     let wo = unit_vector(wo).ok_or("环境采样的出射方向无效")?;
+    let has_map = environment.has_map();
     let mut rgb = Vector3::zeros();
     for _ in 0..scene.environment_samples {
-        let Some(sample) = material.sample(wo, normal, rng) else {
-            continue;
-        };
-        let MaterialSample::Continuous { wi } = sample else {
-            return Err("非 delta 材质的环境采样必须返回连续方向".into());
+        // 短路判断让无 HDRI 的渐变天空不额外消耗策略选择随机数。
+        let wi = if !has_map || rng.random::<f64>() < ENVIRONMENT_BSDF_FRACTION {
+            let Some(sample) = material.sample(wo, normal, rng) else {
+                continue;
+            };
+            let MaterialSample::Continuous { wi } = sample else {
+                return Err("非 delta 材质的环境采样必须返回连续方向".into());
+            };
+            wi
+        } else {
+            environment
+                .sample_direction(rng)
+                .ok_or("HDRI 环境方向采样失败")?
+                .direction
         };
         let wi = unit_vector(wi).ok_or("环境采样方向无效")?;
         let cosine = normal.dot(&wi).clamp(0.0, 1.0);
-        let pdf = material.pdf(wi, wo, normal);
-        if !pdf.is_finite() || pdf <= 0.0 || cosine <= 0.0 {
-            return Err("环境采样 PDF 或入射半球无效".into());
+        let pdf_bsdf = material.pdf(wi, wo, normal);
+        if !pdf_bsdf.is_finite() || pdf_bsdf < 0.0 {
+            return Err("环境采样的 BSDF PDF 无效".into());
+        }
+        let pdf = if has_map {
+            let pdf_env = environment
+                .pdf_direction(wi)
+                .ok_or("HDRI 环境 PDF 查询失败")?;
+            if !pdf_env.is_finite() || pdf_env < 0.0 {
+                return Err("HDRI 环境 PDF 无效".into());
+            }
+            ENVIRONMENT_BSDF_FRACTION * pdf_bsdf + (1.0 - ENVIRONMENT_BSDF_FRACTION) * pdf_env
+        } else {
+            pdf_bsdf
+        };
+        if !pdf.is_finite() || pdf <= 0.0 {
+            return Err("环境采样的完整 PDF 必须有限且为正".into());
+        }
+        if cosine <= 0.0 {
+            if has_map {
+                // 全球 HDRI 样本可位于背半球，贡献为零，仍计入总样本数。
+                continue;
+            }
+            return Err("环境采样的入射半球无效".into());
         }
         let BsdfValue::Rgb(f_r) = material.evaluate(wi, wo, normal, EvaluateMode::Rgb) else {
             return Err("材质 RGB 求值必须返回 RGB BSDF".into());
         };
+        if f_r.iter().any(|value| !value.is_finite()) {
+            return Err("环境采样的 BSDF 求值无效".into());
+        }
         let li = environment.radiance(wi).ok_or("环境辐亮度无效")?;
+        if li.iter().any(|value| !value.is_finite()) {
+            return Err("环境辐亮度必须有限".into());
+        }
         let contribution = (f_r * (cosine / pdf)).component_mul(&li);
         if contribution.iter().any(|value| !value.is_finite()) {
             return Err("环境采样贡献计算溢出".into());
@@ -785,6 +824,9 @@ fn environment_lighting(
     }
     Ok(rgb)
 }
+
+#[cfg(test)]
+mod environment_tests;
 
 #[cfg(test)]
 mod tests {

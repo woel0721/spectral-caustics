@@ -449,6 +449,17 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked`（252 项单元测试、37 项集成测试）、`cargo clippy --locked --all-targets -- -D warnings` 及 `git diff --check` 通过。新增 9 项单元测试、5 项集成测试，并扩展原方向/文件缓存测试；覆盖概率归一化、单位方向、样本 PDF 一致、均匀球面矩与频率、亮区偏好/黑区支持、黑图、接缝/极点/随机数端点、单行/单列/非方形、极端 HDR、旋转/强度、固定种子及 1/2/4 线程只读共享采样。合成 HDR 的 `L_env/pdf` 估计恢复已知辐亮度积分。
 - **范围与限制：** 仅完成 D1，不接入 `environment_lighting()`、不修改 `trace_camera_path()`、不实现 MIS。分布使用像素亮度且在像素内分段常数，辐亮度继续双线性插值；额外 CDF/行边界缓存为 O(W×H)，4096×2048 约 64 MiB。下一阶段接入环境积分时使用 `f_r L_env V max(n·wi,0)/pdf` 并按总样本数平均，背半球与遮挡计零且保留分母；提高采样频率不能改变 HDRI 光照强度。
 
+### HDR 阶段 D2 — BSDF / HDRI 混合环境积分
+
+- [x] HDRI 环境每次用独立环境 RNG 按 50% BSDF / 50% HDRI 选择一个方向，两种来源均使用 `p_mix=0.5 p_bsdf+0.5 p_env`；D1 的 95%/5% 已包含在 p_env，不重复添加，也不额外乘除选择概率。
+- [x] 保留 `f_r L_env V max(n·wi,0)/p_mix` 的渲染方程及总样本数平均。接受零 BSDF PDF，完整 PDF 必须有限正数；背半球/遮挡计零且保留分母，检查 BSDF、辐亮度、贡献与累积的有限性。
+- [x] 增加只读 `Environment::has_map()`；无 HDRI 时维持原 BSDF 采样和 RNG 状态。生产改动仅涉及环境采样策略，不改玻璃/Fresnel、光源焦散、Lambertian、相机/Rayon/RNG 派生、三图归属、棋盘格、太阳、可见性、SPP 或输出颜色管理。
+- [x] 新增受控 PDF/旋转、合法零 PDF、非法数值、均匀/黑图、分母、渐变精确兼容和多种子高对比统计测试；实际 HDRI 相机三图在 1/2/4 线程下逐位一致，关闭环境不改变光源图与相机 Caustics。
+- [x] 增加默认忽略的测试专用比较器 `compare_hdri_sampling`，显式运行 `cargo test --release --locked compare_hdri_sampling -- --ignored --nocapture`。同一 64×48 漫反射场景、HDRI、32/128 SPP、环境样本数 1、种子 0–7，记录时间、均值、线性 Y RMSE；新比较路径与生产相机 XYZ 完全相同。2048×1024 半球求积提供参考，均匀/高对比两类场景均实际运行。
+- **实际结果：** 高对比 64 种子×256 方向的单点 RMSE 从 `3.70390` 降为 `1.45367`（MSE 比值 `0.1540`）。相机比较的同 SPP MSE 比值为 `0.1903–0.1952`，每方向成本约为 `1.50×`；混合 32 SPP 用 `42.035 ms` 获得低于余弦 128 SPP（`111.728 ms`）的误差。均匀 HDRI 余弦近乎零方差，混合引入噪声及约 1.5 倍成本；完整测量口径、亮度、参考值和数据表见 README。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（259 项单元测试通过、1 项比较默认忽略，38 项集成测试通过）、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 通过。忽略的比较另以 release 实际运行通过。
+- **范围与限制：** 仅完成 D2 的固定混合采样，不实现 Power Heuristic、间接漫反射、完整路径追踪或 Path Guiding。性能数据是合成纯漫反射相机循环，未计玻璃、太阳、光源追踪或 PNG；固定比例不保证所有场景降噪，后续可单独比较比例、分层采样和进一步 PDF/可见性优化。
+
 ## 6. Codex 执行约定
 
 1. **每次只实现当前一个里程碑**，完成后总结修改文件、运行命令、测试结果和下一步；不要抢跑后续阶段。

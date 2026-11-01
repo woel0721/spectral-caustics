@@ -410,7 +410,8 @@ fn all_camera_entries_integrate_hdr_with_lambertian_without_changing_photon_ligh
     let lighting = renderer.render_lighting(&scene).unwrap();
     let zero = Framebuffer::new(1, 1);
     let expected = linear_srgb_to_xyz(Vector3::new(8.0, 4.0, 2.0) * (0.8 * 0.25)).unwrap();
-    for samples in [1, 7] {
+    // 混合采样即使在均匀 HDRI 下也有方差；按解析期望进行统计验收。
+    for samples in [1024, 4096] {
         scene.environment_samples = samples;
         let components = render_camera_glass_components(&scene, &lighting, 3, 2, 8, 42).unwrap();
         assert!(
@@ -439,7 +440,10 @@ fn all_camera_entries_integrate_hdr_with_lambertian_without_changing_photon_ligh
         ];
         for image in images {
             for xyz in image.pixels {
-                assert_rgb(xyz, expected);
+                assert!(
+                    (xyz - expected).norm() < expected.norm() * 0.06,
+                    "{xyz:?} != {expected:?}, environment_samples={samples}"
+                );
             }
         }
     }
@@ -741,6 +745,76 @@ fn shared_environment_sampling_is_deterministic_across_threads() {
                     .collect::<Vec<_>>()
             });
             assert_eq!(parallel, serial);
+        }
+    }
+}
+
+#[test]
+fn mixed_hdri_camera_is_thread_independent_and_preserves_caustics() {
+    let hdr = TemporaryHdr::new(false);
+    let config = SceneConfig {
+        environment: Some(EnvironmentConfig {
+            rotation_degrees: 37.0,
+            ..hdr.config()
+        }),
+        environment_samples: 3,
+        ..Default::default()
+    };
+    let scene = Scene::from_config(&config).unwrap();
+    let without_environment = Scene::from_config(&SceneConfig {
+        environment: None,
+        ..config
+    })
+    .unwrap();
+    fs::remove_file(&hdr.0).unwrap();
+    let settings = RenderSetting {
+        width: 16,
+        height: 12,
+        samples_per_pixel_axis: 1,
+        thread_count: Some(1),
+        ..Default::default()
+    };
+    let renderer = Render::new(settings.clone()).unwrap();
+    let lighting = renderer.render_lighting(&scene).unwrap();
+    let solar_lighting = renderer.render_lighting(&without_environment).unwrap();
+    assert_eq!(lighting.direct.pixels, solar_lighting.direct.pixels);
+    assert_eq!(lighting.caustics.pixels, solar_lighting.caustics.pixels);
+    assert_eq!(
+        lighting.sun_irradiance_xyz,
+        solar_lighting.sun_irradiance_xyz
+    );
+    for seed in [0, 42] {
+        let baseline = renderer
+            .render_camera_glass_components(&scene, &lighting, 16, seed)
+            .unwrap();
+        let solar = renderer
+            .render_camera_glass_components(&without_environment, &solar_lighting, 16, seed)
+            .unwrap();
+        assert_eq!(baseline.caustics.pixels, solar.caustics.pixels);
+        assert_ne!(baseline.direct.pixels, solar.direct.pixels);
+        for threads in [1, 2, 4] {
+            let parallel = Render::new(RenderSetting {
+                thread_count: Some(threads),
+                ..settings.clone()
+            })
+            .unwrap();
+            for _ in 0..2 {
+                let images = parallel
+                    .render_camera_glass_components(&scene, &lighting, 16, seed)
+                    .unwrap();
+                assert_eq!(images.direct.pixels, baseline.direct.pixels);
+                assert_eq!(images.caustics.pixels, baseline.caustics.pixels);
+                assert_eq!(images.combined.pixels, baseline.combined.pixels);
+                for ((direct, caustics), combined) in images
+                    .direct
+                    .pixels
+                    .iter()
+                    .zip(&images.caustics.pixels)
+                    .zip(&images.combined.pixels)
+                {
+                    assert!((direct + caustics - combined).norm() < 1e-12);
+                }
+            }
         }
     }
 }

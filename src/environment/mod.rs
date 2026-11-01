@@ -64,6 +64,11 @@ impl TryFrom<&EnvironmentConfig> for Environment {
 }
 
 impl Environment {
+    /// 是否加载了 HDRI；积分器据此选择混合采样，渐变天空保留原 BSDF 随机流。
+    pub fn has_map(&self) -> bool {
+        self.map.is_some()
+    }
+
     /// HDRI 局部方向经 Rz(+rotation) 转到世界；渐变天空暂用均匀球面采样。
     /// 采样缓存只读，强度不参与归一化 PDF；非法运行时参数不消耗 RNG。
     pub fn sample_direction(&self, rng: &mut dyn RngCore) -> Option<EnvironmentSample> {
