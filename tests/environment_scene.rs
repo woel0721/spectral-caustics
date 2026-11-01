@@ -1,5 +1,6 @@
 use nalgebra::{Vector2, Vector3};
 use rand::{Rng, SeedableRng, rngs::StdRng};
+use rayon::prelude::*;
 use spectral_caustics::{
     config::{
         cameraconfig::CameraConfig,
@@ -511,6 +512,235 @@ fn hdr_camera_components_match_single_entries_for_background_diffuse_and_glass()
                 let background = render_camera_glass(&scene, 7, 5, spp, seed).unwrap();
                 assert_eq!(images.direct.pixels, background.pixels);
             }
+        }
+    }
+}
+
+#[test]
+fn environment_direction_samples_apply_forward_rotation_and_inverse_pdf() {
+    let hdr = TemporaryHdr::new(false);
+    let map = EnvironmentMap::load(&hdr.0).unwrap();
+    let environments: Vec<_> = [0.0, 90.0, 37.0, -450.0, 450.0]
+        .into_iter()
+        .map(|rotation_degrees| {
+            (
+                rotation_degrees,
+                Environment::try_from(&EnvironmentConfig {
+                    rotation_degrees,
+                    ..hdr.config()
+                })
+                .unwrap(),
+            )
+        })
+        .collect();
+    // 分布、像素和旋转均已缓存；后续采样不依赖源文件。
+    fs::remove_file(&hdr.0).unwrap();
+    for (degrees, environment) in environments {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let mut local_rng = StdRng::seed_from_u64(42);
+        let mut world_rng = StdRng::seed_from_u64(42);
+        for _ in 0..2048 {
+            let local = map.sample_direction(&mut local_rng).unwrap();
+            let world = environment.sample_direction(&mut world_rng).unwrap();
+            let expected = Vector3::new(
+                cos * local.direction.x - sin * local.direction.y,
+                sin * local.direction.x + cos * local.direction.y,
+                local.direction.z,
+            );
+            assert!((world.direction - expected).norm() < 1e-14);
+            assert!((world.direction.norm() - 1.0).abs() < 1e-14);
+            assert!(world.pdf.is_finite() && world.pdf > 0.0);
+            assert!((world.pdf - local.pdf).abs() < 1e-14);
+            assert_eq!(environment.pdf_direction(world.direction), Some(world.pdf));
+            assert_rgb(
+                environment.radiance(world.direction).unwrap(),
+                map.radiance(local.direction).unwrap(),
+            );
+        }
+        // 独立查询轴向附近、接缝两侧和两极。分段常数 PDF 在像素边界可不连续，
+        // 非极点方向稍偏离边界，避免浮点旋转把查询移到相邻像素。
+        for local in [
+            Vector3::new(1.0, 0.013, 0.019),
+            Vector3::new(0.013, 1.0, -0.019),
+            Vector3::new(0.013, -1.0, 0.019),
+            Vector3::new(-1.0, 0.013, -0.019),
+            Vector3::new(-1.0, -0.013, 0.019),
+            Vector3::z(),
+            -Vector3::z(),
+        ] {
+            let world = Vector3::new(
+                cos * local.x - sin * local.y,
+                sin * local.x + cos * local.y,
+                local.z,
+            );
+            assert_eq!(environment.pdf_direction(world), map.pdf_direction(local));
+        }
+    }
+}
+
+#[test]
+fn gradient_direction_sampling_is_uniform_on_the_full_sphere() {
+    let environments: Vec<_> = [0.0, 90.0, -450.0]
+        .into_iter()
+        .map(|rotation_degrees| {
+            Environment::try_from(&EnvironmentConfig {
+                rotation_degrees,
+                horizon_linear_rgb: [100.0, 1.0, 0.0],
+                zenith_linear_rgb: [0.0, 2.0, 50.0],
+                ..Default::default()
+            })
+            .unwrap()
+        })
+        .collect();
+    let mut rng = StdRng::seed_from_u64(7);
+    let mut mean = Vector3::zeros();
+    let mut north_count = 0;
+    for _ in 0..8192 {
+        let sample = environments[0].sample_direction(&mut rng).unwrap();
+        assert!((sample.direction.norm() - 1.0).abs() < 1e-14);
+        assert_eq!(sample.pdf, 1.0 / (4.0 * std::f64::consts::PI));
+        for environment in &environments {
+            assert_eq!(
+                environment.pdf_direction(sample.direction),
+                Some(sample.pdf)
+            );
+        }
+        north_count += usize::from(sample.direction.z > 0.0);
+        mean += sample.direction;
+    }
+    assert!((mean / 8192.0).norm() < 0.03);
+    assert!((north_count as f64 / 8192.0 - 0.5).abs() < 0.02);
+    // 绕 Z 的旋转对渐变无影响，兼容采样序列也不变。
+    for environment in &environments {
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut replay = StdRng::seed_from_u64(42);
+        for _ in 0..64 {
+            assert_eq!(
+                environment.sample_direction(&mut rng),
+                environments[0].sample_direction(&mut replay)
+            );
+        }
+    }
+}
+
+#[test]
+fn environment_pdf_rejects_invalid_directions_and_handles_extreme_finite_scales() {
+    let hdr = TemporaryHdr::new(false);
+    for map_path in [None, Some(hdr.0.clone())] {
+        let environment = Environment::try_from(&EnvironmentConfig {
+            map_path,
+            rotation_degrees: 37.0,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(environment.pdf_direction(Vector3::zeros()).is_none());
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for axis in 0..3 {
+                let mut direction = Vector3::repeat(1.0);
+                direction[axis] = value;
+                assert!(environment.pdf_direction(direction).is_none());
+            }
+        }
+        let expected = environment.pdf_direction(Vector3::repeat(1.0));
+        for scale in [f64::MAX, 1e-300, f64::from_bits(1)] {
+            assert_eq!(environment.pdf_direction(Vector3::repeat(scale)), expected);
+        }
+        for direction in [Vector3::x(), -Vector3::x(), Vector3::z(), -Vector3::z()] {
+            assert!(environment.pdf_direction(direction).unwrap() > 0.0);
+        }
+    }
+}
+
+#[test]
+fn direction_pdf_is_independent_of_intensity_and_invalid_environments_preserve_rng() {
+    let hdr = TemporaryHdr::new(false);
+    for map_path in [None, Some(hdr.0.clone())] {
+        let mut environment = Environment::try_from(&EnvironmentConfig {
+            map_path,
+            rotation_degrees: 37.0,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut reference_rng = StdRng::seed_from_u64(42);
+        let reference = environment.sample_direction(&mut reference_rng).unwrap();
+        let radiance = environment.radiance(reference.direction).unwrap();
+        for intensity in [0.0, 0.5, 2.0, f64::MAX] {
+            environment.intensity = intensity;
+            assert_eq!(
+                environment.sample_direction(&mut StdRng::seed_from_u64(42)),
+                Some(reference)
+            );
+            assert_eq!(
+                environment.pdf_direction(reference.direction),
+                Some(reference.pdf)
+            );
+            if intensity <= 2.0 {
+                assert_rgb(
+                    environment.radiance(reference.direction).unwrap(),
+                    radiance * intensity,
+                );
+            }
+        }
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut untouched = rng.clone();
+        for intensity in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            environment.intensity = intensity;
+            assert!(environment.sample_direction(&mut rng).is_none());
+            assert!(environment.pdf_direction(Vector3::z()).is_none());
+        }
+        environment.intensity = 1.0;
+        environment.horizon_color.x = f64::NAN;
+        assert!(environment.sample_direction(&mut rng).is_none());
+        assert!(environment.pdf_direction(Vector3::z()).is_none());
+        assert_eq!(rng.random::<u64>(), untouched.random::<u64>());
+    }
+}
+
+#[test]
+fn shared_environment_sampling_is_deterministic_across_threads() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Environment>();
+    assert_send_sync::<EnvironmentMap>();
+    let hdr = TemporaryHdr::new(false);
+    let environments: Vec<_> = [None, Some(hdr.0.clone())]
+        .into_iter()
+        .map(|map_path| {
+            Environment::try_from(&EnvironmentConfig {
+                map_path,
+                rotation_degrees: 37.0,
+                ..Default::default()
+            })
+            .unwrap()
+        })
+        .collect();
+    fs::remove_file(&hdr.0).unwrap();
+    for environment in &environments {
+        let sample_stream = |seed| {
+            let mut rng = StdRng::seed_from_u64(seed);
+            (0..128)
+                .map(|_| {
+                    let sample = environment.sample_direction(&mut rng).unwrap();
+                    assert_eq!(
+                        environment.pdf_direction(sample.direction),
+                        Some(sample.pdf)
+                    );
+                    sample
+                })
+                .collect::<Vec<_>>()
+        };
+        let serial: Vec<_> = (0..16).map(sample_stream).collect();
+        for threads in [1, 2, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let parallel = pool.install(|| {
+                (0..16)
+                    .into_par_iter()
+                    .map(sample_stream)
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(parallel, serial);
         }
     }
 }

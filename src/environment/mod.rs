@@ -6,7 +6,17 @@ pub use map::EnvironmentMap;
 
 use crate::{config::sceneconfig::EnvironmentConfig, material::unit_vector};
 use nalgebra::Vector3;
+use rand::RngCore;
 use std::error::Error;
+
+/// 环境方向样本；方向从着色点指向环境，不包含辐亮度或 BSDF 权重。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EnvironmentSample {
+    /// 单位方向；Environment 返回世界空间，EnvironmentMap 返回贴图局部空间。
+    pub direction: Vector3<f64>,
+    /// 相对于立体角 dω 的完整采样密度，单位 sr^-1。
+    pub pdf: f64,
+}
 
 /// 拥有一次加载的贴图像素，不实现 Copy/Clone，查询期间不进行文件 IO。
 /// 全部为相对线性 RGB 辐亮度，解析太阳仍由 Scene.light 独立提供。
@@ -54,6 +64,46 @@ impl TryFrom<&EnvironmentConfig> for Environment {
 }
 
 impl Environment {
+    /// HDRI 局部方向经 Rz(+rotation) 转到世界；渐变天空暂用均匀球面采样。
+    /// 采样缓存只读，强度不参与归一化 PDF；非法运行时参数不消耗 RNG。
+    pub fn sample_direction(&self, rng: &mut dyn RngCore) -> Option<EnvironmentSample> {
+        if !self.is_valid() {
+            return None;
+        }
+        let Some(map) = &self.map else {
+            return Some(map::sample_uniform_sphere(rng));
+        };
+        let local = map.sample_direction(rng)?.direction;
+        let (sin, cos) = self.rotation_sin_cos;
+        let direction = map::normalized_direction(Vector3::new(
+            cos * local.x - sin * local.y,
+            sin * local.x + cos * local.y,
+            local.z,
+        ))?;
+        Some(EnvironmentSample {
+            direction,
+            pdf: self.pdf_direction(direction)?,
+        })
+    }
+
+    /// 世界方向用 Rz(-rotation) 查询同一分布；纯旋转不改变立体角密度。
+    /// 有限非零方向会归一化，NaN、Infinity 和零向量返回 None。
+    pub fn pdf_direction(&self, direction: Vector3<f64>) -> Option<f64> {
+        if !self.is_valid() {
+            return None;
+        }
+        let direction = map::normalized_direction(direction)?;
+        let Some(map) = &self.map else {
+            return Some(map::UNIFORM_SPHERE_PDF);
+        };
+        let (sin, cos) = self.rotation_sin_cos;
+        map.pdf_direction(Vector3::new(
+            cos * direction.x + sin * direction.y,
+            -sin * direction.x + cos * direction.y,
+            direction.z,
+        ))
+    }
+
     pub fn is_valid(&self) -> bool {
         self.horizon_color
             .iter()

@@ -588,7 +588,47 @@ z_local = z_world
 
 统一查询先从 HDR 或渐变取得辐亮度，再乘 `intensity`，保留大于 1 的线性 RGB；不做曝光、sRGB 编码或 `[0,1]` 裁剪，非法方向或强度乘法溢出返回 `None`。背景、玻璃路径及 Lambertian Monte Carlo 环境照明自动使用同一数据源，积分公式、太阳直射和光子焦散计算保持原样。HDR 像素中的亮区原样参与环境查询。
 
-本阶段未加入 HDRI 重要性采样、MIS、透明环境阴影或环境光子追踪；环境照明仍依赖材质余弦采样，亮区很小的 HDRI 可能需要更多样本。`tests/environment_scene.rs` 使用临时合成 HDR 验证渐变兼容、贴图优先、旋转/强度、缓存生命周期、背景、玻璃和四个相机照明入口。
+阶段 B 未加入 HDRI 重要性采样；阶段 D1 的独立采样器见下文。环境照明仍依赖材质余弦采样，亮区很小的 HDRI 可能需要更多样本。`tests/environment_scene.rs` 使用临时合成 HDR 验证渐变兼容、贴图优先、旋转/强度、缓存生命周期、背景、玻璃和四个相机照明入口。
+
+### HDR 阶段 D1：独立的 HDRI 方向采样器
+
+`EnvironmentMap` 加载时，用原始线性 RGB 像素构建行优先的 `f64` CDF：
+
+```text
+Y_ij = 0.2126 R + 0.7152 G + 0.0722 B
+Δω_ij = (2π/W) [cos(jπ/H) - cos((j+1)π/H)]
+w_ij = Y_ij Δω_ij
+P_ij = w_ij / sum(w)
+```
+
+缓存包含 CDF 的起点 0、终点 1 和各纬度行的 cosθ 边界。以 95% 概率选择重要性分支，通过 CDF 二分查找像素；再在其经度区间内均匀取 φ，在纬度边界的 cosθ 区间内均匀取 z，得到局部方向 `(sqrt(1-z²) cosφ, sqrt(1-z²) sinφ, z)`。这是像素球面区域内的均匀立体角采样，而非均匀 θ 采样。其余 5% 直接均匀采样整个球面，完整 PDF 为：
+
+```text
+p_importance(wi) = P_ij / Δω_ij
+p_env(wi) = 0.95 p_importance(wi) + 0.05/(4π)   [sr^-1]
+```
+
+查询中的 P 使用实际归一化 CDF 相邻项之差，使预计算舍入后的概率与抽样过程相同。黑色像素保留正 PDF；整图全黑时不使用重要性 CDF，采样与查询均退化为 `1/(4π)`。极点直接查询首/末纬度行，不除以 sinθ；极点经度固定为 U=0.5，−X 接缝的 U=0/1 均 wrap 到第 0 列。PDF 在像素边界可以不连续，边界值沿用同一方向查询约定。
+
+新增接口由 `environment` 模块导出：
+
+```rust
+pub struct EnvironmentSample {
+    pub direction: nalgebra::Vector3<f64>,
+    pub pdf: f64, // 相对于 dω，单位 sr^-1
+}
+// Environment 与 EnvironmentMap 都提供：
+pub fn sample_direction(&self, rng: &mut dyn rand::RngCore) -> Option<EnvironmentSample>;
+pub fn pdf_direction(&self, direction: nalgebra::Vector3<f64>) -> Option<f64>;
+```
+
+`EnvironmentMap` 返回贴图局部方向；`Environment` 使用 `Rz(+rotation)` 将其变换成世界单位方向，PDF 查询使用 `Rz(-rotation)`。纯旋转保持立体角 PDF；线性 intensity 只缩放辐亮度，不改变概率分布（包括强度为零时）。没有贴图的渐变天空暂用均匀球面采样。查询接受任意有限非零方向并先稳定归一化，拒绝零方向、NaN 和 Infinity；非法运行时环境使采样/查询返回 `None`，且不消耗 RNG。
+
+CDF 预计算时间与存储为 O(W×H)，方向采样的二分查找为 O(log(W×H))，PDF 查询为 O(1)。额外缓存约 `8×(W×H+1) + 8×(H+1)` 字节（4096×2048 约 64 MiB）。查询和采样只读且无文件 IO，调用方持有 RNG；固定种子可复现，共享同一环境时各任务应各自持有 RNG。
+
+辐亮度仍采用原有双线性插值，采样 PDF 则按像素分段常数；两者不必相同。测试覆盖精确面积与亮度权重、球面积分、样本频率/分布矩、亮区偏好、黑图、极点/接缝、非方形/单行/单列、极端 HDR、旋转/强度、固定 seed、删源文件及 1/2/4 线程共享只读采样，并用 `L_env/pdf` 恢复已知积分。
+
+**D1 仅提供分布、方向样本和 PDF，尚未接入 `environment_lighting()`，当前画面仍使用 BSDF 余弦采样。** 下一阶段接入时，每个环境样本使用 `f_r * L_env(wi) * V * max(n·wi,0) / sample.pdf`，再按总样本数平均；落在背半球或被遮挡的样本计零，仍计入分母。提高亮区的采样频率不改变 HDRI 辐亮度，必须除以对应的完整混合 PDF。MIS、透明环境阴影及环境光子追踪留待后续独立阶段。
 
 ### V0.4 阶段 17：地面棋盘格
 

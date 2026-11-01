@@ -440,6 +440,15 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - **实际性能：** 新增 `camera_parallel_benchmark` release 示例，固定默认 HDRI/场景、512×512、256 SPP、seed=42、environment_samples=1。1/2/4/6 线程的相机三图耗时分别为 `34.741153 / 16.997655 / 8.400291 / 5.692999 s`，相机加速比为 `1.000 / 2.044 / 4.136 / 6.102×`；光源+相机总耗时为 `39.702723 / 19.531569 / 9.801827 / 6.949445 s`。所有线程数的三张相机及两张光源 XYZ 缓冲逐位一致，完整口径与结果见 README。
 - **范围与限制：** 只并行相机玻璃入口共用的像素循环，不改变光源端实现、物理公式、默认 SPP/环境采样数或颜色/曝光流程。`render_camera_lit`、法线调试、灰度光源调试和 PNG 编码仍为串行。基准为本机单轮测量，不计 HDR 加载、线程池构建和 PNG 编码；后续优化另行选择。
 
+### HDR 阶段 D1 — HDRI 重要性分布、方向采样与 PDF
+
+- [x] `EnvironmentMap` 加载时按线性 Rec.709 亮度乘精确像素立体角构建行优先 `f64` CDF，缓存纬度边界的 cosθ；采样及查询只读，无文件 IO。
+- [x] 新增 `EnvironmentSample { direction, pdf }`、`sample_direction(rng)` 和 `pdf_direction(direction)`。以 95% 概率按重要性 CDF 选像素，在像素内均匀采样 φ 与 cosθ；其余 5% 均匀采样球面。完整 PDF 为 `0.95 P_ij/Δω_ij + 0.05/(4π)`，P 从实际 CDF 区间宽度取得。
+- [x] 全黑 HDRI 和没有贴图的渐变天空均使用均匀球面分布；黑像素仍有正 PDF。沿用 Z-up、−X 接缝 wrap 与极点 U=0.5，PDF 无 sinθ 除法；拒绝非法方向并稳定处理极端有限向量。
+- [x] `Environment` 用正向环境旋转生成世界单位方向、逆旋转查询 PDF。保持 `radiance()`、intensity 标尺、积分器、材质、光子追踪、SPP、颜色/曝光和 Rayon/RNG 设计的现有行为。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked`（252 项单元测试、37 项集成测试）、`cargo clippy --locked --all-targets -- -D warnings` 及 `git diff --check` 通过。新增 9 项单元测试、5 项集成测试，并扩展原方向/文件缓存测试；覆盖概率归一化、单位方向、样本 PDF 一致、均匀球面矩与频率、亮区偏好/黑区支持、黑图、接缝/极点/随机数端点、单行/单列/非方形、极端 HDR、旋转/强度、固定种子及 1/2/4 线程只读共享采样。合成 HDR 的 `L_env/pdf` 估计恢复已知辐亮度积分。
+- **范围与限制：** 仅完成 D1，不接入 `environment_lighting()`、不修改 `trace_camera_path()`、不实现 MIS。分布使用像素亮度且在像素内分段常数，辐亮度继续双线性插值；额外 CDF/行边界缓存为 O(W×H)，4096×2048 约 64 MiB。下一阶段接入环境积分时使用 `f_r L_env V max(n·wi,0)/pdf` 并按总样本数平均，背半球与遮挡计零且保留分母；提高采样频率不能改变 HDRI 光照强度。
+
 ## 6. Codex 执行约定
 
 1. **每次只实现当前一个里程碑**，完成后总结修改文件、运行命令、测试结果和下一步；不要抢跑后续阶段。

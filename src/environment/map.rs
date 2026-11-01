@@ -1,7 +1,9 @@
 //! Z-up 经纬度环境贴图；U 水平周期采样，V 在图片上下边界夹紧。
 
+use super::EnvironmentSample;
 use image::{DynamicImage, ImageDecoder, codecs::hdr::HdrDecoder};
 use nalgebra::Vector3;
+use rand::{Rng, RngCore};
 use std::{
     error::Error,
     f64::consts::{PI, TAU},
@@ -10,6 +12,10 @@ use std::{
     path::Path,
 };
 
+/// 非黑贴图的采样分布：95% 亮度重要性 + 5% 均匀球面，确保黑像素也有支持。
+const IMPORTANCE_FRACTION: f64 = 0.95;
+pub(super) const UNIFORM_SPHERE_PDF: f64 = 1.0 / (4.0 * PI);
+
 /// 按行保存相对线性 RGB 辐亮度，第一行为图片顶部（世界 +Z）。
 /// 像素在加载时验证，之后只读；不进行曝光、色调映射或 sRGB 转换。
 #[derive(Debug)]
@@ -17,6 +23,10 @@ pub struct EnvironmentMap {
     width: usize,
     height: usize,
     pixels: Vec<[f32; 3]>,
+    /// 行优先的重要性 CDF，含起点 0 和终点 1；全黑贴图为空。
+    importance_cdf: Vec<f64>,
+    /// 每行上下边界的 cos(theta)，共 height + 1 项，由 +1 递减到 -1。
+    row_cos_theta: Vec<f64>,
 }
 
 impl EnvironmentMap {
@@ -32,6 +42,52 @@ impl EnvironmentMap {
     pub fn radiance(&self, direction: Vector3<f64>) -> Option<Vector3<f64>> {
         let (u, v) = direction_to_uv(direction)?;
         Some(self.sample_uv(u, v))
+    }
+
+    /// 在贴图局部空间采样单位方向；pdf 相对于立体角 dω，单位 sr^-1。
+    /// 与 radiance 使用相同的 Z-up 经纬度约定，但 PDF 在像素球面区域内为常数。
+    /// RNG 由调用方持有，缓存只读；全黑贴图退化为均匀球面。
+    pub fn sample_direction(&self, rng: &mut dyn RngCore) -> Option<EnvironmentSample> {
+        if self.importance_cdf.is_empty() {
+            return Some(sample_uniform_sphere(rng));
+        }
+        let direction = if rng.random::<f64>() < IMPORTANCE_FRACTION {
+            let u = rng.random::<f64>();
+            // 上界查找跳过零概率区间；u < 1，且 CDF 的最后一项恰为 1。
+            let index = self.importance_cdf.partition_point(|&p| p <= u) - 1;
+            let (x, y) = (index % self.width, index / self.width);
+            let phi = ((x as f64 + rng.random::<f64>()) / self.width as f64 - 0.5) * TAU;
+            let top = self.row_cos_theta[y];
+            let bottom = self.row_cos_theta[y + 1];
+            // 均匀采样 cos(theta)，而非 theta；dω = dφ d(cos(theta))。
+            let cos_theta = top + (bottom - top) * rng.random::<f64>();
+            spherical_direction(phi, cos_theta)
+        } else {
+            sample_uniform_sphere(rng).direction
+        };
+        Some(EnvironmentSample {
+            direction,
+            // 统一处理恰好落在接缝、像素边界或极点上的浮点样本。
+            pdf: self.pdf_direction(direction)?,
+        })
+    }
+
+    /// 查询任意有限非零局部方向的完整混合 PDF（sr^-1），内部归一化。
+    /// 接缝 U=1 wrap 到第 0 列，极点沿用 radiance 的 U=0.5 约定。
+    pub fn pdf_direction(&self, direction: Vector3<f64>) -> Option<f64> {
+        let (u, v) = direction_to_uv(direction)?;
+        if self.importance_cdf.is_empty() {
+            return Some(UNIFORM_SPHERE_PDF);
+        }
+        let x = ((u.rem_euclid(1.0) * self.width as f64) as usize).min(self.width - 1);
+        let y = ((v * self.height as f64) as usize).min(self.height - 1);
+        let index = y * self.width + x;
+        // 使用实际 CDF 区间宽度，包含预计算舍入，保证查询与抽样的概率相同。
+        let probability = self.importance_cdf[index + 1] - self.importance_cdf[index];
+        Some(
+            IMPORTANCE_FRACTION * probability / self.pixel_solid_angle(y)
+                + (1.0 - IMPORTANCE_FRACTION) * UNIFORM_SPHERE_PDF,
+        )
     }
 
     fn decode(reader: impl Read) -> Result<Self, Box<dyn Error>> {
@@ -57,11 +113,47 @@ impl EnvironmentMap {
         {
             return Err("环境贴图辐亮度必须有限且非负".into());
         }
-        Ok(Self {
+        let row_cos_theta: Vec<_> = (0..=height)
+            .map(|row| (PI * row as f64 / height as f64).cos())
+            .collect();
+        if row_cos_theta.windows(2).any(|edges| edges[0] <= edges[1]) {
+            return Err("环境贴图纬度分辨率超出浮点精度".into());
+        }
+        let mut map = Self {
             width,
             height,
             pixels,
-        })
+            importance_cdf: Vec::new(),
+            row_cos_theta,
+        };
+        map.build_distribution();
+        Ok(map)
+    }
+
+    fn pixel_solid_angle(&self, row: usize) -> f64 {
+        (TAU / self.width as f64) * (self.row_cos_theta[row] - self.row_cos_theta[row + 1])
+    }
+
+    fn build_distribution(&mut self) {
+        let mut cdf = Vec::with_capacity(self.pixels.len() + 1);
+        cdf.push(0.0);
+        let mut total = 0.0;
+        for (row, pixels) in self.pixels.chunks_exact(self.width).enumerate() {
+            let solid_angle = self.pixel_solid_angle(row);
+            for &[r, g, b] in pixels {
+                let luminance =
+                    0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b);
+                total += luminance * solid_angle;
+                cdf.push(total);
+            }
+        }
+        // f32 输入在 f64 中加权，避免 HDR 亮度求和溢出；全黑不做 0/0。
+        if total > 0.0 {
+            for value in &mut cdf {
+                *value /= total;
+            }
+            self.importance_cdf = cdf;
+        }
     }
 
     /// 输入有限 UV；整数像素坐标为像素中心，顶部 V=0，不做图片 y 翻转。
@@ -103,7 +195,7 @@ fn pixel_count(width: usize, height: usize) -> Result<usize, String> {
     Ok(count)
 }
 
-fn direction_to_uv(direction: Vector3<f64>) -> Option<(f64, f64)> {
+pub(super) fn normalized_direction(direction: Vector3<f64>) -> Option<Vector3<f64>> {
     if !direction.iter().all(|value| value.is_finite()) {
         return None;
     }
@@ -113,7 +205,26 @@ fn direction_to_uv(direction: Vector3<f64>) -> Option<(f64, f64)> {
     }
     // 先缩放，避免有限非零向量的 norm 在平方求和时上溢或下溢。
     let direction = direction / scale;
-    let direction = direction / direction.norm();
+    Some(direction / direction.norm())
+}
+
+fn spherical_direction(phi: f64, cos_theta: f64) -> Vector3<f64> {
+    let sin_theta = ((1.0 - cos_theta) * (1.0 + cos_theta)).max(0.0).sqrt();
+    Vector3::new(sin_theta * phi.cos(), sin_theta * phi.sin(), cos_theta)
+}
+
+pub(super) fn sample_uniform_sphere(rng: &mut dyn RngCore) -> EnvironmentSample {
+    EnvironmentSample {
+        direction: spherical_direction(
+            TAU * rng.random::<f64>() - PI,
+            1.0 - 2.0 * rng.random::<f64>(),
+        ),
+        pdf: UNIFORM_SPHERE_PDF,
+    }
+}
+
+fn direction_to_uv(direction: Vector3<f64>) -> Option<(f64, f64)> {
+    let direction = normalized_direction(direction)?;
     // 极点没有唯一经度，固定 U=0.5，避免 x/y 的有符号零改变查询列。
     let phi = if direction.x == 0.0 && direction.y == 0.0 {
         0.0
@@ -128,6 +239,7 @@ fn direction_to_uv(direction: Vector3<f64>) -> Option<(f64, f64)> {
 mod tests {
     use super::*;
     use image::{Rgb, codecs::hdr::HdrEncoder};
+    use rand::{SeedableRng, rngs::StdRng};
     use std::{
         fs,
         io::{Cursor, Write},
@@ -199,6 +311,10 @@ mod tests {
             assert!((u - expected_uv.0).abs() < 1e-12);
             assert!((v - expected_uv.1).abs() < 1e-12);
             assert!((map.radiance(direction * scale).unwrap() - expected_rgb).norm() < 1e-12);
+            assert_eq!(
+                map.pdf_direction(direction * scale),
+                map.pdf_direction(direction)
+            );
         }
         for scale in [f64::MAX, f64::from_bits(1)] {
             assert_eq!(direction_to_uv(Vector3::z() * scale), Some((0.5, 0.0)));
@@ -210,12 +326,14 @@ mod tests {
         let map = test_map();
         assert!(direction_to_uv(Vector3::zeros()).is_none());
         assert!(map.radiance(Vector3::zeros()).is_none());
+        assert!(map.pdf_direction(Vector3::zeros()).is_none());
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             for axis in 0..3 {
                 let mut direction = Vector3::repeat(1.0);
                 direction[axis] = value;
                 assert!(direction_to_uv(direction).is_none());
                 assert!(map.radiance(direction).is_none());
+                assert!(map.pdf_direction(direction).is_none());
             }
         }
     }
@@ -433,5 +551,285 @@ mod tests {
         assert!(EnvironmentMap::load(&path).is_err());
         assert_rgb(map.radiance(Vector3::z()).unwrap(), [3.0, 1.5, 0.75]);
         assert_rgb(map.radiance(Vector3::x()).unwrap(), [7.5, 3.75, 1.875]);
+        let sample = map
+            .sample_direction(&mut StdRng::seed_from_u64(42))
+            .unwrap();
+        assert_eq!(map.pdf_direction(sample.direction), Some(sample.pdf));
+    }
+
+    fn pixel_index(map: &EnvironmentMap, direction: Vector3<f64>) -> usize {
+        let (u, v) = direction_to_uv(direction).unwrap();
+        let x = ((u.rem_euclid(1.0) * map.width as f64) as usize).min(map.width - 1);
+        let y = ((v * map.height as f64) as usize).min(map.height - 1);
+        y * map.width + x
+    }
+
+    #[test]
+    fn cdf_weights_use_linear_luminance_and_exact_solid_angle() {
+        let pixels: Vec<_> = (0..12)
+            .map(|i| match i % 3 {
+                0 => [1.0, 0.0, 0.0],
+                1 => [0.0, 1.0, 0.0],
+                _ => [0.0, 0.0, 2.0],
+            })
+            .collect();
+        let map = EnvironmentMap::from_pixels(3, 4, pixels.clone()).unwrap();
+        let weights: Vec<_> = pixels
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let row = (i / 3) as f64;
+                let area = (TAU / 3.0) * ((row * PI / 4.0).cos() - ((row + 1.0) * PI / 4.0).cos());
+                (0.2126 * f64::from(p[0]) + 0.7152 * f64::from(p[1]) + 0.0722 * f64::from(p[2]))
+                    * area
+            })
+            .collect();
+        let total: f64 = weights.iter().sum();
+        assert_eq!(map.importance_cdf.first(), Some(&0.0));
+        assert_eq!(map.importance_cdf.last(), Some(&1.0));
+        for (i, weight) in weights.iter().enumerate() {
+            let probability = map.importance_cdf[i + 1] - map.importance_cdf[i];
+            assert!((probability - weight / total).abs() < 1e-14);
+        }
+        let area: f64 = (0..map.height)
+            .map(|row| map.pixel_solid_angle(row) * map.width as f64)
+            .sum();
+        assert!((area - 4.0 * PI).abs() < 1e-14);
+    }
+
+    #[test]
+    fn samples_are_unit_positive_match_pdf_and_reproduce_with_seed() {
+        for (width, height) in [(1, 1), (1, 7), (7, 1), (7, 3), (3, 7)] {
+            let pixels = (0..width * height).map(|i| [i as f32; 3]).collect();
+            let map = EnvironmentMap::from_pixels(width, height, pixels).unwrap();
+            let mut rng = StdRng::seed_from_u64(42);
+            let mut replay = StdRng::seed_from_u64(42);
+            let mut different = StdRng::seed_from_u64(43);
+            for _ in 0..2048 {
+                let sample = map.sample_direction(&mut rng).unwrap();
+                assert!((sample.direction.norm() - 1.0).abs() < 1e-14);
+                assert!(sample.pdf.is_finite() && sample.pdf > 0.0);
+                assert_eq!(Some(sample.pdf), map.pdf_direction(sample.direction));
+                assert_eq!(Some(sample), map.sample_direction(&mut replay));
+                assert_ne!(
+                    sample.direction,
+                    map.sample_direction(&mut different).unwrap().direction
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn directional_pdf_integrates_to_one_on_the_sphere() {
+        let pixels = (0..35)
+            .map(|i| [if i % 3 == 0 { 0.0 } else { (i + 1) as f32 }; 3])
+            .collect();
+        let map = EnvironmentMap::from_pixels(7, 5, pixels).unwrap();
+        // 独立按经纬度像素的精确面积积分，查询点在像素中心。
+        let mut integral = 0.0;
+        for row in 0..5 {
+            let top = (row as f64 * PI / 5.0).cos();
+            let bottom = ((row + 1) as f64 * PI / 5.0).cos();
+            for col in 0..7 {
+                let direction = direction_at((col as f64 + 0.5) / 7.0, (row as f64 + 0.5) / 5.0);
+                integral += map.pdf_direction(direction).unwrap() * (TAU / 7.0) * (top - bottom);
+            }
+        }
+        assert!((integral - 1.0).abs() < 1e-12);
+        // 再用与贴图网格无关的等立体角球面网格，检验方向到像素的分区。
+        let mut quadrature = 0.0;
+        for row in 0..256 {
+            let z = 1.0 - 2.0 * (f64::from(row) + 0.5) / 256.0;
+            for col in 0..512 {
+                let phi = TAU * (f64::from(col) + 0.5) / 512.0 - PI;
+                quadrature += map.pdf_direction(spherical_direction(phi, z)).unwrap();
+            }
+        }
+        assert!((quadrature * (4.0 * PI / (256.0 * 512.0)) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn constant_luminance_is_uniform_in_solid_angle_including_polar_rows() {
+        let map = EnvironmentMap::from_pixels(3, 4, vec![[4.0; 3]; 12]).unwrap();
+        let mut counts = [0; 12];
+        let mut mean = Vector3::zeros();
+        let mut mean_z_squared = 0.0;
+        let mut rng = StdRng::seed_from_u64(42);
+        let count = 32768;
+        for _ in 0..count {
+            let sample = map.sample_direction(&mut rng).unwrap();
+            assert!((sample.pdf - UNIFORM_SPHERE_PDF).abs() < 1e-14);
+            counts[pixel_index(&map, sample.direction)] += 1;
+            mean += sample.direction;
+            mean_z_squared += sample.direction.z.powi(2);
+        }
+        for (i, observed) in counts.into_iter().enumerate() {
+            let expected_probability = map.pixel_solid_angle(i / 3) / (4.0 * PI);
+            assert!((f64::from(observed) / f64::from(count) - expected_probability).abs() < 0.008);
+        }
+        assert!((mean / f64::from(count)).norm() < 0.02);
+        assert!((mean_z_squared / f64::from(count) - 1.0 / 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn bright_regions_are_preferred_and_black_regions_retain_uniform_support() {
+        let mut pixels = vec![[1.0; 3]; 12];
+        pixels[0] = [0.0; 3];
+        pixels[5] = [100.0; 3];
+        let map = EnvironmentMap::from_pixels(4, 3, pixels).unwrap();
+        let mut counts = [0; 12];
+        let mut rng = StdRng::seed_from_u64(7);
+        let count = 65536;
+        for _ in 0..count {
+            let sample = map.sample_direction(&mut rng).unwrap();
+            counts[pixel_index(&map, sample.direction)] += 1;
+        }
+        // 此图三行每像素的面积分别为 π/4、π/2、π/4，总亮度积分 4π-π/4+99π/2。
+        let total = 4.0 * PI - PI / 4.0 + 99.0 * PI / 2.0;
+        for (i, observed) in counts.iter().enumerate() {
+            let row = i / 4;
+            let area = if row == 1 { PI / 2.0 } else { PI / 4.0 };
+            let luminance = if i == 5 {
+                100.0
+            } else if i == 0 {
+                0.0
+            } else {
+                1.0
+            };
+            let p = 0.95 * luminance * area / total + 0.05 * area / (4.0 * PI);
+            let tolerance = 6.0 * (f64::from(count) * p * (1.0 - p)).sqrt() + 3.0;
+            assert!((f64::from(*observed) - f64::from(count) * p).abs() < tolerance);
+        }
+        assert!(counts[5] > count * 4 / 5);
+        assert!(counts[0] > 0);
+        let black = direction_at(0.125, 1.0 / 6.0);
+        let pdf = map.pdf_direction(black).unwrap();
+        assert!((pdf - 0.05 / (4.0 * PI)).abs() < 1e-16);
+        // 黑像素中心附近的双线性辐亮度可能非零，保底也覆盖这些方向。
+        assert!(map.radiance(direction_at(0.2, 0.2)).unwrap().x > 0.0);
+    }
+
+    #[test]
+    fn all_black_maps_fall_back_to_uniform_sphere() {
+        let map = EnvironmentMap::from_pixels(5, 3, vec![[0.0; 3]; 15]).unwrap();
+        assert!(map.importance_cdf.is_empty());
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut uniform_rng = StdRng::seed_from_u64(42);
+        let mut mean = Vector3::zeros();
+        for _ in 0..8192 {
+            let sample = map.sample_direction(&mut rng).unwrap();
+            assert_eq!(sample, sample_uniform_sphere(&mut uniform_rng));
+            assert_eq!(
+                map.pdf_direction(sample.direction),
+                Some(UNIFORM_SPHERE_PDF)
+            );
+            mean += sample.direction;
+        }
+        assert!((mean / 8192.0).norm() < 0.03);
+        for direction in [Vector3::z(), -Vector3::z(), -Vector3::x()] {
+            assert_eq!(map.pdf_direction(direction), Some(UNIFORM_SPHERE_PDF));
+        }
+    }
+
+    #[test]
+    fn pdf_seam_poles_and_boundary_random_values_are_finite_and_consistent() {
+        let map =
+            EnvironmentMap::from_pixels(4, 3, (0..12).map(|i| [i as f32; 3]).collect()).unwrap();
+        assert_eq!(
+            map.pdf_direction(Vector3::new(-1.0, 0.0, 0.0)),
+            map.pdf_direction(Vector3::new(-1.0, -0.0, 0.0))
+        );
+        for (y, u) in [(1e-9, 0.999), (-1e-9, 0.001)] {
+            assert_eq!(
+                map.pdf_direction(Vector3::new(-1.0, y, 0.0)),
+                map.pdf_direction(direction_at(u, 0.5))
+            );
+        }
+        for (z, v) in [(1.0, 0.01), (-1.0, 0.99)] {
+            let expected = map.pdf_direction(direction_at(0.625, v));
+            for x in [0.0, -0.0] {
+                for y in [0.0, -0.0] {
+                    assert_eq!(map.pdf_direction(Vector3::new(x, y, z)), expected);
+                }
+            }
+        }
+        struct ScriptedRng(std::collections::VecDeque<u64>);
+        impl RngCore for ScriptedRng {
+            fn next_u32(&mut self) -> u32 {
+                self.next_u64() as u32
+            }
+            fn next_u64(&mut self) -> u64 {
+                self.0.pop_front().unwrap_or(0)
+            }
+            fn fill_bytes(&mut self, dest: &mut [u8]) {
+                for chunk in dest.chunks_mut(8) {
+                    chunk.copy_from_slice(&self.next_u64().to_le_bytes()[..chunk.len()]);
+                }
+            }
+        }
+        // 分别覆盖 CDF 的首/末非零区间、极点、接缝和均匀分支。
+        for values in [
+            [0; 4],
+            [0, u64::MAX, u64::MAX, u64::MAX],
+            [u64::MAX, 0, 0, 0],
+        ] {
+            let sample = map
+                .sample_direction(&mut ScriptedRng(values.into()))
+                .unwrap();
+            assert!((sample.direction.norm() - 1.0).abs() < 1e-14);
+            assert!(sample.pdf.is_finite() && sample.pdf > 0.0);
+            assert_eq!(map.pdf_direction(sample.direction), Some(sample.pdf));
+        }
+    }
+
+    #[test]
+    fn hdr_dynamic_range_keeps_finite_pdf_and_full_support() {
+        let map = EnvironmentMap::from_pixels(
+            3,
+            2,
+            vec![
+                [f32::MAX; 3],
+                [0.0; 3],
+                [f32::from_bits(1); 3],
+                [1.0; 3],
+                [f32::MAX; 3],
+                [0.0; 3],
+            ],
+        )
+        .unwrap();
+        let mut rng = StdRng::seed_from_u64(9);
+        for _ in 0..1024 {
+            let sample = map.sample_direction(&mut rng).unwrap();
+            assert!(sample.pdf.is_finite() && sample.pdf > 0.0);
+        }
+        for col in 0..3 {
+            let direction = direction_at((f64::from(col) + 0.5) / 3.0, 0.25);
+            for scale in [f64::MAX / 2.0, 1e-300] {
+                assert_eq!(
+                    map.pdf_direction(direction * scale),
+                    map.pdf_direction(direction)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pdf_compensation_recovers_the_original_radiance_integral() {
+        // 单行图只沿经度线性插值，其球面平均亮度解析值为 (1+8+1+8)/4。
+        let map = EnvironmentMap::from_pixels(4, 1, vec![[1.0; 3], [8.0; 3], [1.0; 3], [8.0; 3]])
+            .unwrap();
+        let mut rng = StdRng::seed_from_u64(123);
+        let mut weighted = 0.0;
+        let mut unweighted = 0.0;
+        let count = 65536;
+        for _ in 0..count {
+            let sample = map.sample_direction(&mut rng).unwrap();
+            let radiance = map.radiance(sample.direction).unwrap().x;
+            weighted += radiance / sample.pdf;
+            unweighted += radiance;
+        }
+        let expected = 4.5 * 4.0 * PI;
+        assert!((weighted / f64::from(count) / expected - 1.0).abs() < 0.02);
+        assert!(unweighted / f64::from(count) > 4.5 * 1.2);
     }
 }
