@@ -29,6 +29,10 @@ impl Lambertian {
 }
 
 impl Material for Lambertian {
+    fn is_lambertian(&self) -> bool {
+        true
+    }
+
     fn evaluate(
         &self,
         wi: Vector3<f64>,

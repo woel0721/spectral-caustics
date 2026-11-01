@@ -480,6 +480,18 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - **实测：** 相同 32×24、32 SPP、16 种子、N=2/3/8 下，Power/Balance MSE 比为均匀 `0.5321–0.9067`、高对比 `1.0325–1.0633`、部分遮挡 `1.0074–1.0180`，耗时比 `1.0060–1.0809`。Power 并不普遍降噪；保留 Balance 可选，详细数值与限制见 README。
 - **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked`（274 项单元测试、38 项集成测试通过，三个比较默认忽略）、严格全目标 Clippy、`git diff --check` 通过。不修改 HDRI 分布、材质/玻璃/Fresnel、光子追踪、相机并行/种子派生或颜色管理，不新增反弹。
 
+### 阶段 E1 — 单次 Lambertian 漫反射间接光照
+
+- [x] `SceneConfig` / `Scene` 增加 `max_diffuse_bounces: usize`，缺省为 0，只允许 0/1；不改变 `MAX_GLASS_BOUNCES=8`。旧 JSON 兼容，默认配置、SPP、环境样本数、HDRI 分布、曝光和颜色管理不变。
+- [x] 保留第一次表面的原光照，通过 `sample_diffuse_ray` 和 `sample_one_diffuse_indirect` 额外连接一个 Lambertian 表面；RGB 吞吐量为 `f_r*cos/pdf*checker_A`，Lambertian 等于 `albedo_A*checker_A`，与原玻璃标量权重相乘。方向/法线/BSDF/PDF/吞吐量检查及法线偏移完整处理。
+- [x] B 复用现有太阳和 `environment_lighting`（Balance/Power MIS），应用自己的材质与棋盘格，仅返回直接光照。绑定阶段 14 地面时只用 Direct 分支，不查询焦散图；旧完整地面图无法分离焦散，第二表面采用原 RGB 解析太阳及环境，第一表面旧行为保留。
+- [x] miss、玻璃、未绑定/不支持材质和背面返回零；不加入逃逸 HDRI、不返回二次焦散、不生成第三次漫反射。新增贡献仅进入 Direct。
+- [x] 每像素独立漫反射 RNG 同时供 A 的方向与 B 的环境估计使用，关闭 E1 无新随机数消耗；保持相机/玻璃/第一表面环境流、Caustics、固定 seed 和 1/2/4 线程一致性。
+- [x] 新增 `diffuse_indirect` 示例，运行时添加红色竖墙与灰地面，在相同参数下输出 0/1 对照。默认三棱镜、JSON 几何格式及所有光源端实现不变。
+- **验证：** 新增 14 项测试，冻结 `2521356` 相机控制流逐位核对 0 的输出/RNG；比较实施前记录的光源图指纹。两垂直平面的太阳参考为 `rho_A*rho_B/(sqrt(2)*pi)`，均匀 HDRI 参考为 `rho_A*rho_B*L_env/4`，各用 32768 样本核对解析值/标准误差；覆盖彩色权重、真实玻璃事件、偏移、遮挡、背面、非法数值、地面绑定、两种 MIS、无重复 HDRI/焦散、分量、seed 和线程。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked`（288 项单元测试、38 项集成测试通过，3 项既有 MIS 比较默认忽略）、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 全部通过。13 项 E1 测试另在 release 模式通过；release 示例实际生成并查看 320×240、64/256 SPP 对照 PNG。
+- **范围与限制：** 只完成 E1，属于截断后的受限 RGB 间接光估计器，不是通用无偏 Path Tracer。无多次漫反射、Russian Roulette、漫反射后的玻璃续追、透明阴影、环境/二次焦散、Path Guiding 或通用 Photon Mapping；下一阶段需单独定义计光规则和验收。
+
 ## 6. Codex 执行约定
 
 1. **每次只实现当前一个里程碑**，完成后总结修改文件、运行命令、测试结果和下一步；不要抢跑后续阶段。

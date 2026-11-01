@@ -135,6 +135,51 @@ mod tests {
     }
 
     #[test]
+    fn diffuse_bounces_default_to_zero_and_only_accept_zero_or_one() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
+        json["scene"]
+            .as_object_mut()
+            .unwrap()
+            .remove("max_diffuse_bounces");
+        assert_eq!(
+            Config::from_json(&json.to_string())
+                .unwrap()
+                .scene
+                .max_diffuse_bounces,
+            0
+        );
+        assert_eq!(crate::scene::Scene::new().max_diffuse_bounces, 0);
+        for count in [0, 1] {
+            json["scene"]["max_diffuse_bounces"] = json!(count);
+            let config = Config::from_json(&json.to_string()).unwrap();
+            assert_eq!(
+                Config::from_json(&config.to_json().unwrap()).unwrap(),
+                config
+            );
+            assert_eq!(
+                crate::scene::Scene::from_config(&config.scene)
+                    .unwrap()
+                    .max_diffuse_bounces,
+                count
+            );
+        }
+        for invalid in [
+            json!(2),
+            json!(usize::MAX),
+            json!(-1),
+            json!(0.5),
+            json!(null),
+        ] {
+            json["scene"]["max_diffuse_bounces"] = invalid;
+            assert!(Config::from_json(&json.to_string()).is_err());
+        }
+        let mut scene = crate::scene::Scene::new();
+        scene.max_diffuse_bounces = 2;
+        assert!(crate::render::render_camera_glass(&scene, 1, 1, 1, 42).is_err());
+    }
+
+    #[test]
     fn environment_mis_defaults_to_balance_and_roundtrips_power() {
         use sceneconfig::EnvironmentMisHeuristic;
         let mut json: serde_json::Value =

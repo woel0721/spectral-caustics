@@ -109,6 +109,11 @@ pub trait Material: Send + Sync {
         false
     }
 
+    /// E1 只连接两个单面 Lambertian 表面；其他连续材质默认不参与。
+    fn is_lambertian(&self) -> bool {
+        false
+    }
+
     /// 介质内部折射率；非透射材质没有此参数。
     fn ior(&self) -> Option<f64> {
         None

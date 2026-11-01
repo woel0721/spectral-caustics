@@ -18,6 +18,9 @@ pub struct SceneConfig {
     /// HDRI 多样本 MIS 权重；旧 JSON 缺省为 Balance。
     #[serde(default)]
     pub environment_mis_heuristic: EnvironmentMisHeuristic,
+    /// E1 仅支持 0（旧行为）或 1（一次 Lambertian 间接反弹）。
+    #[serde(default)]
+    pub max_diffuse_bounces: usize,
     /// 唯一接收地面的灰度反射率纹理；省略/null 保留纯色材质。
     #[serde(default)]
     pub ground_checkerboard: Option<CheckerboardConfig>,
@@ -169,6 +172,7 @@ impl Default for SceneConfig {
             environment: Some(EnvironmentConfig::default()),
             environment_samples: default_environment_samples(),
             environment_mis_heuristic: EnvironmentMisHeuristic::default(),
+            max_diffuse_bounces: 0,
             ground_checkerboard: Some(CheckerboardConfig::default()),
             ground_margin_m: default_ground_margin_m(),
             objects: vec![
@@ -248,6 +252,9 @@ impl SceneConfig {
         }
         if self.environment_samples == 0 {
             return Err("scene.environment_samples 必须大于零".into());
+        }
+        if self.max_diffuse_bounces > 1 {
+            return Err("scene.max_diffuse_bounces 在 E1 中只能为 0 或 1".into());
         }
         if let Some(checkerboard) = &self.ground_checkerboard {
             checkerboard.validate()?;

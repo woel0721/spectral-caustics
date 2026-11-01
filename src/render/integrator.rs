@@ -1,4 +1,4 @@
-//! 相机视角的直接光照与有界玻璃路径追踪，在线性 RGB 中计算并保存为 XYZ。
+//! 相机直接光照、有界玻璃路径与 E1 单次漫反射间接光，在线性 RGB 中计算并保存为 XYZ。
 
 use super::{
     caustics::{SpectralLighting, ground_to_pixel},
@@ -25,6 +25,8 @@ const ENVIRONMENT_SEED_OFFSET: u64 = 0x9e37_79b9_7f4a_7c15;
 // 环境 stream_id 与像素混合步长不同，避免相邻像素的相机/环境流使用同一种子。
 const CAMERA_STREAM: u64 = 0;
 const ENVIRONMENT_STREAM: u64 = 0xd1b5_4a32_d192_ed03;
+// E1 不消耗抖动/玻璃及第一表面环境流；开关不改变 Caustics 路径。
+const DIFFUSE_STREAM: u64 = 0xa076_1d64_78bd_642f;
 // HDRI 环境的方向策略概率；Environment 内部的 95%/5% 分布已经包含在 p_env 中。
 const ENVIRONMENT_BSDF_FRACTION: f64 = 0.5;
 
@@ -71,6 +73,18 @@ pub struct CameraLightingImages {
 struct CameraPathComponents {
     direct: Vector3<f64>,
     caustics: Vector3<f64>,
+}
+
+struct CameraPathRngs<'a> {
+    camera: &'a mut dyn rand::RngCore,
+    environment: &'a mut dyn rand::RngCore,
+    /// 同时供 E1 的 BSDF 方向与第二表面环境估计使用，关闭 E1 时不消费。
+    diffuse: &'a mut dyn rand::RngCore,
+}
+
+struct DiffuseRay {
+    ray: Ray,
+    throughput: Vector3<f64>,
 }
 
 impl CameraPathComponents {
@@ -435,6 +449,7 @@ fn render_camera_buffers(
         let mut rng = StdRng::seed_from_u64(pixel_seed(seed, pixel_index, CAMERA_STREAM));
         let mut environment_rng =
             StdRng::seed_from_u64(pixel_seed(seed, pixel_index, ENVIRONMENT_STREAM));
+        let mut diffuse_rng = StdRng::seed_from_u64(pixel_seed(seed, pixel_index, DIFFUSE_STREAM));
         let mut mean = CameraPathComponents::default();
         // 像素内顺序累积，不做跨线程浮点归约，也不因输出分量重复追踪路径。
         for _ in 0..spp {
@@ -447,11 +462,14 @@ fn render_camera_buffers(
             let path = trace_camera_path(
                 scene,
                 ray,
-                &mut rng,
+                &mut CameraPathRngs {
+                    camera: &mut rng,
+                    environment: &mut environment_rng,
+                    diffuse: &mut diffuse_rng,
+                },
                 light_wi,
                 light,
                 ground,
-                &mut environment_rng,
             )
             .map_err(|error| error.to_string())?;
             mean.direct += path.direct / spp as f64;
@@ -499,18 +517,21 @@ fn set_camera_pixel(pixel: &mut Vector3<f64>, rgb: Vector3<f64>) -> Result<(), S
 /// 每条路径重新初始化吞吐量与辐亮度；RNG 由像素采样循环持有，不能逐路径重设种子。
 /// wo = -ray.direction，保留朝外几何法线；玻璃只乘 sample.weight。
 /// 新起点沿采样方向所在侧的法线偏移 1e-5 米，第九个玻璃命中处截断。
-/// 未命中按当前射线方向查询背景；非 delta 命中累加太阳与天空照明并终止。
+/// 未命中按当前射线方向查询背景；非 delta 命中累加太阳与天空照明。
 /// 阶段 13 绑定只读完整地面图；阶段 14 绑定将解析直射和焦散图相加。
-/// 不采样漫反射间接光，也不模拟透明 shadow ray。
+/// E1 可额外连接一个 Lambertian，仅将第二表面的直接光照计入 Direct。
+/// 不续追第二表面后的路径，不模拟透明 shadow ray。
 fn trace_camera_path(
     scene: &Scene,
     mut ray: Ray,
-    rng: &mut dyn rand::RngCore,
+    rngs: &mut CameraPathRngs<'_>,
     light_wi: Vector3<f64>,
     light: f64,
     ground: Option<&GroundLighting<'_>>,
-    environment_rng: &mut dyn rand::RngCore,
 ) -> Result<CameraPathComponents, Box<dyn Error>> {
+    if scene.max_diffuse_bounces > 1 {
+        return Err("E1 漫反射反弹数只能为 0 或 1".into());
+    }
     let mut throughput = 1.0;
     let mut radiance = CameraPathComponents::default();
     // 天空及可见背景归入 Direct；不改相机 RNG，三张调试图共享相同玻璃路径。
@@ -539,10 +560,21 @@ fn trace_camera_path(
                 .ok_or("地面棋盘格坐标无效")?
         };
         let environment = if include_environment {
-            environment_lighting(scene, &hit, material, wo, environment_rng)?
+            environment_lighting(scene, &hit, material, wo, rngs.environment)?
         } else {
             Vector3::zeros()
         };
+        if scene.max_diffuse_bounces == 1 && include_environment {
+            radiance.direct += sample_one_diffuse_indirect(
+                scene,
+                &hit,
+                material,
+                wo,
+                (light_wi, light),
+                ground,
+                rngs.diffuse,
+            )? * throughput;
+        }
         if let Some(ground) = ground
             && hit.object_id == Some(ground.object_id)
         {
@@ -569,14 +601,8 @@ fn trace_camera_path(
             break;
         }
         if !material.is_delta() {
-            let direct = match ground.and_then(|g| g.sun.as_ref()) {
-                Some(sun) if sun.component == GroundLightingComponent::Caustics => Vector3::zeros(),
-                Some(sun) => direct_lighting(scene, &hit, material, wo, sun.wi, 1.0)?
-                    .component_mul(
-                        &xyz_to_linear_srgb(sun.irradiance_xyz).ok_or("太阳 XYZ 转换失败")?,
-                    ),
-                None => direct_lighting(scene, &hit, material, wo, light_wi, light)?,
-            };
+            let direct =
+                surface_sun_lighting(scene, &hit, material, wo, (light_wi, light), ground)?;
             radiance.direct += (direct + environment) * (reflectance_scale * throughput);
             break;
         }
@@ -588,7 +614,7 @@ fn trace_camera_path(
             return Err("命中法线无效，无法采样玻璃路径".into());
         }
         let normal = hit.normal / normal_length;
-        let Some(sample) = material.sample(wo, normal, rng) else {
+        let Some(sample) = material.sample(wo, normal, rngs.camera) else {
             break;
         };
         let MaterialSample::Glass(sample) = sample else {
@@ -626,6 +652,135 @@ fn trace_camera_path(
         return Err("玻璃路径颜色非法或计算溢出".into());
     }
     Ok(radiance)
+}
+
+/// 仅采样 A→B；miss/delta/不支持的材质为零，不查询背景或 B 的焦散图。
+fn sample_one_diffuse_indirect(
+    scene: &Scene,
+    hit: &Hit,
+    material: &dyn Material,
+    wo: Vector3<f64>,
+    light: (Vector3<f64>, f64),
+    ground: Option<&GroundLighting<'_>>,
+    rng: &mut dyn rand::RngCore,
+) -> Result<Vector3<f64>, Box<dyn Error>> {
+    let Some(DiffuseRay { ray, throughput }) = sample_diffuse_ray(scene, hit, material, wo, rng)?
+    else {
+        return Ok(Vector3::zeros());
+    };
+    let Some(next) = scene.intersect(&ray) else {
+        // A 的 HDRI 已由 NEE/MIS 估计，不能再无权重添加逃逸方向的背景。
+        return Ok(Vector3::zeros());
+    };
+    let Some(next_material) = next.material_id.and_then(|id| scene.material(id)) else {
+        return Ok(Vector3::zeros());
+    };
+    if !next_material.is_lambertian() || next_material.is_delta() {
+        return Ok(Vector3::zeros());
+    }
+    let normal = unit_vector(next.normal).ok_or("第二漫反射表面法线无效")?;
+    let wo_next = -ray.direction;
+    if normal.dot(&wo_next) <= 0.0 {
+        return Ok(Vector3::zeros());
+    }
+    let direct = if let Some(g) = ground.filter(|g| next.object_id == Some(g.object_id))
+        && let Some(sun) = &g.sun
+    {
+        // 复用地面直射分支，仅查询解析太阳；不读取焦散专用图。
+        let direct_ground = GroundLighting {
+            sun: Some(SunGroundLighting {
+                component: GroundLightingComponent::Direct,
+                ..*sun
+            }),
+            ..*g
+        };
+        let e = ground_irradiance(scene, &next, &direct_ground)?;
+        xyz_to_linear_srgb(
+            lambertian_radiance(e.direct_xyz, g.rho).ok_or("第二表面地面直射计算失败")?,
+        )
+        .ok_or("第二表面地面 XYZ 转换失败")?
+    } else {
+        // 旧完整地面图无法分离焦散，E1 不读取它，改用现有解析 RGB 太阳。
+        surface_sun_lighting(scene, &next, next_material, wo_next, light, ground)?
+    };
+    let environment = environment_lighting(scene, &next, next_material, wo_next, rng)?;
+    let scale = scene
+        .ground_reflectance_scale(&next)
+        .ok_or("第二表面棋盘格坐标无效")?;
+    let indirect = throughput.component_mul(&((direct + environment) * scale));
+    if !indirect.iter().all(|v| v.is_finite()) {
+        return Err("漫反射间接光计算溢出".into());
+    }
+    Ok(indirect)
+}
+
+/// A 的 RGB 吞吐量为 f_r*cos/pdf，并且仅乘一次 A 的棋盘格反射率。
+fn sample_diffuse_ray(
+    scene: &Scene,
+    hit: &Hit,
+    material: &dyn Material,
+    wo: Vector3<f64>,
+    rng: &mut dyn rand::RngCore,
+) -> Result<Option<DiffuseRay>, Box<dyn Error>> {
+    if !material.is_lambertian() || material.is_delta() {
+        return Ok(None);
+    }
+    let normal = unit_vector(hit.normal).ok_or("漫反射采样法线无效")?;
+    let wo = unit_vector(wo).ok_or("漫反射采样出射方向无效")?;
+    if normal.dot(&wo) <= 0.0 {
+        return Ok(None);
+    }
+    let Some(sample) = material.sample(wo, normal, rng) else {
+        return Ok(None);
+    };
+    let MaterialSample::Continuous { wi } = sample else {
+        return Err("Lambertian 采样必须返回连续方向".into());
+    };
+    let wi = unit_vector(wi).ok_or("漫反射采样方向无效")?;
+    let cosine = normal.dot(&wi).clamp(0.0, 1.0);
+    if cosine == 0.0 {
+        return Ok(None);
+    }
+    let pdf = material.pdf(wi, wo, normal);
+    if !pdf.is_finite() || pdf <= 0.0 {
+        return Err("漫反射采样 PDF 必须有限且为正".into());
+    }
+    let BsdfValue::Rgb(bsdf) = material.evaluate(wi, wo, normal, EvaluateMode::Rgb) else {
+        return Err("漫反射 RGB 求值必须返回 RGB BSDF".into());
+    };
+    if bsdf.iter().any(|v| !v.is_finite() || *v < 0.0) {
+        return Err("漫反射 BSDF 必须有限且非负".into());
+    }
+    let scale = scene
+        .ground_reflectance_scale(hit)
+        .ok_or("漫反射棋盘格坐标无效")?;
+    let throughput = bsdf * (cosine / pdf) * scale;
+    if throughput.iter().any(|v| !v.is_finite() || *v < 0.0) {
+        return Err("漫反射吞吐量计算溢出".into());
+    }
+    if throughput == Vector3::zeros() {
+        return Ok(None);
+    }
+    let origin = hit.coords + normal * (10.0 * INTERSECTION_EPSILON);
+    let ray = Ray::new(origin, wi).ok_or("漫反射射线起点或方向无效")?;
+    Ok(Some(DiffuseRay { ray, throughput }))
+}
+
+/// 复用现有太阳约定；光谱绑定使用 D65 RGB，其他入口保持旧白光强度。
+fn surface_sun_lighting(
+    scene: &Scene,
+    hit: &Hit,
+    material: &dyn Material,
+    wo: Vector3<f64>,
+    (light_wi, light): (Vector3<f64>, f64),
+    ground: Option<&GroundLighting<'_>>,
+) -> Result<Vector3<f64>, Box<dyn Error>> {
+    match ground.and_then(|g| g.sun.as_ref()) {
+        Some(sun) if sun.component == GroundLightingComponent::Caustics => Ok(Vector3::zeros()),
+        Some(sun) => Ok(direct_lighting(scene, hit, material, wo, sun.wi, 1.0)?
+            .component_mul(&xyz_to_linear_srgb(sun.irradiance_xyz).ok_or("太阳 XYZ 转换失败")?)),
+        None => direct_lighting(scene, hit, material, wo, light_wi, light),
+    }
 }
 
 fn ground_irradiance(
@@ -677,6 +832,9 @@ fn camera_lighting_setup(
     width: usize,
     height: usize,
 ) -> Result<(Vector3<f64>, f64), Box<dyn Error>> {
+    if scene.max_diffuse_bounces > 1 {
+        return Err("E1 漫反射反弹数只能为 0 或 1".into());
+    }
     if scene.environment_samples == 0 {
         return Err("环境方向样本数必须大于零".into());
     }
@@ -926,6 +1084,9 @@ fn power_heuristic(sampled: f64, other: f64) -> Option<(f64, f64)> {
 mod environment_tests;
 
 #[cfg(test)]
+mod diffuse_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -948,7 +1109,7 @@ mod tests {
         for base_seed in [0, 42, u64::MAX] {
             let mut seeds = std::collections::HashSet::new();
             for index in 0..1024 {
-                for stream in [CAMERA_STREAM, ENVIRONMENT_STREAM] {
+                for stream in [CAMERA_STREAM, ENVIRONMENT_STREAM, DIFFUSE_STREAM] {
                     assert!(seeds.insert(pixel_seed(base_seed, index, stream)));
                 }
             }
@@ -1858,11 +2019,14 @@ mod tests {
         trace_camera_path(
             scene,
             ray,
-            &mut StdRng::seed_from_u64(seed),
+            &mut CameraPathRngs {
+                camera: &mut StdRng::seed_from_u64(seed),
+                environment: &mut StdRng::seed_from_u64(seed ^ ENVIRONMENT_SEED_OFFSET),
+                diffuse: &mut StdRng::seed_from_u64(seed ^ DIFFUSE_STREAM),
+            },
             light_wi,
             light,
             None,
-            &mut StdRng::seed_from_u64(seed ^ ENVIRONMENT_SEED_OFFSET),
         )
         .unwrap()
         .select(GroundLightingComponent::Combined)

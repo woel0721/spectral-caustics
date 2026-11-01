@@ -42,6 +42,8 @@ pub struct Scene {
     pub environment_samples: usize,
     /// HDRI 固定配额的 MIS 启发式，不影响单样本或渐变天空。
     pub environment_mis_heuristic: EnvironmentMisHeuristic,
+    /// E1 的额外 Lambertian 反弹数，只允许 0 或 1；独立于玻璃上限。
+    pub max_diffuse_bounces: usize,
     /// 只调制唯一接收地面的漫反射率，光源辐照度图保持独立。
     pub ground_checkerboard: Option<Checkerboard>,
     /// 每项绑定一个几何和可选材质编号，查询期间不能重排集合。
@@ -178,6 +180,7 @@ impl Scene {
                 .expect("内置默认环境参数必须有效"),
             environment_samples: config.environment_samples,
             environment_mis_heuristic: config.environment_mis_heuristic,
+            max_diffuse_bounces: config.max_diffuse_bounces,
             ground_checkerboard: config
                 .ground_checkerboard
                 .as_ref()
@@ -218,6 +221,7 @@ impl Scene {
             .transpose()?;
         scene.environment_samples = config.environment_samples;
         scene.environment_mis_heuristic = config.environment_mis_heuristic;
+        scene.max_diffuse_bounces = config.max_diffuse_bounces;
         scene.ground_checkerboard = config
             .ground_checkerboard
             .as_ref()

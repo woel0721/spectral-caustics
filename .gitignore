@@ -16,4 +16,6 @@
 !/output/camera_direct.png
 !/output/camera_caustics.png
 !/output/camera_combined.png
+!/output/e1_diffuse_0.png
+!/output/e1_diffuse_1.png
 .DS_Store
