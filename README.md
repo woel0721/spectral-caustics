@@ -783,7 +783,7 @@ L_indirect = T_glass * T_diffuse ⊙ L_next
 L_Direct = L_Direct,原有 + L_indirect
 ```
 
-B 的 `direct_lighting()` 已含 B 的 `albedo/pi`、太阳入射余弦及二值可见性；`environment_lighting()` 已含 B 的 BSDF、PDF、环境可见性和 Balance/Power MIS，不能再次乘 B 的反射率或除 PDF。A/B 各自的棋盘格只乘一次。B 若绑定了阶段 14 的地面照明，则复用 `ground_irradiance()` 的 Direct 分支和 `E*rho/pi`，不重复叠加解析太阳，也不读取焦散专用图。旧完整地面图无法分离直射/焦散，因此 E1 的第二表面不读取它，而使用旧 RGB 入口已有的解析太阳约定（`total_flux/孔径面积`）加环境；A 上的旧完整图行为保留。
+B 的 `direct_lighting()` 已含 B 的 `albedo/pi`、太阳入射余弦及二值可见性；`environment_lighting()` 已含 B 的 BSDF、PDF、环境可见性和 Balance/Power MIS，不能再次乘 B 的反射率或除 PDF。A/B 各自的棋盘格只乘一次。B 若绑定了阶段 14 的地面照明，则复用 `direct_ground_irradiance()` 和 `E*rho/pi`，不重复叠加解析太阳，也不读取焦散专用图。旧完整地面图无法分离直射/焦散，因此 E1 的第二表面不读取它，而使用旧 RGB 入口已有的解析太阳约定（`total_flux/孔径面积`）加环境；A 上的旧完整图行为保留。
 
 A 后的光线若 miss、命中玻璃/未绑定材质/不支持的连续材质或 B 的背面，间接项为零。逃逸方向不再加入 HDRI/常量背景，避免与 A 的环境 NEE/MIS 重复；B 不返回焦散图，避免增加二次焦散。仅显式标识为 Lambertian 的材质参与 E1。None、背半球、零吞吐量正常终止；非法方向、非正/非有限 PDF、负/非有限 BSDF、无效 RGB 返回类型及溢出返回错误。
 
@@ -916,7 +916,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-当前 288 项单元测试和 38 项集成测试通过，3 项耗时 MIS 比较默认忽略，严格 Clippy 通过。环境积分测试覆盖方向查询统一、均匀环境归一化、渐变解析参考与收敛、部分/完全遮挡、固定种子、样本计数及分量相加。有限地面测试覆盖矩形边界/斜射交点、receiver 外扩、地面外背景与记录区内光子能量不变。棋盘格测试覆盖世界坐标/负坐标、边界、JSON 兼容、地面绑定、全部相机照明入口的一次反射率调制及玻璃路径分量。天空测试覆盖Monte Carlo 积分/材质反射率、太阳不重复计数、四个相机入口只加一次天空、玻璃吞吐量/最终方向背景、分量相加、光子输出独立性及旧配置兼容。方向采样测试覆盖 PDF 归一化、余弦分布矩、固定种子复现、BSDF 权重、材质/方向约定与非法输入。局部方向转换测试覆盖法线对齐、右手正交基、长度与角度保持、非法输入和溢出。新增材质测试覆盖 RGB/标量光谱两个接口、PBRT 反射基谱参考值与波长响应、非法输入、端点延拓和漫反射能量积分；颜色工具测试覆盖线性 sRGB→XYZ 的 D65 白点、三原色和往返转换。彩色合成测试覆盖 XYZ 通量与采样数归一化、独立单波长合成及遮挡丢失通量、固定模式中性白、色散分色与可复现、非法配置以及彩色 PNG 读回。新增光谱测试检查官方表格完整性及列和、已知 CMF/SPD 值、非整数波长插值、端点与表外行为、积分权重、D65 白点、不同积分步长的稳定性，以及非法输入和溢出。统一入口测试覆盖单张固定模式图与多张固定模式图的通量一致性、两模式共享采样、固定模式各波长分布相同而色散模式不同，以及色散波长缺失、非法或溢出时返回错误。测试覆盖固定模式忽略波长、色散模式要求有效波长、闭包只求值一次并复用于两个界面、闭包返回非法折射率时拒绝追踪、Cauchy 单位换算、可见光区间折射率单调性、非法波长与溢出、两种波长通过双界面后的已知落点，以及传入光子追踪的非法波长。三波长测试检查共享空间采样、完整 XYZ 能量守恒、采样数归一化、丢失通量不重分配、各波长结果与独立单波长追踪一致，以及图像分布不同且可复现。采样测试逐格检查每层恰有一个点、点不越出所属层、两轴随机偏移，以及固定种子下的发射位置和图像完全重复。增加采样数时检查总能量守恒与无玻璃图的噪声降低；两种光路通过同种子对照验证发射位置一致。其余测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。双线性测试覆盖已知小数位置的四点权重、像素中心、权重和、边缘与单像素尺寸、完整 XYZ 总能量守恒及遮挡边缘的平滑分配。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地；`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、编号与添加顺序。
+当前 291 项单元测试和 38 项集成测试通过，3 项耗时 MIS 比较默认忽略，严格 Clippy 通过。环境积分测试覆盖方向查询统一、均匀环境归一化、渐变解析参考与收敛、部分/完全遮挡、固定种子、样本计数及分量相加。有限地面测试覆盖矩形边界/斜射交点、receiver 外扩、地面外背景与记录区内光子能量不变。棋盘格测试覆盖世界坐标/负坐标、边界、JSON 兼容、地面绑定、全部相机照明入口的一次反射率调制及玻璃路径分量。天空测试覆盖Monte Carlo 积分/材质反射率、太阳不重复计数、四个相机入口只加一次天空、玻璃吞吐量/最终方向背景、分量相加、光子输出独立性及旧配置兼容。方向采样测试覆盖 PDF 归一化、余弦分布矩、固定种子复现、BSDF 权重、材质/方向约定与非法输入。局部方向转换测试覆盖法线对齐、右手正交基、长度与角度保持、非法输入和溢出。新增材质测试覆盖 RGB/标量光谱两个接口、PBRT 反射基谱参考值与波长响应、非法输入、端点延拓和漫反射能量积分；颜色工具测试覆盖线性 sRGB→XYZ 的 D65 白点、三原色和往返转换。彩色合成测试覆盖 XYZ 通量与采样数归一化、独立单波长合成及遮挡丢失通量、固定模式中性白、色散分色与可复现、非法配置以及彩色 PNG 读回。新增光谱测试检查官方表格完整性及列和、已知 CMF/SPD 值、非整数波长插值、端点与表外行为、积分权重、D65 白点、不同积分步长的稳定性，以及非法输入和溢出。统一入口测试覆盖单张固定模式图与多张固定模式图的通量一致性、两模式共享采样、固定模式各波长分布相同而色散模式不同，以及色散波长缺失、非法或溢出时返回错误。测试覆盖固定模式忽略波长、色散模式要求有效波长、闭包只求值一次并复用于两个界面、闭包返回非法折射率时拒绝追踪、Cauchy 单位换算、可见光区间折射率单调性、非法波长与溢出、两种波长通过双界面后的已知落点，以及传入光子追踪的非法波长。三波长测试检查共享空间采样、完整 XYZ 能量守恒、采样数归一化、丢失通量不重分配、各波长结果与独立单波长追踪一致，以及图像分布不同且可复现。采样测试逐格检查每层恰有一个点、点不越出所属层、两轴随机偏移，以及固定种子下的发射位置和图像完全重复。增加采样数时检查总能量守恒与无玻璃图的噪声降低；两种光路通过同种子对照验证发射位置一致。其余测试覆盖场景最近交点与物体编号、非正方形图片的坐标映射、区域边界与非有限输入、三棱镜遮挡、XYZ 累积溢出保护，以及灰度图的 PNG 读回。双线性测试覆盖已知小数位置的四点权重、像素中心、权重和、边缘与单像素尺寸、完整 XYZ 总能量守恒及遮挡边缘的平滑分配。折射测试覆盖法向与近法向入射、临界角两侧、全反射、法线方向、非法数值、Snell 定律和单条光线通过两个界面后落地；`take_photon` 测试还覆盖直接落地、未命中、三个传播阶段的其他遮挡、编号与添加顺序。
 
 7 项三棱镜测试覆盖 8 个面的已知交点和朝外单位法线、最近面选择、棱边命中、内外求交、自相交与非有限光线；场景测试验证同一集合中不同物体的求交，以及改变添加顺序后仍选择最近交点。
 
@@ -997,7 +997,7 @@ src/
 
 重构前后分别运行 `cargo test --locked`：均为 288 项单元测试、38 项集成测试通过，3 项既有耗时比较默认忽略；`cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 通过。另用临时 release 比对工具保存重构前结果：六组 17×13、16 SPP 场景，seed=42–47，含真实 HDRI/渐变/关闭环境、E1 0/1、Balance/Power、N=1/3/8，并加入彩色漫反射墙。1/2/4 线程下共 162 份 XYZ 原始 f64 缓冲、162 张 PNG，在重构前后全部逐字节一致；各线程数之间也一致。覆盖 Direct/Caustics/Combined、单图兼容入口、完整地面图/RGB 入口、直接光调试及光源图；此检查没有修改既有测试预期。
 
-本轮保留的重复包括 `Scene::new` 与 `from_config` 中的部分构建代码、单图/三图及完整地面图兼容入口、测试专用旧路径/环境估计器。两套历史太阳强度约定也保留其不同语义。本轮到模块迁移为止，不做逻辑合并或死代码删除。
+第一轮结构重构时保留的重复包括 `Scene::new` 与 `from_config` 中的部分构建代码、单图/三图及完整地面图兼容入口、测试专用旧路径/环境估计器。两套历史太阳强度约定也保留其不同语义。第一轮止于模块迁移，第二轮去重与兼容审计见下文。
 
 `render::utils` 提供 `xyz_to_linear_srgb`、`linear_to_srgb_channel` 和 `linear_rgb_to_srgb8`；`render` 的 PNG 输出调用这些工具函数。法线调试图使用同一模块中的 `normal_to_rgb8`。XYZ 转换使用 D65 白点约定，参考白的 Y = 1。矩阵来自 [W3C CSS Color 4 的颜色转换示例](https://www.w3.org/TR/css-color-4/#color-conversion-code)，保留负值和大于 1 的线性 RGB 分量。
 
@@ -1019,3 +1019,257 @@ src/
 - Day 6 的 JSON 参数入口已接入；后续仍可补充成功落地、全反射和丢弃光子统计。
 
 使用 `nalgebra` 进行数学计算，`image` 编解码 PNG，`rand` 提供固定种子的格内随机偏移，`rand_chacha` 提供随机序列的直接定位接口，`rayon` 并行执行光谱采样块与相机像素。`Cargo.lock` 随项目提交；`.gitignore` 放行默认输出、各阶段示例及阶段 14 的三张相机调试图，编译目录 `target/` 和其他生成文件继续忽略。
+
+## 第二轮去重与兼容审计
+
+基于 `main` 的 `9b2742a`，本轮完成三项内部去重，没有新增渲染功能或删除公开接口：
+
+- `Scene::empty_from_config` 是唯一的共享字段初始化处。`new()` 使用 Rust 内置默认配置构造空场景，`from_config()` 先校验，再复用它并添加几何/材质；不再先构造默认 Scene 后覆盖字段。内置的 1/Balance/0 与展示 JSON 的 8/Power/1 继续区分。配置错误仍先于 HDR 文件加载和几何构建返回。
+- `direct_ground_irradiance(scene, hit, wi, E_xyz)` 只计算太阳余弦及二值可见性，不接受贴图或分量选择。普通地面与 E1 第二表面复用它；E1 不再复制 `GroundLighting`/`SunGroundLighting` 来强制 Direct。完整地面图替换、光谱太阳+焦散绑定、E1 的旧 RGB 太阳回退继续保留不同语义。
+- 私有 `offset_ray_origin` 复用三处相机起点偏移。玻璃调用方仍按 `wi·normal >= 0` 决定侧；阴影和漫反射传 +1。保留 `side*10*INTERSECTION_EPSILON` 的顺序、原法线和原 `Ray::new` 错误消息；光源端偏移不变。
+
+各项独立提交并验证：
+
+| 改动 | 单元测试 | 集成测试 | 其他验证 |
+| --- | ---: | ---: | --- |
+| 基线 | 288 | 38 | 固定 seed release 渲染快照 |
+| Scene 初始化共享 | 290 | 38 | fmt、严格 Clippy、162 XYZ + 162 PNG 与基线逐字节一致 |
+| 地面直射共享 | 290 | 38 | fmt、严格 Clippy、相同 324 份渲染文件逐字节一致 |
+| 起点偏移共享 | 291 | 38 | fmt、严格 Clippy、相同 324 份渲染文件逐字节一致 |
+
+每次完整测试均保留 3 项默认忽略的旧 MIS 耗时比较。新增两项 Scene 构建/错误顺序回归在旧实现上先通过，再用于验证去重；另一项核对共享偏移与旧公式的浮点位（含 ±0、两侧及极端值），并确认非法输入仍由调用处的 `Ray::new` 拒绝。没有调整既有预期值或对照估计器。
+
+快照为六组 17×13、16 SPP、相机 seed=42–47 / 光源 seed=42 的场景（含彩色漫反射墙），覆盖真实 HDRI/渐变/关闭环境、Balance/Power、N=1/3/8、E1=0/1、光子图、Direct/Caustics/Combined、单图与旧完整地面图入口；1/2/4 线程下的所有缓冲与 PNG 相互一致。现有 Fresnel、光谱焦散、环境 MIS 解析参考、RNG 状态与分量回归全部通过。相机/RNG、环境算法、材质、光谱、光源焦散、默认配置及锁文件没有修改。
+
+### 引用分类与保留决定
+
+以下按仓库当前执行调用分类：**1** 正式 `src` 非测试路径仍调用；**2** 仅示例或兼容调用链；**3** 仅测试执行（可以同时有文档）；**4** 无执行调用。定义和 `use`/re-export 不计调用，文档提及单列；测试包括 `#[cfg(test)]` 及默认忽略的比较器，临时快照工具不计。类别 2/3 不代表公开 API 可删除，也不代表存在的示例是废弃功能。
+
+本次审计覆盖相机/光源渲染入口、Render 渲染/保存门面、地面查询、PNG 输出和旧光子接口，未发现类别 4 的候选：
+
+| 函数 | 类别 | 决定 |
+| --- | --- | --- |
+| `take_photon` | 3 | 保留公开位置兼容接口；批量光源流程已使用 from_hit。 |
+| `take_photon_landing` | 2 | 正式源码中的调用来自 take_photon 兼容链；保留带权落点接口及测试。 |
+| `take_photon_from_hit` | 1 | 批量光谱/灰度追踪复用首交点，保留。 |
+| `render_camera_glass_with_lighting` | 3 | 保留单分量/单缓冲接口及跳过未选分量的行为。 |
+| `render_camera_glass_with_ground` | 2 | 完整地面图示例仍调用；保留完整图替换语义。 |
+| `render_camera_glass` | 2 | 独立 RGB/玻璃示例仍调用，保留。 |
+| `render_camera_glass_components` | 1 | 仍有实际调用，保留。 |
+| `render_camera_lit` | 1 | 仍有实际调用，保留。 |
+| `render_camera_debug` | 1 | 仍有实际调用，保留。 |
+| `render_ground_hits` | 1 | 仍有实际调用，保留。 |
+| `render_refracted_ground_hits` | 1 | 仍有实际调用，保留。 |
+| `render_spectral_caustics` | 1 | 仍有实际调用，保留。 |
+| `render_spectral_lighting` | 1 | 仍有实际调用，保留。 |
+| `ground_to_pixel` | 1 | 仍有实际调用，保留。 |
+| `sample_ground_irradiance` | 1 | 仍有实际调用，保留。 |
+| `lambertian_radiance` | 1 | 仍有实际调用，保留。 |
+| `save_png` | 3 | 保留曝光 1 的公开输出兼容接口。 |
+| `save_png_with_exposure` | 1 | 仍有实际调用，保留。 |
+| `refractive_index` | 1 | 仍有实际调用，保留。 |
+| `Render::render` | 1 | 仍有实际调用，保留。 |
+| `Render::render_mode` | 1 | 仍有实际调用，保留。 |
+| `Render::render_lighting` | 2 | 推荐的光源图门面，由三份示例调用，保留。 |
+| `Render::render_camera_glass_components` | 2 | 推荐三图门面，由三份示例调用，保留。 |
+| `Render::ground_hits` | 1 | 仍有实际调用，保留。 |
+| `Render::refracted_hits` | 1 | 仍有实际调用，保留。 |
+| `Render::save` | 1 | 仍有实际调用，保留。 |
+| `SpectralLighting::combined` | 3 | 保留旧单图重建及浮点容差回归。 |
+
+下一轮可以进入**公开接口弃用评估**的低使用候选是 `take_photon`（可迁移到 `take_photon_landing(...).map(|p| p.position)`）和 `save_png`（可迁移到曝光 1 的显式输出接口）。本轮不删除，后续需先授权 API 变更并迁移调用/文档。`render_camera_glass_with_lighting` 即使当前仅测试直调，也有只分配一张图、跳过未选分量的契约，不能直接用三图入口代替而宣称完全等价；`with_ground` 的完整图语义也仍有实际示例。
+
+私有代码审计没有发现可以证明无用的实现，因此本轮删除的无引用私有函数为 **0**。`render_camera_glass_impl` 有三处正式调用，共享单图的 `split=false` 与 primary 提取；内联它会重复这些细节。`render_landing_points` → `render_landing_point_sets` → `render_photon_landing_sets` 仍被地面灰度入口和测试使用。保留 E1 的 `diffuse_tests/legacy.rs`、环境测试的 `cosine_environment_lighting` / `random_mixture_environment_lighting` 和三个忽略比较器，不以生产未调用为理由删除测试参考。
+
+### 每个候选的调用位置
+
+下列行号对应本轮源码；文档行号是本节加入前的原有说明/示例，历史 ROADMAP 提及不代表当前正式调用。源码 `render::integrator`、`render` 和 `scene` 中的原重导出全部保留。审计通过 `rg` 检索并逐项核对调用者；同名 `Config::save` 与 `RgbImage::save` 已从 Render 保存门面列表排除。
+
+**`take_photon`（类别 3）**
+
+- 正式代码：无。
+- 示例：无。
+- 测试：[src/render/caustics.rs:689](src/render/caustics.rs#L689)；[src/scene/tests.rs:328,382,386,401,418,424,429,459,474,501,513,523,530,531,532](src/scene/tests.rs#L328)。
+- 原文档：[README.md:18,20,88,90,97,102,106,154,901,919,994,1017](README.md#L18)；[ROADMAP.md:127,133,164,350](ROADMAP.md#L127)。
+
+**`take_photon_landing`（类别 2）**
+
+- 正式代码：[src/scene/photon.rs:48](src/scene/photon.rs#L48)。
+- 示例：无。
+- 测试：[src/render/caustics.rs:884,1015,1509](src/render/caustics.rs#L884)；[src/scene/tests.rs:298,302,322,341,358,369,373](src/scene/tests.rs#L298)。
+- 原文档：[README.md:90,515,517,1017](README.md#L90)；[ROADMAP.md:350](ROADMAP.md#L350)。
+
+**`take_photon_from_hit`（类别 1）**
+
+- 正式代码：[src/render/caustics.rs:297,311,442,447](src/render/caustics.rs#L297)；[src/scene/photon.rs:73](src/scene/photon.rs#L73)。
+- 示例：无。
+- 测试：无。
+- 原文档：[README.md:90,154,996](README.md#L90)；[ROADMAP.md:350](ROADMAP.md#L350)。
+
+**`render_camera_glass_with_lighting`（类别 3）**
+
+- 正式代码：无。
+- 示例：无。
+- 测试：[src/render/integrator/diffuse_tests.rs:899](src/render/integrator/diffuse_tests.rs#L899)；[src/render/integrator/tests.rs:241,310,429,542,552,588,617,627,637,660](src/render/integrator/tests.rs#L241)；[tests/config_render.rs:143,238,286,351,361,371,470,561,991](tests/config_render.rs#L143)；[tests/environment_scene.rs:428,491](tests/environment_scene.rs#L428)。
+- 原文档：[README.md:443,467,471](README.md#L443)；[ROADMAP.md:340](ROADMAP.md#L340)。
+
+**`render_camera_glass_with_ground`（类别 2）**
+
+- 正式代码：无。
+- 示例：[examples/camera_glass_with_ground.rs:31](examples/camera_glass_with_ground.rs#L31)。
+- 测试：[src/render/integrator/tests.rs:787,794,805,820,838,850,854,860,867,868,871,877](src/render/integrator/tests.rs#L787)；[tests/config_render.rs:142,183,350,481](tests/config_render.rs#L142)；[tests/environment_scene.rs:427](tests/environment_scene.rs#L427)。
+- 原文档：[README.md:28,394,403,407,471](README.md#L28)；[ROADMAP.md:328](ROADMAP.md#L328)。
+
+**`render_camera_glass`（类别 2）**
+
+- 正式代码：无。
+- 示例：[examples/camera_glass.rs:22](examples/camera_glass.rs#L22)。
+- 测试：[src/config/mod.rs:181](src/config/mod.rs#L181)；[src/render/integrator/environment_tests.rs:624](src/render/integrator/environment_tests.rs#L624)；[src/render/integrator/environment_tests/stratified.rs:428](src/render/integrator/environment_tests/stratified.rs#L428)；[src/render/integrator/tests.rs:152,321,333,823,994,1004,1007,1011,1028,1033,1042,1047,1048,1060,1096,1102,1108,1152,1155,1159,1236,1251,1276,1285,1292,1295](src/render/integrator/tests.rs#L152)；[tests/config_render.rs:45,141,349,480,1072](tests/config_render.rs#L45)；[tests/environment_scene.rs:330,368,426,516](tests/environment_scene.rs#L330)。
+- 原文档：[README.md:26,269,275,363,369,372,374,471,659](README.md#L26)；[ROADMAP.md:295,305,306](ROADMAP.md#L295)。
+
+**`render_camera_glass_components`（类别 1）**
+
+- 正式代码：[src/render/mod.rs:81](src/render/mod.rs#L81)。
+- 示例：无。
+- 测试：[src/render/integrator/diffuse_tests.rs:855,858,869](src/render/integrator/diffuse_tests.rs#L855)；[src/render/integrator/tests.rs:297,452,459,466,493,562,659,679](src/render/integrator/tests.rs#L297)；[tests/config_render.rs:253,255,346](tests/config_render.rs#L253)；[tests/environment_scene.rs:416,485](tests/environment_scene.rs#L416)。
+- 原文档：[README.md:450,465,471](README.md#L450)；[ROADMAP.md:425,438](ROADMAP.md#L425)。
+
+**`render_camera_lit`（类别 1）**
+
+- 正式代码：[src/main.rs:62](src/main.rs#L62)。
+- 示例：无。
+- 测试：[src/render/integrator/tests.rs:320,332,341,1040,1097,1109,1310,1323,1354,1361,1376,1380,1401,1422,1430,1439,1452,1466,1475,1480,1484,1488,1513,1536](src/render/integrator/tests.rs#L320)；[tests/config_render.rs:140,348,479](tests/config_render.rs#L140)；[tests/environment_scene.rs:316,425](tests/environment_scene.rs#L316)。
+- 原文档：[README.md:24,275,334,355,357,471,773](README.md#L24)；[ROADMAP.md:262,272,441](ROADMAP.md#L262)。
+
+**`render_camera_debug`（类别 1）**
+
+- 正式代码：[src/main.rs:59](src/main.rs#L59)。
+- 示例：无。
+- 测试：[src/render/camera_debug.rs:54,63,66,81,96](src/render/camera_debug.rs#L54)。
+- 原文档：[README.md:326](README.md#L326)；[ROADMAP.md:212,220,244](ROADMAP.md#L212)。
+
+**`render_ground_hits`（类别 1）**
+
+- 正式代码：[src/render/mod.rs:118](src/render/mod.rs#L118)。
+- 示例：无。
+- 测试：[src/render/caustics.rs:692,948,1238,1244,1318,1334,1430,1632,1637,1645,1699,1725,1769](src/render/caustics.rs#L692)。
+- 原文档：[README.md:16](README.md#L16)。
+
+**`render_refracted_ground_hits`（类别 1）**
+
+- 正式代码：[src/render/mod.rs:131](src/render/mod.rs#L131)。
+- 示例：无。
+- 测试：[src/render/caustics.rs:852,913,1479,1488,1520,1547,1556,1565,1602,1614,1665,1677,1707,1758,1794,1815](src/render/caustics.rs#L852)。
+- 原文档：[README.md:20](README.md#L20)；[ROADMAP.md:133,137](ROADMAP.md#L133)。
+
+**`render_spectral_caustics`（类别 1）**
+
+- 正式代码：[src/render/mod.rs:107](src/render/mod.rs#L107)。
+- 示例：无。
+- 测试：[src/render/caustics.rs:654,790,804,841,891,903,927,955,999,1043,1050,1057,1109,1149,1169](src/render/caustics.rs#L654)。
+- 原文档：[README.md:22,146,428](README.md#L22)；[ROADMAP.md:25,146,166,337](ROADMAP.md#L25)。
+
+**`render_spectral_lighting`（类别 1）**
+
+- 正式代码：[src/render/mod.rs:62](src/render/mod.rs#L62)。
+- 示例：无。
+- 测试：[src/render/caustics.rs:657,673,693,721,743,746,752](src/render/caustics.rs#L657)；[src/render/integrator/tests.rs:345](src/render/integrator/tests.rs#L345)。
+- 原文档：[README.md:428](README.md#L428)；[ROADMAP.md:336](ROADMAP.md#L336)。
+
+**`ground_to_pixel`（类别 1）**
+
+- 正式代码：[src/render/caustics.rs:383,549](src/render/caustics.rs#L383)；[src/render/integrator/ground.rs:55](src/render/integrator/ground.rs#L55)。
+- 示例：无。
+- 测试：[src/render/caustics.rs:1188,1193,1197,1206,1210,1215,1224,1228](src/render/caustics.rs#L1188)；[tests/config_render.rs:832,836](tests/config_render.rs#L832)。
+- 原文档：[README.md:72,396](README.md#L72)。
+
+**`sample_ground_irradiance`（类别 1）**
+
+- 正式代码：[src/render/integrator/ground.rs:185,196](src/render/integrator/ground.rs#L185)。
+- 示例：无。
+- 测试：[src/render/integrator/tests.rs:703,712,718,727,737,741,745,747,750,752](src/render/integrator/tests.rs#L703)。
+- 原文档：[README.md:396](README.md#L396)；[ROADMAP.md:326](ROADMAP.md#L326)。
+
+**`lambertian_radiance`（类别 1）**
+
+- 正式代码：[src/render/integrator/diffuse.rs:52](src/render/integrator/diffuse.rs#L52)；[src/render/integrator/path.rs:95,97](src/render/integrator/path.rs#L95)。
+- 示例：无。
+- 测试：[src/render/integrator/diffuse_tests.rs:626](src/render/integrator/diffuse_tests.rs#L626)；[src/render/integrator/diffuse_tests/legacy.rs:58,60](src/render/integrator/diffuse_tests/legacy.rs#L58)；[src/render/integrator/tests.rs:759,762,766,772,775](src/render/integrator/tests.rs#L759)。
+- 原文档：[README.md:398](README.md#L398)；[ROADMAP.md:327](ROADMAP.md#L327)。
+
+**`save_png`（类别 3）**
+
+- 正式代码：无。
+- 示例：无。
+- 测试：[src/render/caustics.rs:1116,1736,1829](src/render/caustics.rs#L1116)；[src/render/mod.rs:265](src/render/mod.rs#L265)。
+- 原文档：无。
+
+**`save_png_with_exposure`（类别 1）**
+
+- 正式代码：[src/render/mod.rs:146,153](src/render/mod.rs#L146)。
+- 示例：[examples/camera_glass.rs:30](examples/camera_glass.rs#L30)。
+- 测试：无。
+- 原文档：无。
+
+**`refractive_index`（类别 1）**
+
+- 正式代码：[src/render/caustics.rs:227,248,413,419,446](src/render/caustics.rs#L227)。
+- 示例：无。
+- 测试：[src/render/caustics.rs:1016,1510](src/render/caustics.rs#L1016)；[src/scene/tests.rs:137,151,158,165,177,339,402,419,425,430,460](src/scene/tests.rs#L137)。
+- 原文档：[README.md:20,92,97,103,994](README.md#L20)；[ROADMAP.md:132,133](ROADMAP.md#L132)。
+
+**`Render::render`（类别 1）**
+
+- 正式代码：[src/main.rs:49](src/main.rs#L49)。
+- 示例：[examples/camera_glass_with_ground.rs:23](examples/camera_glass_with_ground.rs#L23)。
+- 测试：[src/render/integrator/diffuse_tests.rs:178](src/render/integrator/diffuse_tests.rs#L178)；[tests/config_render.rs:102,124,134,181,227,280,337,417,925,932](tests/config_render.rs#L102)；[tests/environment_scene.rs:403,404](tests/environment_scene.rs#L403)。
+- 原文档：[README.md:162,406](README.md#L162)；[ROADMAP.md:329,337](ROADMAP.md#L329)。
+
+**`Render::render_mode`（类别 1）**
+
+- 正式代码：[src/main.rs:72](src/main.rs#L72)；[src/render/mod.rs:55](src/render/mod.rs#L55)。
+- 示例：无。
+- 测试：[tests/config_render.rs:500,502](tests/config_render.rs#L500)。
+- 原文档：[README.md:164](README.md#L164)。
+
+**`Render::render_lighting`（类别 2）**
+
+- 正式代码：无。
+- 示例：[examples/camera_direct_caustics.rs:20](examples/camera_direct_caustics.rs#L20)；[examples/camera_parallel_benchmark.rs:46](examples/camera_parallel_benchmark.rs#L46)；[examples/diffuse_indirect.rs:53](examples/diffuse_indirect.rs#L53)。
+- 测试：[src/render/integrator/diffuse_tests.rs:177,753,846](src/render/integrator/diffuse_tests.rs#L177)；[tests/config_render.rs:123,135,226,276,338,438,507,508,521,956,1014,1036](tests/config_render.rs#L123)；[tests/environment_scene.rs:391,392,410,778,779](tests/environment_scene.rs#L391)。
+- 原文档：[README.md:428,449](README.md#L428)；[ROADMAP.md:336](ROADMAP.md#L336)。
+
+**`Render::render_camera_glass_components`（类别 2）**
+
+- 正式代码：无。
+- 示例：[examples/camera_direct_caustics.rs:23](examples/camera_direct_caustics.rs#L23)；[examples/camera_parallel_benchmark.rs:50](examples/camera_parallel_benchmark.rs#L50)；[examples/diffuse_indirect.rs:56](examples/diffuse_indirect.rs#L56)。
+- 测试：[tests/config_render.rs:958,970,1045,1050,1068](tests/config_render.rs#L958)；[tests/environment_scene.rs:795,798,810](tests/environment_scene.rs#L795)。
+- 原文档：[README.md:450,471](README.md#L450)；[ROADMAP.md:438](ROADMAP.md#L438)。
+
+**`Render::ground_hits`（类别 1）**
+
+- 正式代码：[src/main.rs:99](src/main.rs#L99)。
+- 示例：无。
+- 测试：无。
+- 原文档：无。
+
+**`Render::refracted_hits`（类别 1）**
+
+- 正式代码：[src/main.rs:78,85](src/main.rs#L78)。
+- 示例：无。
+- 测试：无。
+- 原文档：[README.md:109,118,119](README.md#L109)。
+
+**`Render::save`（类别 1）**
+
+- 正式代码：[src/main.rs:50,64,74,79,88,100](src/main.rs#L50)。
+- 示例：[examples/camera_direct_caustics.rs:29](examples/camera_direct_caustics.rs#L29)；[examples/camera_glass_with_ground.rs:24,40](examples/camera_glass_with_ground.rs#L24)；[examples/diffuse_indirect.rs:58](examples/diffuse_indirect.rs#L58)。
+- 测试：[tests/config_render.rs:213,318,1127](tests/config_render.rs#L213)。
+- 原文档：[README.md:163,341,358,378,411,454,455,456](README.md#L163)；[ROADMAP.md:265](ROADMAP.md#L265)。
+
+**`SpectralLighting::combined`（类别 3）**
+
+- 正式代码：无。
+- 示例：无。
+- 测试：[src/render/caustics.rs:668,748,750](src/render/caustics.rs#L668)；[tests/config_render.rs:229](tests/config_render.rs#L229)。
+- 原文档：[README.md:428](README.md#L428)。
