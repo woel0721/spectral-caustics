@@ -598,10 +598,10 @@ fn scene_validation_still_precedes_environment_loading_and_geometry_construction
     let mut config = SceneConfig::default();
     config.environment.as_mut().unwrap().map_path =
         Some("missing-scene-builder-regression.hdr".into());
-    config.max_diffuse_bounces = 2;
+    config.max_diffuse_bounces = crate::config::sceneconfig::MAX_DIFFUSE_BOUNCES + 1;
     assert_eq!(
         Scene::from_config(&config).err().unwrap().to_string(),
-        "scene.max_diffuse_bounces 在 E1 中只能为 0 或 1"
+        "scene.max_diffuse_bounces 不能超过 1024"
     );
     config.max_diffuse_bounces = 0;
     assert!(

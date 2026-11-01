@@ -183,6 +183,13 @@ fn render_camera_buffers(
         .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(spp))
         .and_then(|paths| paths.checked_mul(scene.environment_samples))
+        .and_then(|samples| {
+            samples.checked_mul(if scene.max_diffuse_bounces > 1 {
+                scene.max_diffuse_bounces + 1
+            } else {
+                1
+            })
+        })
         .ok_or("相机路径样本总数溢出")?;
     if split {
         width

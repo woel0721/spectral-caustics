@@ -73,7 +73,7 @@ impl Hittable for Plane {
     }
 }
 
-fn two_planes(a: Vector3<f64>, b: Vector3<f64>) -> Scene {
+pub(super) fn two_planes(a: Vector3<f64>, b: Vector3<f64>) -> Scene {
     let mut scene = Scene::new();
     scene.environment = None;
     scene.ground_checkerboard = None;
@@ -98,30 +98,30 @@ fn two_planes(a: Vector3<f64>, b: Vector3<f64>) -> Scene {
     .unwrap();
     scene
 }
-fn first_hit(scene: &Scene) -> Hit {
+pub(super) fn first_hit(scene: &Scene) -> Hit {
     scene
         .intersect(&Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap())
         .unwrap()
 }
-fn sun() -> (Vector3<f64>, f64) {
+pub(super) fn sun() -> (Vector3<f64>, f64) {
     (Vector3::new(-1.0, 0.0, 1.0).normalize(), 2.0)
 }
-fn close(actual: Vector3<f64>, expected: Vector3<f64>) {
+pub(super) fn close(actual: Vector3<f64>, expected: Vector3<f64>) {
     assert!(
         (actual - expected).norm() < 2e-12,
         "{actual:?} != {expected:?}"
     );
 }
-fn bits(v: Vector3<f64>) -> [u64; 3] {
+pub(super) fn bits(v: Vector3<f64>) -> [u64; 3] {
     v.map(f64::to_bits).into()
 }
 
-struct SequenceRng {
+pub(super) struct SequenceRng {
     words: VecDeque<u64>,
-    draws: usize,
+    pub(super) draws: usize,
 }
 impl SequenceRng {
-    fn new(values: &[f64]) -> Self {
+    pub(super) fn new(values: &[f64]) -> Self {
         Self {
             words: values
                 .iter()
@@ -756,7 +756,7 @@ fn photon_maps_match_2521356_frozen_fingerprints_with_e1_on_or_off() {
     }
 }
 
-fn uniform_hdri() -> Environment {
+pub(super) fn uniform_hdri() -> Environment {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
         "e1-uniform-{}-{}.hdr",

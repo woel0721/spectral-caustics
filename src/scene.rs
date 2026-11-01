@@ -26,7 +26,7 @@ pub struct Scene {
     pub environment_samples: usize,
     /// HDRI 固定配额的 MIS 启发式，不影响单样本或渐变天空。
     pub environment_mis_heuristic: EnvironmentMisHeuristic,
-    /// E1 的额外 Lambertian 反弹数，只允许 0 或 1；独立于玻璃上限。
+    /// 有限的额外 Lambertian 反弹数；独立于玻璃上限，缺省为 0。
     pub max_diffuse_bounces: usize,
     /// 只调制唯一接收地面的漫反射率，光源辐照度图保持独立。
     pub ground_checkerboard: Option<Checkerboard>,

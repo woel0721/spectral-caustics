@@ -26,6 +26,13 @@ impl Config {
             .checked_mul(self.render.height)
             .and_then(|pixels| pixels.checked_mul(self.render.camera_spp))
             .and_then(|paths| paths.checked_mul(self.scene.environment_samples))
+            .and_then(|samples| {
+                samples.checked_mul(if self.scene.max_diffuse_bounces > 1 {
+                    self.scene.max_diffuse_bounces + 1
+                } else {
+                    1
+                })
+            })
             .ok_or("环境方向样本总数溢出")?;
         Ok(())
     }
@@ -137,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn diffuse_bounces_default_to_zero_and_only_accept_zero_or_one() {
+    fn diffuse_bounces_default_to_zero_and_accept_bounded_depths() {
         let mut json: serde_json::Value =
             serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
         json["scene"]
@@ -152,7 +159,7 @@ mod tests {
             0
         );
         assert_eq!(crate::scene::Scene::new().max_diffuse_bounces, 0);
-        for count in [0, 1] {
+        for count in [0, 1, 2, 3, 5, sceneconfig::MAX_DIFFUSE_BOUNCES] {
             json["scene"]["max_diffuse_bounces"] = json!(count);
             let config = Config::from_json(&json.to_string()).unwrap();
             assert_eq!(
@@ -167,7 +174,7 @@ mod tests {
             );
         }
         for invalid in [
-            json!(2),
+            json!(sceneconfig::MAX_DIFFUSE_BOUNCES + 1),
             json!(usize::MAX),
             json!(-1),
             json!(0.5),
@@ -177,7 +184,7 @@ mod tests {
             assert!(Config::from_json(&json.to_string()).is_err());
         }
         let mut scene = crate::scene::Scene::new();
-        scene.max_diffuse_bounces = 2;
+        scene.max_diffuse_bounces = sceneconfig::MAX_DIFFUSE_BOUNCES + 1;
         assert!(crate::render::render_camera_glass(&scene, 1, 1, 1, 42).is_err());
     }
 

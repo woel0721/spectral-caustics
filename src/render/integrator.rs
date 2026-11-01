@@ -33,3 +33,6 @@ mod diffuse_tests;
 mod environment_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod e2_tests;

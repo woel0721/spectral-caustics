@@ -47,3 +47,26 @@ impl CameraPathComponents {
         }
     }
 }
+
+/// 一条有界相机路径；throughput 为线性 RGB，两个事件计数彼此独立。
+pub(super) struct CameraPathState {
+    pub(super) ray: Ray,
+    pub(super) throughput: Vector3<f64>,
+    pub(super) radiance: CameraPathComponents,
+    pub(super) diffuse_bounces: usize,
+    pub(super) glass_events: usize,
+    pub(super) max_diffuse_bounces: usize,
+}
+
+impl CameraPathState {
+    pub(super) fn new(ray: Ray, max_diffuse_bounces: usize) -> Self {
+        Self {
+            ray,
+            throughput: Vector3::repeat(1.0),
+            radiance: CameraPathComponents::default(),
+            diffuse_bounces: 0,
+            glass_events: 0,
+            max_diffuse_bounces,
+        }
+    }
+}

@@ -1,12 +1,12 @@
 //! 相机路径控制流、Fresnel 玻璃事件与八次玻璃传播上限。
 
 use super::{
-    diffuse::sample_one_diffuse_indirect,
+    diffuse::trace_diffuse_path,
     direct::surface_sun_lighting,
     environment::environment_lighting,
     ground::{GroundLighting, ground_irradiance, lambertian_radiance},
     offset_ray_origin,
-    types::{CameraPathComponents, CameraPathRngs, GroundLightingComponent},
+    types::{CameraPathComponents, CameraPathRngs, CameraPathState, GroundLightingComponent},
 };
 use crate::{
     geometry::ray::Ray, material::MaterialSample, render::utils::xyz_to_linear_srgb, scene::Scene,
@@ -23,30 +23,29 @@ pub(super) const MAX_GLASS_BOUNCES: usize = 8;
 /// 新起点沿采样方向所在侧的法线偏移 1e-5 米，第九个玻璃命中处截断。
 /// 未命中按当前射线方向查询背景；非 delta 命中累加太阳与天空照明。
 /// 阶段 13 绑定只读完整地面图；阶段 14 绑定将解析直射和焦散图相加。
-/// E1 可额外连接一个 Lambertian，仅将第二表面的直接光照计入 Direct。
-/// 不续追第二表面后的路径，不模拟透明 shadow ray。
+/// 首次 Lambertian 后迭代追踪有界漫反射链；后续仅累加太阳/环境直接光。
+/// 漫反射后遇玻璃终止，不模拟透明 shadow ray。
 pub(super) fn trace_camera_path(
     scene: &Scene,
-    mut ray: Ray,
+    ray: Ray,
     rngs: &mut CameraPathRngs<'_>,
     light_wi: Vector3<f64>,
     light: f64,
     ground: Option<&GroundLighting<'_>>,
 ) -> Result<CameraPathComponents, Box<dyn Error>> {
-    if scene.max_diffuse_bounces > 1 {
-        return Err("E1 漫反射反弹数只能为 0 或 1".into());
-    }
-    let mut throughput = 1.0;
-    let mut radiance = CameraPathComponents::default();
+    crate::config::sceneconfig::validate_diffuse_bounces(scene.max_diffuse_bounces)?;
+    let mut state = CameraPathState::new(ray, scene.max_diffuse_bounces);
     // 天空及可见背景归入 Direct；不改相机 RNG，三张调试图共享相同玻璃路径。
     let include_environment = ground
         .and_then(|g| g.sun.as_ref())
         .is_none_or(|sun| sun.component != GroundLightingComponent::Caustics);
-    for bounce in 0..=MAX_GLASS_BOUNCES {
-        let Some(hit) = scene.intersect(&ray) else {
+    loop {
+        // 首个非 delta 顶点之前玻璃权重是灰色；保留 E0/E1 的标量乘法分组。
+        let throughput = state.throughput.x;
+        let Some(hit) = scene.intersect(&state.ray) else {
             if include_environment {
-                radiance.direct += scene
-                    .background_radiance(ray.direction)
+                state.radiance.direct += scene
+                    .background_radiance(state.ray.direction)
                     .ok_or("背景辐亮度无效")?
                     * throughput;
             }
@@ -55,7 +54,7 @@ pub(super) fn trace_camera_path(
         let Some(material) = hit.material_id.and_then(|id| scene.material(id)) else {
             break;
         };
-        let wo = -ray.direction;
+        let wo = -state.ray.direction;
         let reflectance_scale = if material.is_delta() {
             1.0
         } else {
@@ -68,16 +67,16 @@ pub(super) fn trace_camera_path(
         } else {
             Vector3::zeros()
         };
-        if scene.max_diffuse_bounces == 1 && include_environment {
-            radiance.direct += sample_one_diffuse_indirect(
+        if scene.max_diffuse_bounces > 0 && include_environment {
+            trace_diffuse_path(
                 scene,
                 &hit,
                 material,
-                wo,
                 (light_wi, light),
                 ground,
                 rngs.diffuse,
-            )? * throughput;
+                &mut state,
+            )?;
         }
         if let Some(ground) = ground
             && hit.object_id == Some(ground.object_id)
@@ -97,20 +96,20 @@ pub(super) fn trace_camera_path(
                 lambertian_radiance(e.caustics_xyz, ground.rho).ok_or("地面焦散辐亮度计算失败")?;
             // 保留超出 sRGB 色域的线性值，最终输出时才裁剪；中性反射直接缩放 XYZ。
             let weight = reflectance_scale * throughput;
-            radiance.direct += (xyz_to_linear_srgb(direct_xyz).ok_or("地面 XYZ 辐亮度转换失败")?
-                + environment)
-                * weight;
-            radiance.caustics +=
+            state.radiance.direct +=
+                (xyz_to_linear_srgb(direct_xyz).ok_or("地面 XYZ 辐亮度转换失败")? + environment)
+                    * weight;
+            state.radiance.caustics +=
                 xyz_to_linear_srgb(caustics_xyz).ok_or("地面焦散 XYZ 辐亮度转换失败")? * weight;
             break;
         }
         if !material.is_delta() {
             let direct =
                 surface_sun_lighting(scene, &hit, material, wo, (light_wi, light), ground)?;
-            radiance.direct += (direct + environment) * (reflectance_scale * throughput);
+            state.radiance.direct += (direct + environment) * (reflectance_scale * throughput);
             break;
         }
-        if bounce == MAX_GLASS_BOUNCES {
+        if state.glass_events == MAX_GLASS_BOUNCES {
             break;
         }
         let normal_length = hit.normal.norm();
@@ -132,11 +131,12 @@ pub(super) fn trace_camera_path(
         {
             return Err("玻璃采样概率或权重无效".into());
         }
-        throughput *= sample.weight;
-        if !throughput.is_finite() {
+        state.throughput *= sample.weight;
+        state.glass_events += 1;
+        if !state.throughput.iter().all(|value| value.is_finite()) {
             return Err("玻璃路径吞吐量计算溢出".into());
         }
-        if throughput == 0.0 {
+        if state.throughput == Vector3::zeros() {
             break;
         }
         let side = if sample.wi.dot(&normal) >= 0.0 {
@@ -145,15 +145,16 @@ pub(super) fn trace_camera_path(
             -1.0
         };
         let origin = offset_ray_origin(hit.coords, normal, side);
-        ray = Ray::new(origin, sample.wi).ok_or("玻璃路径射线起点或方向无效")?;
+        state.ray = Ray::new(origin, sample.wi).ok_or("玻璃路径射线起点或方向无效")?;
     }
-    if !radiance
+    if !state
+        .radiance
         .direct
         .iter()
-        .chain(radiance.caustics.iter())
+        .chain(state.radiance.caustics.iter())
         .all(|value| value.is_finite())
     {
         return Err("玻璃路径颜色非法或计算溢出".into());
     }
-    Ok(radiance)
+    Ok(state.radiance)
 }

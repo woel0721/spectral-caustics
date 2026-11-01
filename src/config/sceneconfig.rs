@@ -4,6 +4,18 @@ use super::{cameraconfig::CameraConfig, materialconfig::MaterialConfig};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// 防止误传 usize::MAX 等深度；不分配与深度成比例的路径存储。
+pub(crate) const MAX_DIFFUSE_BOUNCES: usize = 1024;
+
+pub(crate) fn validate_diffuse_bounces(count: usize) -> Result<(), String> {
+    if count > MAX_DIFFUSE_BOUNCES {
+        return Err(format!(
+            "scene.max_diffuse_bounces 不能超过 {MAX_DIFFUSE_BOUNCES}"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SceneConfig {
@@ -18,7 +30,7 @@ pub struct SceneConfig {
     /// HDRI 多样本 MIS 权重；旧 JSON 缺省为 Balance。
     #[serde(default)]
     pub environment_mis_heuristic: EnvironmentMisHeuristic,
-    /// E1 仅支持 0（旧行为）或 1（一次 Lambertian 间接反弹）。
+    /// 相机额外 Lambertian 反弹数；缺省为 0，运行时上限见 MAX_DIFFUSE_BOUNCES。
     #[serde(default)]
     pub max_diffuse_bounces: usize,
     /// 唯一接收地面的灰度反射率纹理；省略/null 保留纯色材质。
@@ -253,9 +265,7 @@ impl SceneConfig {
         if self.environment_samples == 0 {
             return Err("scene.environment_samples 必须大于零".into());
         }
-        if self.max_diffuse_bounces > 1 {
-            return Err("scene.max_diffuse_bounces 在 E1 中只能为 0 或 1".into());
-        }
+        validate_diffuse_bounces(self.max_diffuse_bounces)?;
         if let Some(checkerboard) = &self.ground_checkerboard {
             checkerboard.validate()?;
         }

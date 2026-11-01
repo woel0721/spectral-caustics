@@ -44,9 +44,7 @@ pub(super) fn camera_lighting_setup(
     width: usize,
     height: usize,
 ) -> Result<(Vector3<f64>, f64), Box<dyn Error>> {
-    if scene.max_diffuse_bounces > 1 {
-        return Err("E1 漫反射反弹数只能为 0 或 1".into());
-    }
+    crate::config::sceneconfig::validate_diffuse_bounces(scene.max_diffuse_bounces)?;
     if scene.environment_samples == 0 {
         return Err("环境方向样本数必须大于零".into());
     }
