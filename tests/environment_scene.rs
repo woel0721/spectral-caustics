@@ -6,7 +6,7 @@ use spectral_caustics::{
         cameraconfig::CameraConfig,
         materialconfig::MaterialConfig,
         rendersetting::RenderSetting,
-        sceneconfig::{EnvironmentConfig, ObjectConfig, SceneConfig},
+        sceneconfig::{EnvironmentConfig, EnvironmentMisHeuristic, ObjectConfig, SceneConfig},
     },
     environment::{Environment, EnvironmentMap},
     material::{GlassEvent, MaterialSample},
@@ -760,7 +760,7 @@ fn mixed_hdri_camera_is_thread_independent_and_preserves_caustics() {
         environment_samples: 3,
         ..Default::default()
     };
-    let scene = Scene::from_config(&config).unwrap();
+    let mut scene = Scene::from_config(&config).unwrap();
     let without_environment = Scene::from_config(&SceneConfig {
         environment: None,
         ..config
@@ -783,36 +783,45 @@ fn mixed_hdri_camera_is_thread_independent_and_preserves_caustics() {
         lighting.sun_irradiance_xyz,
         solar_lighting.sun_irradiance_xyz
     );
-    for seed in [0, 42] {
-        let baseline = renderer
-            .render_camera_glass_components(&scene, &lighting, 16, seed)
-            .unwrap();
-        let solar = renderer
-            .render_camera_glass_components(&without_environment, &solar_lighting, 16, seed)
-            .unwrap();
-        assert_eq!(baseline.caustics.pixels, solar.caustics.pixels);
-        assert_ne!(baseline.direct.pixels, solar.direct.pixels);
-        for threads in [1, 2, 4] {
-            let parallel = Render::new(RenderSetting {
-                thread_count: Some(threads),
-                ..settings.clone()
-            })
-            .unwrap();
-            for _ in 0..2 {
-                let images = parallel
+    for heuristic in [
+        EnvironmentMisHeuristic::Balance,
+        EnvironmentMisHeuristic::Power,
+    ] {
+        scene.environment_mis_heuristic = heuristic;
+        for samples in [1, 2, 3, 4, 8] {
+            scene.environment_samples = samples;
+            for seed in [0, 42] {
+                let baseline = renderer
                     .render_camera_glass_components(&scene, &lighting, 16, seed)
                     .unwrap();
-                assert_eq!(images.direct.pixels, baseline.direct.pixels);
-                assert_eq!(images.caustics.pixels, baseline.caustics.pixels);
-                assert_eq!(images.combined.pixels, baseline.combined.pixels);
-                for ((direct, caustics), combined) in images
-                    .direct
-                    .pixels
-                    .iter()
-                    .zip(&images.caustics.pixels)
-                    .zip(&images.combined.pixels)
-                {
-                    assert!((direct + caustics - combined).norm() < 1e-12);
+                let solar = renderer
+                    .render_camera_glass_components(&without_environment, &solar_lighting, 16, seed)
+                    .unwrap();
+                assert_eq!(baseline.caustics.pixels, solar.caustics.pixels);
+                assert_ne!(baseline.direct.pixels, solar.direct.pixels);
+                for threads in [1, 2, 4] {
+                    let parallel = Render::new(RenderSetting {
+                        thread_count: Some(threads),
+                        ..settings.clone()
+                    })
+                    .unwrap();
+                    for _ in 0..2 {
+                        let images = parallel
+                            .render_camera_glass_components(&scene, &lighting, 16, seed)
+                            .unwrap();
+                        assert_eq!(images.direct.pixels, baseline.direct.pixels);
+                        assert_eq!(images.caustics.pixels, baseline.caustics.pixels);
+                        assert_eq!(images.combined.pixels, baseline.combined.pixels);
+                        for ((direct, caustics), combined) in images
+                            .direct
+                            .pixels
+                            .iter()
+                            .zip(&images.caustics.pixels)
+                            .zip(&images.combined.pixels)
+                        {
+                            assert!((direct + caustics - combined).norm() < 1e-12);
+                        }
+                    }
                 }
             }
         }

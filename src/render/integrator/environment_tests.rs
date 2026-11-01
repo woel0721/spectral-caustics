@@ -1,4 +1,4 @@
-//! D2 的受控 PDF、统计回归及可复现比较；旧估计器仅用于测试。
+//! D2/D3 的受控 PDF、统计回归及可复现比较；旧估计器仅用于测试。
 
 use super::*;
 use crate::{
@@ -306,7 +306,7 @@ fn back_hemisphere_and_blocked_hdri_samples_keep_the_total_denominator() {
         ..Default::default()
     };
     // BSDF 正上方 + HDRI 均匀分支近南极；p_bsdf=0 的背半球方向合法。
-    let mut rng = WordRng([0, 0, 0, u64::MAX, u64::MAX, 0, u64::MAX].into());
+    let mut rng = WordRng([0, 0, u64::MAX, 0, u64::MAX].into());
     let actual = environment_lighting(&scene, &hit, &material, Vector3::z(), &mut rng).unwrap();
     assert!((actual - Vector3::repeat(0.64)).norm() < 1e-12);
     assert!(rng.0.is_empty());
@@ -320,10 +320,10 @@ fn back_hemisphere_and_blocked_hdri_samples_keep_the_total_denominator() {
     scene.add(Box::new(Ground::new(0.0).unwrap()));
     scene.add(Box::new(HalfPlane(Ground::new(1.0).unwrap())));
     // BSDF 的 -Y 方向可见，HDRI 的 +Y 方向被挡；两方向都在正半球。
-    let mut rng = WordRng([0, 1 << 63, 3 << 62, u64::MAX, u64::MAX, 3 << 62, 1 << 62].into());
+    let mut rng = WordRng([1 << 63, 3 << 62, u64::MAX, 3 << 62, 1 << 62].into());
     let actual = environment_lighting(&scene, &hit, &material, Vector3::z(), &mut rng).unwrap();
     let cosine = 0.5_f64.sqrt();
-    let expected = (0.8 / PI) * cosine / (0.5 * cosine / PI + 0.5 / (4.0 * PI)) / 2.0;
+    let expected = (0.8 / PI) * cosine / (cosine / PI + 1.0 / (4.0 * PI));
     assert!((actual - Vector3::repeat(expected)).norm() < 1e-12);
     assert!(rng.0.is_empty());
     scene.add(Box::new(Ground::new(2.0).unwrap()));
@@ -507,7 +507,7 @@ fn high_contrast_hdri_mixture_reduces_error_over_independent_seeds() {
     for seed in 0..64 {
         for (index, estimator) in [
             cosine_environment_lighting as Estimator,
-            environment_lighting as Estimator,
+            random_mixture_environment_lighting as Estimator,
         ]
         .into_iter()
         .enumerate()
@@ -636,7 +636,7 @@ fn compare_hdri_sampling() {
             // 预热两条路径；交替测量顺序减小固定先后次序的影响。
             for estimator in [
                 cosine_environment_lighting as Estimator,
-                environment_lighting as Estimator,
+                random_mixture_environment_lighting as Estimator,
             ] {
                 let _ = render_diffuse(&scene, WIDTH, HEIGHT, 2, 100, estimator);
             }
@@ -644,7 +644,7 @@ fn compare_hdri_sampling() {
                 for index in if seed % 2 == 0 { [0, 1] } else { [1, 0] } {
                     let estimator = [
                         cosine_environment_lighting as Estimator,
-                        environment_lighting as Estimator,
+                        random_mixture_environment_lighting as Estimator,
                     ][index];
                     let started = Instant::now();
                     let image = render_diffuse(&scene, WIDTH, HEIGHT, spp, seed as u64, estimator);
@@ -682,3 +682,94 @@ fn compare_hdri_sampling() {
         }
     }
 }
+
+// f12677f 的 D2 随机 50/50 估计器：独立冻结，仅用于回归和性能比较。
+fn random_mixture_environment_lighting(
+    scene: &Scene,
+    hit: &Hit,
+    material: &dyn Material,
+    wo: Vector3<f64>,
+    rng: &mut dyn rand::RngCore,
+) -> Result<Vector3<f64>, Box<dyn Error>> {
+    let Some(environment) = &scene.environment else {
+        return Ok(Vector3::zeros());
+    };
+    if material.is_delta() {
+        return Ok(Vector3::zeros());
+    }
+    if scene.environment_samples == 0 {
+        return Err("环境方向样本数必须大于零".into());
+    }
+    let normal = unit_vector(hit.normal).ok_or("环境采样的命中法线无效")?;
+    let wo = unit_vector(wo).ok_or("环境采样的出射方向无效")?;
+    let has_map = environment.has_map();
+    let mut rgb = Vector3::zeros();
+    for _ in 0..scene.environment_samples {
+        // 短路判断让无 HDRI 的渐变天空不额外消耗策略选择随机数。
+        let wi = if !has_map || rng.random::<f64>() < ENVIRONMENT_BSDF_FRACTION {
+            let Some(sample) = material.sample(wo, normal, rng) else {
+                continue;
+            };
+            let MaterialSample::Continuous { wi } = sample else {
+                return Err("非 delta 材质的环境采样必须返回连续方向".into());
+            };
+            wi
+        } else {
+            environment
+                .sample_direction(rng)
+                .ok_or("HDRI 环境方向采样失败")?
+                .direction
+        };
+        let wi = unit_vector(wi).ok_or("环境采样方向无效")?;
+        let cosine = normal.dot(&wi).clamp(0.0, 1.0);
+        let pdf_bsdf = material.pdf(wi, wo, normal);
+        if !pdf_bsdf.is_finite() || pdf_bsdf < 0.0 {
+            return Err("环境采样的 BSDF PDF 无效".into());
+        }
+        let pdf = if has_map {
+            let pdf_env = environment
+                .pdf_direction(wi)
+                .ok_or("HDRI 环境 PDF 查询失败")?;
+            if !pdf_env.is_finite() || pdf_env < 0.0 {
+                return Err("HDRI 环境 PDF 无效".into());
+            }
+            ENVIRONMENT_BSDF_FRACTION * pdf_bsdf + (1.0 - ENVIRONMENT_BSDF_FRACTION) * pdf_env
+        } else {
+            pdf_bsdf
+        };
+        if !pdf.is_finite() || pdf <= 0.0 {
+            return Err("环境采样的完整 PDF 必须有限且为正".into());
+        }
+        if cosine <= 0.0 {
+            if has_map {
+                // 全球 HDRI 样本可位于背半球，贡献为零，仍计入总样本数。
+                continue;
+            }
+            return Err("环境采样的入射半球无效".into());
+        }
+        let BsdfValue::Rgb(f_r) = material.evaluate(wi, wo, normal, EvaluateMode::Rgb) else {
+            return Err("材质 RGB 求值必须返回 RGB BSDF".into());
+        };
+        if f_r.iter().any(|value| !value.is_finite()) {
+            return Err("环境采样的 BSDF 求值无效".into());
+        }
+        let li = environment.radiance(wi).ok_or("环境辐亮度无效")?;
+        if li.iter().any(|value| !value.is_finite()) {
+            return Err("环境辐亮度必须有限".into());
+        }
+        let contribution = (f_r * (cosine / pdf)).component_mul(&li);
+        if contribution.iter().any(|value| !value.is_finite()) {
+            return Err("环境采样贡献计算溢出".into());
+        }
+        if visible_to_light(scene, hit.coords, normal, wi)? {
+            rgb += contribution / scene.environment_samples as f64;
+        }
+    }
+    if !rgb.iter().all(|value| value.is_finite()) {
+        return Err("天空照明颜色非法或计算溢出".into());
+    }
+    Ok(rgb)
+}
+
+mod power;
+mod stratified;

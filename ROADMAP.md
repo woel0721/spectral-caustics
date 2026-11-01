@@ -460,6 +460,26 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（259 项单元测试通过、1 项比较默认忽略，38 项集成测试通过）、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 通过。忽略的比较另以 release 实际运行通过。
 - **范围与限制：** 仅完成 D2 的固定混合采样，不实现 Power Heuristic、间接漫反射、完整路径追踪或 Path Guiding。性能数据是合成纯漫反射相机循环，未计玻璃、太阳、光源追踪或 PNG；固定比例不保证所有场景降噪，后续可单独比较比例、分层采样和进一步 PDF/可见性优化。
 
+### HDR 阶段 D3 — 固定配额的分层 Balance MIS
+
+- [x] HDRI 且 N>=2 时按 `n_b=floor(N/2)`、`n_e=N-n_b` 固定执行 BSDF 后 HDRI 的采样配额；N=2/3/4/8 对应 1+1、1+2、2+2、4+4。不再消耗策略选择随机数，零贡献或 None 不补采。
+- [x] 两种来源共用单方向贡献辅助函数，直接累加 `f/(n_b*p_b+n_e*p_e)`，不再额外除 N；奇数使用实际计数。D1 完整环境 PDF、有限性检查和二值可见性直接复用。
+- [x] N=1 保持 D2 随机 50/50 与浮点/RNG 序列；渐变天空保留原纯 BSDF 行为。冻结 f12677f 的 D2 估计器仅供测试，不增加生产配置开关。
+- [x] 新增 9 项单元测试和默认忽略的比较，覆盖 D2 单样本 RGB 位/RNG 一致（debug/release）、实际配额与随机数消耗、偶数/奇数完整分母、合法零 PDF/None、背半球/遮挡/溢出、均匀亮度、高对比有/无遮挡的独立积分收敛。扩展实际 HDRI 相机回归到 N=1/2/3/4/8、1/2/4 线程及重复运行，三图逐位一致、分量相加正确，环境不改变光源图和相机 Caustics。
+- [x] 运行 `cargo test --release --locked compare_stratified_sampling -- --ignored --nocapture`：32×24、32 SPP、N=2/4/8、种子 0–15，比较 D2/D3 的均匀、高对比、部分遮挡 HDRI，记录平均 Y、偏差、RMSE、每帧时间与同等误差效率估算。完整数值、参考口径和限制见 README。
+- **实测：** 三类场景的 D3/D2 MSE 比值分别为 `0.5967–0.6137`、`0.9571–0.9817`、`0.8917–0.9378`，同预算耗时比为 `0.9473–0.9627`。高对比降噪幅度较小，未宣称普遍显著提升；按 MSE×耗时外推的同等误差耗时比为 `0.5733–0.9390`，并非直接测量匹配画质耗时。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked`（268 项单元测试、38 项集成测试通过，两个比较默认忽略）、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 通过；D3 release 比较及 release 单样本位一致性另行通过。
+- **范围与限制：** 只完成 D3，分层仅指策略配额。默认 SPP/环境样本数、HDRI CDF/方向采样、Lambertian/玻璃/Fresnel、光子焦散、相机逐像素 RNG/Rayon、颜色管理均未修改；不实现 Power Heuristic、间接漫反射、完整 Path Tracing、Path Guiding 或新反弹。后续单独扩大真实 HDRI/遮挡测试范围，评估剩余方差和开销。
+
+### HDR 扩展 — β=2 Power Heuristic
+
+- [x] 在 D3 固定配额上增加可选 Power 权重：`q_B=n_B*p_B`、`q_E=n_E*p_E`，`w_i=q_i²/(q_B²+q_E²)`，贡献为 `f*w_i/q_i`。样本数相同时化为用户给出的 p² 公式；奇数保留实际计数，不额外除总数。
+- [x] 使用最大 q 缩放后平方并稳定求 `w_i/q_i`，处理零 PDF/非法值；样本来源显式参与计算，不误用 Balance 分母。两模式共用所有光照与可见性逻辑，方向样本和 RNG 消耗不变。
+- [x] 配置 `scene.environment_mis_heuristic` 支持 balance/power，旧配置缺省 Balance；默认 JSON 显式 Power，默认 N=1/SPP 不变。单样本 D2 和渐变天空保持原结果与随机流。
+- [x] 新增 6 项单元测试及默认忽略的 Power 比较（包含配置测试），扩展两模式 1/2/4 线程、分量与焦散回归。实际运行 release 比较及两项 release 单样本兼容测试；均匀/高对比积分、互补权重、极端尺度、来源、奇数及零贡献边界均通过。
+- **实测：** 相同 32×24、32 SPP、16 种子、N=2/3/8 下，Power/Balance MSE 比为均匀 `0.5321–0.9067`、高对比 `1.0325–1.0633`、部分遮挡 `1.0074–1.0180`，耗时比 `1.0060–1.0809`。Power 并不普遍降噪；保留 Balance 可选，详细数值与限制见 README。
+- **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked`（274 项单元测试、38 项集成测试通过，三个比较默认忽略）、严格全目标 Clippy、`git diff --check` 通过。不修改 HDRI 分布、材质/玻璃/Fresnel、光子追踪、相机并行/种子派生或颜色管理，不新增反弹。
+
 ## 6. Codex 执行约定
 
 1. **每次只实现当前一个里程碑**，完成后总结修改文件、运行命令、测试结果和下一步；不要抢跑后续阶段。

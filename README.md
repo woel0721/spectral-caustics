@@ -31,7 +31,7 @@
 
 **V0.4 阶段 15 已加入光子 Fresnel 通量衰减。** `PhotonLanding` 保存落点和 `(1-F_enter)*(1-F_exit)`；固定模式与色散模式的光谱图、灰度能量对照在落地累积时使用此权重。直射保持权重 1；暂不追踪其他反射光路，也不使用相机 radiance 的折射率平方项。
 
-**V0.4 阶段 19 已统一环境模型，HDR 阶段 D2 已接入混合方向采样。** `Environment::radiance(direction)` 同时服务相机背景、玻璃反射/透射后的背景和物体照明；有 HDR 路径时读取贴图，环境积分以 50% BSDF / 50% HDRI 选择方向并使用完整混合 PDF。无贴图的渐变天空保留原 Lambertian 余弦采样，解析太阳独立计算。
+**V0.4 阶段 19 已统一环境模型，HDRI 已支持固定配额 Balance / Power MIS。** `Environment::radiance(direction)` 同时服务相机背景、玻璃反射/透射后的背景和物体照明；HDRI 环境样本数至少为 2 时固定分配 BSDF/HDRI 样本，按配置选择 Balance 或 β=2 Power 权重。单样本保留 D2 随机 50/50，无贴图的渐变天空保留原 Lambertian 余弦采样，解析太阳独立计算。
 
 **V0.4 阶段 17 已加入地面棋盘格并调整构图。** 默认太阳传播方向改为 `[0.45, 0, -1]`，相机位置 `[2.5, -4.5, 2.6]`、目标 `[0, 0, 0.4]`、垂直 FOV `35°`。棋盘格按地面世界 x/y 坐标生成，每格 0.5 米，只在相机着色时调制反射率。
 
@@ -541,7 +541,7 @@ if let Some(landing) = take_photon_landing(&scene, ray, prism_id, ground_id, || 
 
 没有 HDR 贴图时，统一的 `radiance(direction)` 归一化方向后按 `t = clamp(direction.z, 0, 1)` 插值：地平线及下半球返回 horizon，天顶返回 zenith。相机未命中时查询 `radiance(ray.direction)`，表面照明查询 `radiance(wi)`；两者都是相对线性 RGB 辐亮度。旧的 `sky_radiance_linear_rgb` 已删除，旧 JSON 需要移除此字段；配置仍拒绝未知字段。`environment` 缺省/null 关闭环境照明，并保留原常量背景。
 
-没有 HDRI 时，积分器在漫反射终点复用 `Material::sample` 的余弦加权方向及 `pdf`，从交点沿法线偏移 `1e-5 m` 发射环境可见性射线。样本贡献为（HDRI 的混合 PDF 见阶段 D2）：
+没有 HDRI 时，积分器在漫反射终点复用 `Material::sample` 的余弦加权方向及 `pdf`，从交点沿法线偏移 `1e-5 m` 发射环境可见性射线。样本贡献为（HDRI 的混合 PDF / Balance MIS 见阶段 D2 / D3）：
 
 ```text
 L_environment = mean(f_r * L_env(wi) * V(wi) * cos(theta) / pdf(wi))
@@ -632,7 +632,7 @@ CDF 预计算时间与存储为 O(W×H)，方向采样的二分查找为 O(log(W
 
 ### HDR 阶段 D2：BSDF / HDRI 混合环境积分
 
-`environment_lighting()` 在每个环境方向样本开始时，使用现有独立的 `environment_rng` 以 50% 概率调用 `material.sample()`，其余 50% 调用 `Environment::sample_direction()`。无论方向来自哪个分支，都查询同一世界方向的两个立体角 PDF：
+阶段 D2 的 `environment_lighting()` 在每个环境方向样本开始时，使用现有独立的 `environment_rng` 以 50% 概率调用 `material.sample()`，其余 50% 调用 `Environment::sample_direction()`。无论方向来自哪个分支，都查询同一世界方向的两个立体角 PDF：
 
 ```text
 p_mix(wi) = 0.5 p_bsdf(wi) + 0.5 p_env(wi)
@@ -667,7 +667,102 @@ cargo test --release --locked compare_hdri_sampling -- --ignored --nocapture
 
 验收：`cargo fmt`、`cargo fmt --check`、`cargo test --locked --quiet`（259 项单元测试通过、1 项耗时比较默认忽略，38 项集成测试通过）、严格全目标 Clippy、`git diff --check` 通过；上述忽略的比较已显式以 release 运行通过。HDRI 相机三图在 1/2/4 线程及重复运行下逐位一致，`Direct + Caustics ≈ Combined`，关闭/开启环境时光源图与相机 Caustics 保持一致。
 
-当前仍为固定 50/50，忽略遮挡与 BSDF 的联合分布；CDF 的像素常数 PDF 与双线性 HDRI 也可能不匹配。下一步可单独评估策略比例、分层方向采样或 Power Heuristic，并用更多场景比较误差与耗时。本阶段未实现 Power Heuristic、间接漫反射、完整路径追踪或 Path Guiding。
+阶段 D2 仍为随机 50/50，忽略遮挡与 BSDF 的联合分布；CDF 的像素常数 PDF 与双线性 HDRI 也可能不匹配。D3 的固定配额改进见下文。D2 未实现 Power Heuristic、间接漫反射、完整路径追踪或 Path Guiding。
+
+### HDR 阶段 D3：固定配额的分层 Balance MIS
+
+有 HDRI 且 `environment_samples=N>=2` 时，先执行 `n_b=floor(N/2)` 次 BSDF 采样，再执行 `n_e=N-n_b` 次 HDRI 采样，不再为每个方向随机选择策略。以下是阶段 D3 的 Balance 模式（后续 Power 扩展见下一节）：
+
+| N | BSDF 配额 n_b | HDRI 配额 n_e |
+| ---: | ---: | ---: |
+| 2 | 1 | 1 |
+| 3 | 1 | 2 |
+| 4 | 2 | 2 |
+| 8 | 4 | 4 |
+
+Balance Heuristic 给策略 b 的权重为 `w_b=n_b*p_b/(n_b*p_b+n_e*p_e)`。代入该策略的估计项 `(1/n_b)*f*w_b/p_b`，得到单条贡献 `f/(n_b*p_b+n_e*p_e)`，环境策略同理。因此实现直接累加所有配额的贡献：
+
+```text
+f(wi) = f_r(wi,wo) * L_env(wi) * V(wi) * max(n·wi,0)
+L_environment = Σ_BSDF f(wi)/(n_b*p_b(wi)+n_e*p_e(wi))
+              + Σ_HDRI f(wi)/(n_b*p_b(wi)+n_e*p_e(wi))
+```
+
+分母已包含计数，最后不再除以 N。N=3 时两个来源都用 `p_b+2*p_e`，不能继续用 `0.5*p_b+0.5*p_e`。两个 PDF 均相对于立体角，p_e 直接复用 D1 的完整 95%/5% 分布。抽出的 `environment_direction_contribution()` 共用方向归一化、两个 PDF、BSDF/辐亮度、余弦、可见性和有限性检查；p_b=0 可以合法，加权分母必须有限正数。背半球、遮挡、BSDF 返回 None 或其他合法零贡献均消耗原配额，不补采、不重分配。
+
+N=1 保留 D2 的随机 50/50 与原计算顺序；测试使用冻结自 `f12677f` 的独立 D2 函数，对黑色/均匀/高对比 HDRI、多种旋转/法线/遮挡/种子比较 RGB 浮点位及后续 RNG 状态，debug 和 release 均通过。无 HDRI 的渐变天空仍是原纯 BSDF 采样与总数平均。N>=2 的环境随机序列会改变，但逐像素种子派生、相机抖动/玻璃 RNG、Rayon 遍历和线程池都未修改。默认环境样本数仍为 1，SPP 未改；默认场景继续走 D2 单样本分支。
+
+新增测试位于 [stratified.rs](src/render/integrator/environment_tests/stratified.rs)，包括实际 BSDF 调用数、与 n_e 次 HDRI 调用逐字一致的 RNG 消耗、偶数/奇数分母、两种来源的一致加权、零 PDF/None/背半球/遮挡配额、计数乘 PDF 溢出、均匀 HDRI 亮度以及高对比有/无遮挡的收敛。独立半球求积参考值为 `5.08578385 / 2.54289193`（无遮挡/半遮挡，灰色 rho=0.8）；64 种子各 512 条路径、N=2/3/4/8 的均值分别为 `5.15587 / 5.18939 / 5.09435 / 5.06767` 和 `2.54523 / 2.55104 / 2.54704 / 2.51890`，均通过统计容差。高对比尾部贡献可能使少量样本的经验方差不稳定，测试未预设固定降噪比例。
+
+测试专用性能比较运行方式：
+
+```bash
+cargo test --release --locked compare_stratified_sampling -- --ignored --nocapture
+```
+
+比较冻结的 D2 随机混合与生产 D3，未增加生产配置开关。共同使用 32×24 漫反射相机循环、32 SPP、相同 HDRI/场景、环境样本数 2/4/8、种子 0–15，串行执行，预热后交替计时。比较器与生产相机的 XYZ 在 N=1/2/3/4/8 下完全相同。均匀/高对比场景参考使用 2048×1024 半球求积，并核对 1024×512 网格；高对比相对差为 `0.002620%`。部分遮挡场景使用均匀 HDRI、z=1 且 y>0 的半平面，相机位于该平面下方；参考按每像素覆盖的世界 y 区间解析平均可见辐照度，并以独立 1024×512 含 Shadow Ray 的数值积分验证。参考包含与生产相同的自相交偏移。
+
+2026-11-01 本机 arm64、Rust 1.99.1 的单轮 release 实测如下。每格顺序均为 **D2 / D3**；耗时是 16 种子的平均每帧时间，误差为全部像素/种子的线性 XYZ Y 相对 RMSE。参考平均 Y 为均匀 `0.62808934`、高对比 `3.99280365`、部分遮挡 `0.31404467`：
+
+| HDRI / 可见性 | N | 估计平均 Y：D2 / D3 | 相对 RMSE：D2 / D3 | 每帧毫秒：D2 / D3 | 同等误差耗时比估算 D3/D2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 均匀，无遮挡 | 2 | 0.62821419 / 0.62789080 | 7.8417% / 6.1433% | 19.261 / 18.436 | 0.5874 |
+| 均匀，无遮挡 | 4 | 0.62811455 / 0.62831365 | 5.6127% / 4.3550% | 36.335 / 34.915 | 0.5785 |
+| 均匀，无遮挡 | 8 | 0.62804329 / 0.62826268 | 3.9936% / 3.0849% | 70.045 / 67.298 | 0.5733 |
+| 小面积高亮，无遮挡 | 2 | 3.99094753 / 3.98191677 | 57.2654% / 56.0225% | 19.138 / 18.408 | 0.9206 |
+| 小面积高亮，无遮挡 | 4 | 3.98812086 / 4.00670400 | 41.0333% / 40.4239% | 35.989 / 34.648 | 0.9344 |
+| 小面积高亮，无遮挡 | 8 | 3.99249437 / 4.00590657 | 28.7843% / 28.5202% | 70.070 / 67.019 | 0.9390 |
+| 均匀，部分遮挡 | 2 | 0.31344356 / 0.31472698 | 16.7052% / 16.1772% | 20.779 / 19.767 | 0.8921 |
+| 均匀，部分遮挡 | 4 | 0.31377824 / 0.31409500 | 11.7963% / 11.3236% | 39.523 / 37.698 | 0.8789 |
+| 均匀，部分遮挡 | 8 | 0.31396479 / 0.31433409 | 8.4431% / 7.9730% | 76.477 / 72.450 | 0.8448 |
+
+同等误差耗时比用 `(MSE_D3*time_D3)/(MSE_D2*time_D2)` 估算，假设误差约随 1/SPP 变化，是外推而非直接测得的匹配画质耗时。此次同样本数耗时比为 `0.9473–0.9627`；均匀、小面积高亮、部分遮挡三类的 MSE 比值分别为 `0.5967–0.6137`、`0.9571–0.9817`、`0.8917–0.9378`。高对比场景的 MSE 降幅只有约 2%–4%，优势较小；固定策略数量并未消除 HDRI 像素内分布、双线性插值或遮挡带来的方差。时间包含相机采样、求交、环境着色、阴影及 XYZ 缓冲，不含加载、编译、数值参考或 PNG，也不代表玻璃/光子场景的整体性能。
+
+验收：`cargo fmt`、`cargo fmt --check`、`cargo test --locked`（268 项单元测试及 38 项集成测试通过，两个比较默认忽略）、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 通过。D3 比较已显式以 release 运行通过，release 单样本 D2 位一致性另行通过。1/2/4 Rayon 线程、重复运行及 N=1/2/3/4/8 的三张相机 XYZ 均逐位一致，Direct+Caustics≈Combined；开启/关闭环境时光源图和相机 Caustics 一致。CDF、球面方向采样、材质/Fresnel、光子追踪、玻璃路径及颜色管理保持原实现。
+
+阶段 D3 只分层分配策略数量，未对像素内或球面采样点额外分层；奇数时 HDRI 多一个，尚未自适应选择比例。D3 未实现 Power Heuristic；后续单独加入的 Power 模式见下文。间接漫反射、完整路径追踪、Path Guiding 和新反弹仍未实现。
+
+### HDR 扩展：Power Heuristic（β=2）
+
+在 `scene` 中选择权重模式：
+
+```json
+"environment_samples": 4,
+"environment_mis_heuristic": "power"
+```
+
+`environment_mis_heuristic` 接受 `"balance"` 或 `"power"`，旧 JSON 缺省时为 Balance。`configs/default.json` 已显式选择 Power，但**默认 environment_samples 仍为 1**，继续使用原 D2 单样本估计器；只有 HDRI 且 N>=2 时才应用所选启发式。渐变天空也保留原行为。
+
+固定配额必须将实际样本数量计入权重。令 `q_B=n_B*p_B`、`q_E=n_E*p_E`，实现：
+
+```text
+w_E = q_E²/(q_E²+q_B²)
+w_B = q_B²/(q_E²+q_B²)
+L = Σ_BSDF f(wi)*w_B/q_B + Σ_HDRI f(wi)*w_E/q_E
+f(wi) = f_r(wi,wo)*L_env(wi)*V(wi)*max(n·wi,0)
+```
+
+当 n_B=n_E 时，权重约去相同的 n²，正好得到 `p_E²/(p_E²+p_B²)` 及其互补权重。N=3 时应使用 `q_B=p_B`、`q_E=2*p_E`。Power 的贡献不能继续沿用 Balance 的 `f/(q_B+q_E)`，也不能只除以平方和或最后再除 N。p_E 仍是 D1 的完整混合 PDF。
+
+`power_heuristic()` 先用 `max(q_B,q_E)` 缩放再平方，返回权重及稳定计算的 `w_i/q_i`，避免直接平方的上溢、共同下溢及零 PDF 的 0/0；当前来源 q_i=0 时贡献系数为 0，两者均零、非有限或负值返回失败。Power 与 Balance 共用方向、PDF、辐亮度、Shadow Ray 及有限性检查，不改变方向样本、RNG 消耗或配额。实现涉及 `src/render/integrator.rs`；配置 enum/读写位于 `src/config/sceneconfig.rs` 和 `src/config/mod.rs`，`src/scene.rs` 将模式传入运行时。新测试位于 `src/render/integrator/environment_tests/power.rs`，并扩展原相机回归以覆盖两种模式。
+
+可运行比较：
+
+```bash
+cargo test --release --locked compare_power_sampling -- --ignored --nocapture
+```
+
+本机 arm64 / Rust 1.99.1，32×24、32 SPP、种子 0–15、相同方向序列、N=2/3/8、三类合成场景的独立 release 实测中，Power/Balance 的 MSE 比值分别为：均匀 `0.5321–0.9067`、小面积高亮 `1.0325–1.0633`、部分遮挡 `1.0074–1.0180`。耗时比为 `1.0060–1.0809`；这是本机单轮测量。以下给出奇数 N=3 的明细，顺序为 **Balance / Power**：
+
+| 场景 | 估计平均 Y | 相对 RMSE | 平均每帧毫秒 |
+| --- | ---: | ---: | ---: |
+| 均匀，参考 Y=0.62808934 | 0.62841421 / 0.62844248 | 6.7653% / 6.4419% | 27.705 / 28.136 |
+| 小面积高亮，参考 Y=3.99280365 | 3.97266301 / 3.96940670 | 55.4425% / 57.1716% | 27.763 / 28.064 |
+| 部分遮挡，参考平均 Y=0.31404467 | 0.31426158 / 0.31427678 | 14.5532% / 14.6833% | 29.456 / 29.903 |
+
+参考沿用前节独立半球积分及含像素面积平均的遮挡解析解。Power 改善了本次均匀场景，小面积高亮/遮挡场景则略差，因此保留 Balance 可选；不保证 Power 普遍更低噪声。64 种子高预算测试另核对了均匀与高对比参考积分，无偏性不依赖某一策略在每个场景都降低方差。
+
+验收：`cargo fmt`、`cargo fmt --check`、`cargo test --locked`（274 项单元测试、38 项集成测试通过，三个比较默认忽略）、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 通过。Power release 比较及两项 release 单样本兼容测试另行通过；权重互补、极端尺度、奇数计数、两种样本来源、零 PDF、黑图/背半球/遮挡、配置往返及旧配置兼容均有测试。两模式下 1/2/4 Rayon 线程及三图/焦散回归通过。HDRI CDF、材质/Fresnel、光子、玻璃传播、默认 SPP/样本数和颜色管理不变。后续可单独用真实 HDRI 评估两种权重的误差与耗时，暂不扩展反弹或积分器范围。
 
 ### V0.4 阶段 17：地面棋盘格
 

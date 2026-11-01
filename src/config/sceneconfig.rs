@@ -15,6 +15,9 @@ pub struct SceneConfig {
     /// 每条相机路径在漫反射终点采样的环境方向数，默认 1。
     #[serde(default = "default_environment_samples")]
     pub environment_samples: usize,
+    /// HDRI 多样本 MIS 权重；旧 JSON 缺省为 Balance。
+    #[serde(default)]
+    pub environment_mis_heuristic: EnvironmentMisHeuristic,
     /// 唯一接收地面的灰度反射率纹理；省略/null 保留纯色材质。
     #[serde(default)]
     pub ground_checkerboard: Option<CheckerboardConfig>,
@@ -24,6 +27,14 @@ pub struct SceneConfig {
     pub objects: Vec<ObjectConfig>,
     pub light: ParallelLightConfig,
     pub receiver: GroundReceiverConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentMisHeuristic {
+    #[default]
+    Balance,
+    Power,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -157,6 +168,7 @@ impl Default for SceneConfig {
             background_linear_rgb: [0.08, 0.10, 0.14],
             environment: Some(EnvironmentConfig::default()),
             environment_samples: default_environment_samples(),
+            environment_mis_heuristic: EnvironmentMisHeuristic::default(),
             ground_checkerboard: Some(CheckerboardConfig::default()),
             ground_margin_m: default_ground_margin_m(),
             objects: vec![

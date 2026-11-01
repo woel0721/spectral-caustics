@@ -84,6 +84,7 @@ mod tests {
         // 展示配置显式启用本地 HDR，Rust/旧 JSON 的缺省值仍不依赖图片文件。
         let mut expected = Config::default();
         expected.render.camera_spp = 256;
+        expected.scene.environment_mis_heuristic = sceneconfig::EnvironmentMisHeuristic::Power;
         expected.scene.environment.as_mut().unwrap().map_path =
             Some(PathBuf::from("assets/HDRI/autoshop_01_4k.hdr"));
         assert_eq!(config, expected);
@@ -131,6 +132,50 @@ mod tests {
         assert!(config.validate().is_err());
         config.render.camera_spp = usize::MAX;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn environment_mis_defaults_to_balance_and_roundtrips_power() {
+        use sceneconfig::EnvironmentMisHeuristic;
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
+        json["scene"]
+            .as_object_mut()
+            .unwrap()
+            .remove("environment_mis_heuristic");
+        assert_eq!(
+            Config::from_json(&json.to_string())
+                .unwrap()
+                .scene
+                .environment_mis_heuristic,
+            EnvironmentMisHeuristic::Balance
+        );
+        for (name, expected) in [
+            ("balance", EnvironmentMisHeuristic::Balance),
+            ("power", EnvironmentMisHeuristic::Power),
+        ] {
+            json["scene"]["environment_mis_heuristic"] = json!(name);
+            let config = Config::from_json(&json.to_string()).unwrap();
+            assert_eq!(config.scene.environment_mis_heuristic, expected);
+            assert_eq!(
+                Config::from_json(&config.to_json().unwrap()).unwrap(),
+                config
+            );
+            assert_eq!(
+                crate::scene::Scene::from_config(&sceneconfig::SceneConfig {
+                    environment: None,
+                    environment_mis_heuristic: expected,
+                    ..Default::default()
+                })
+                .unwrap()
+                .environment_mis_heuristic,
+                expected
+            );
+        }
+        for invalid in [json!("unknown"), json!(null), json!(2)] {
+            json["scene"]["environment_mis_heuristic"] = invalid;
+            assert!(Config::from_json(&json.to_string()).is_err());
+        }
     }
 
     #[test]
