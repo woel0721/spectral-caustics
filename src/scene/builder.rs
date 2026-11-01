@@ -19,16 +19,19 @@ impl Default for Scene {
 impl Scene {
     /// 创建空场景，使用默认配置中的相机、天空与备用常量背景。
     pub fn new() -> Self {
-        let config = SceneConfig::default();
-        Self {
-            camera: Camera::from_config(&config.camera).expect("内置默认相机参数必须有效"),
+        Self::empty_from_config(&SceneConfig::default()).expect("内置默认场景参数必须有效")
+    }
+
+    /// 只初始化共享字段；调用者负责校验配置，几何/材质由 from_config 另行添加。
+    fn empty_from_config(config: &SceneConfig) -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            camera: Camera::from_config(&config.camera)?,
             background_color: Vector3::from(config.background_linear_rgb),
             environment: config
                 .environment
                 .as_ref()
                 .map(Environment::try_from)
-                .transpose()
-                .expect("内置默认环境参数必须有效"),
+                .transpose()?,
             environment_samples: config.environment_samples,
             environment_mis_heuristic: config.environment_mis_heuristic,
             max_diffuse_bounces: config.max_diffuse_bounces,
@@ -36,14 +39,13 @@ impl Scene {
                 .ground_checkerboard
                 .as_ref()
                 .map(Checkerboard::try_from)
-                .transpose()
-                .expect("内置默认棋盘格参数必须有效"),
+                .transpose()?,
             objects: Vec::new(),
             materials: Vec::new(),
             light: ParallelLight {
                 height_m: config.light.height_m,
                 direction: Ray::new(Vector3::zeros(), Vector3::from(config.light.direction))
-                    .expect("内置默认光源方向必须有效")
+                    .ok_or("光源方向无法归一化")?
                     .direction,
                 aperture_min_m: Vector2::from(config.light.aperture_min_m),
                 aperture_max_m: Vector2::from(config.light.aperture_max_m),
@@ -55,42 +57,13 @@ impl Scene {
             },
             prism_id: None,
             ground_id: None,
-        }
+        })
     }
 
     /// 从纯数据描述建立真实物体和数学对象；当前支持一个地面、至多一个三棱镜。
     pub fn from_config(config: &SceneConfig) -> Result<Self, Box<dyn Error>> {
         config.validate()?;
-        let mut scene = Self::new();
-        scene.camera = Camera::from_config(&config.camera)?;
-        scene.background_color = Vector3::from(config.background_linear_rgb);
-        // 每次场景构建只加载一次 HDR；所有背景和照明查询共用内存中的像素。
-        scene.environment = config
-            .environment
-            .as_ref()
-            .map(Environment::try_from)
-            .transpose()?;
-        scene.environment_samples = config.environment_samples;
-        scene.environment_mis_heuristic = config.environment_mis_heuristic;
-        scene.max_diffuse_bounces = config.max_diffuse_bounces;
-        scene.ground_checkerboard = config
-            .ground_checkerboard
-            .as_ref()
-            .map(Checkerboard::try_from)
-            .transpose()?;
-        scene.light = ParallelLight {
-            height_m: config.light.height_m,
-            direction: Ray::new(Vector3::zeros(), Vector3::from(config.light.direction))
-                .ok_or("光源方向无法归一化")?
-                .direction,
-            aperture_min_m: Vector2::from(config.light.aperture_min_m),
-            aperture_max_m: Vector2::from(config.light.aperture_max_m),
-            total_flux: config.light.total_flux,
-        };
-        scene.receiver = GroundReceiver {
-            min_m: Vector2::from(config.receiver.min_m),
-            max_m: Vector2::from(config.receiver.max_m),
-        };
+        let mut scene = Self::empty_from_config(config)?;
         let ground_bounds = config.ground_bounds()?;
         for object in &config.objects {
             match object {

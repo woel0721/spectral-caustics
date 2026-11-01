@@ -531,3 +531,90 @@ fn photon_rejects_invalid_or_identical_object_ids() {
     assert!(take_photon(&scene, ray, prism_id, usize::MAX, || Some(1.52)).is_none());
     assert!(take_photon(&scene, ray, ground_id, ground_id, || Some(1.52)).is_none());
 }
+
+#[test]
+fn empty_and_configured_scenes_preserve_distinct_defaults_and_shared_fields() {
+    let empty = Scene::new();
+    let configured = Scene::from_config(&SceneConfig::default()).unwrap();
+    assert!(empty.objects.is_empty());
+    assert!(empty.material(0).is_none());
+    assert_eq!((empty.prism_id, empty.ground_id), (None, None));
+    assert_eq!(configured.objects.len(), 2);
+    assert_eq!(
+        (configured.prism_id, configured.ground_id),
+        (Some(0), Some(1))
+    );
+    assert_eq!(empty.background_color, configured.background_color);
+    assert_eq!(empty.light.direction, configured.light.direction);
+    assert_eq!(empty.light.height_m, configured.light.height_m);
+    assert_eq!(empty.light.aperture_min_m, configured.light.aperture_min_m);
+    assert_eq!(empty.light.aperture_max_m, configured.light.aperture_max_m);
+    assert_eq!(empty.light.total_flux, configured.light.total_flux);
+    assert_eq!(empty.receiver.min_m, configured.receiver.min_m);
+    assert_eq!(empty.receiver.max_m, configured.receiver.max_m);
+    for direction in [Vector3::x(), Vector3::y(), Vector3::z()] {
+        assert_eq!(
+            empty.background_radiance(direction),
+            configured.background_radiance(direction)
+        );
+    }
+    let position = Vector3::new(0.75, 0.25, 0.0);
+    assert_eq!(
+        empty.ground_checkerboard.unwrap().scale_at(position),
+        configured.ground_checkerboard.unwrap().scale_at(position)
+    );
+    for (x, y) in [(0, 0), (1, 1), (2, 2)] {
+        let a = empty.camera.ray_for_pixel(x, y, 3, 3).unwrap();
+        let b = configured.camera.ray_for_pixel(x, y, 3, 3).unwrap();
+        assert_eq!(a.origin, b.origin);
+        assert_eq!(a.direction, b.direction);
+    }
+    let explicit =
+        crate::config::Config::from_json(include_str!("../../configs/default.json")).unwrap();
+    let preset = Scene::from_config(&explicit.scene).unwrap();
+    use crate::config::sceneconfig::EnvironmentMisHeuristic::{Balance, Power};
+    assert_eq!(
+        (
+            empty.environment_samples,
+            empty.environment_mis_heuristic,
+            empty.max_diffuse_bounces
+        ),
+        (1, Balance, 0)
+    );
+    assert_eq!(
+        (
+            preset.environment_samples,
+            preset.environment_mis_heuristic,
+            preset.max_diffuse_bounces
+        ),
+        (8, Power, 1)
+    );
+    assert!(!empty.environment.as_ref().unwrap().has_map());
+    assert!(preset.environment.as_ref().unwrap().has_map());
+}
+
+#[test]
+fn scene_validation_still_precedes_environment_loading_and_geometry_construction() {
+    let mut config = SceneConfig::default();
+    config.environment.as_mut().unwrap().map_path =
+        Some("missing-scene-builder-regression.hdr".into());
+    config.max_diffuse_bounces = 2;
+    assert_eq!(
+        Scene::from_config(&config).err().unwrap().to_string(),
+        "scene.max_diffuse_bounces 在 E1 中只能为 0 或 1"
+    );
+    config.max_diffuse_bounces = 0;
+    assert!(
+        Scene::from_config(&config)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("missing-scene-builder-regression.hdr")
+    );
+    config.environment = None;
+    config.objects.clear();
+    assert_eq!(
+        Scene::from_config(&config).err().unwrap().to_string(),
+        "场景必须包含一个 ground 接收地面"
+    );
+}
