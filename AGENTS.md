@@ -1,24 +1,33 @@
 # Codex Instructions — Spectral Caustics Renderer
 
-本项目是一个 Rust CPU 离线光谱焦散渲染器的分阶段学习项目。**先阅读 `ROADMAP.md`，并以它作为任务范围和验收标准。**
+本项目是分阶段开发的 Rust CPU 离线光谱焦散渲染器。先阅读 `ROADMAP.md` 和当前源码；路线图中的第一周限制及历史阶段说明不是当前实现状态。以用户本次指定的范围和验收为准，不自动推进后续阶段。
 
-## 当前目标
+## 当前基线：E1
 
-第一周仅实现：平行白光 -> 三棱镜入射折射 -> 玻璃内部传播 -> 出射折射 -> 地面光子累积 -> CIE XYZ -> sRGB PNG。第一版输出地面焦散俯视图，不要求渲染完整玻璃摄影画面。
+- 光源端：平行光经三棱镜双界面折射，包含 Fresnel 透射通量权重；地面 XYZ 累积、CIE/D65 光谱积分及 sRGB PNG。
+- 相机端：最多八次玻璃 Fresnel 反射/折射；解析太阳、HDRI/渐变环境照明、固定配额 Balance/Power MIS、单次 Lambertian 间接反弹 E1。
+- E1 只允许 `max_diffuse_bounces=0/1`，第二表面只返回太阳/环境直接光照，归入 Direct；miss/玻璃不继续，不能重复计入逃逸 HDRI 或焦散图。
+- 相机像素使用独立确定性 RNG 流与 Rayon；Direct/Caustics/Combined 共用路径。
+- `src/render/integrator.rs` 是入口，具体职责位于其子模块；`src/scene.rs` 保留 Scene 主类型，构建、物体、光照、棋盘格和光子追踪分开实现。
+- Rust 内置/旧 JSON 缺省值为环境样本 1、Balance、漫反射反弹 0；`configs/default.json` 显式使用 8、Power、1。相机 SPP 的 Rust 缺省值为 64，展示 JSON 为 256；两者不可混同。
 
-## 开发规则
+这是有界的 E1 估计器，不是通用无偏 Path Tracer。未经当前任务明确授权，不增加漫反射深度、Russian Roulette、新材质、透明 shadow ray、环境焦散、GUI/GPU、BVH/KD-Tree 或通用 Photon Mapping。
 
-- 一次只实现 `ROADMAP.md` 中一个明确的 Day/里程碑，不要一次生成完整项目。
-- 优先可运行、可测试、可解释的最小实现；不额外引入 GUI、GPU、BVH、KD-Tree、Path Tracer、完整 PBR。
+## 开发与重构规则
+
+- 一次完成用户指定的里程碑；未指定时询问目标，不默认重做 Day 1。
+- 保持公开 API 和旧兼容语义；审计引用后才删除确实无用的私有代码。公开接口、回归测试和对照估计器需明确授权后才能删除。
+- 重构不得改变运算/采样顺序、RNG 消费、MIS/PDF、Fresnel、光谱/颜色、焦散或 E1 计光规则。主要改动独立验证和提交。
+- 优先可运行、可测试、可解释的最小实现；减少实际重复，不为减少行数增加间接层。
 - 使用 `nalgebra` 做数学、`image` 输出 PNG；其他库仅按当前任务必要性添加。
-- 光学/几何优先 `f64`；光谱单位显式标注 nm，Cauchy 公式用 μm。方向归一化、求交 epsilon、全反射、NaN 都要处理。
-- 能量在内部用线性值累积；颜色转换按 CIE XYZ -> linear sRGB -> display sRGB，不能直接把线性 RGB 乘 255 当 sRGB。
-- 对积分/Monte Carlo 波长采样做合理的 `Δλ` 或 `1 / p(λ)` 加权，空间发射数量增加时保持总能量不变。
-- 标准颜色数据需有可追溯来源；不要虚构 CIE/D65 数据，不要把 RGB 插值冒充真实光谱模型。
-- 默认使用固定随机种子，保证可复现；物理简化在 README 中明确写出。
-- 每阶段结束运行 `cargo fmt`、`cargo test`，并在合适时运行 `cargo clippy -- -D warnings`。
-- 最终回复报告：做了什么、改了什么文件、真实运行了哪些检查、尚有哪些限制、下一阶段建议。
+- 光学/几何优先 `f64`；光谱单位显式标注 nm，Cauchy 公式用 μm。处理归一化、epsilon、全反射、NaN 和溢出；重构时保留现有错误语义。
+- 能量在线性空间累积；CIE XYZ → linear sRGB → display sRGB。波长积分保留 `Δλ` 或 `1/p(λ)` 权重，增加空间发射数量时总能量不变。
+- 标准颜色数据须可追溯；不虚构 CIE/D65 数据，不把 RGB 插值冒充真实光谱模型。
+- 固定 seed 可复现；保持独立随机流及 Rayon 1/2/4 线程结果一致，Direct + Caustics ≈ Combined。物理简化、兼容行为写入 README。
+- 阅读并保留工作区已有改动，不覆盖用户未提交的配置或其他工作。
 
-## 默认工作方式
+## 验收与报告
 
-若用户没有指定阶段，先询问是否从 Day 1 开始，**不要擅自完成整份路线图**。
+运行 `cargo fmt`、`cargo fmt --check`、`cargo test --locked`、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check`。重构先建立基线；重点核对固定 seed、线程数、Balance/Power、E1 0/1、三个输出分量、玻璃和光源焦散。
+
+最终报告修改文件/函数、实际消除的重复、保留的兼容与冗余、真实检查结果及限制；不把未执行的检查或后续工作写成已完成。
