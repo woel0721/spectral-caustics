@@ -17,6 +17,16 @@ pub use camera::{
 pub use ground::{lambertian_radiance, sample_ground_irradiance};
 pub use types::{CameraLightingImages, GroundLightingComponent};
 
+/// 沿调用方选定的几何法线侧偏移；不改变法线、不做校验或构造 Ray。
+/// side 为 +1/-1；保留玻璃原有乘法顺序，非 delta/阴影使用 +1。
+fn offset_ray_origin(
+    position: nalgebra::Vector3<f64>,
+    normal: nalgebra::Vector3<f64>,
+    side: f64,
+) -> nalgebra::Vector3<f64> {
+    position + normal * (side * 10.0 * crate::geometry::ray::INTERSECTION_EPSILON)
+}
+
 #[cfg(test)]
 mod diffuse_tests;
 #[cfg(test)]

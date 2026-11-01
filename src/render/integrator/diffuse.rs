@@ -4,13 +4,11 @@ use super::{
     direct::surface_sun_lighting,
     environment::environment_lighting,
     ground::{GroundLighting, direct_ground_irradiance, lambertian_radiance},
+    offset_ray_origin,
     types::DiffuseRay,
 };
 use crate::{
-    geometry::{
-        hit::Hit,
-        ray::{INTERSECTION_EPSILON, Ray},
-    },
+    geometry::{hit::Hit, ray::Ray},
     material::{BsdfValue, EvaluateMode, Material, MaterialSample, unit_vector},
     render::utils::xyz_to_linear_srgb,
     scene::Scene,
@@ -115,7 +113,7 @@ pub(super) fn sample_diffuse_ray(
     if throughput == Vector3::zeros() {
         return Ok(None);
     }
-    let origin = hit.coords + normal * (10.0 * INTERSECTION_EPSILON);
+    let origin = offset_ray_origin(hit.coords, normal, 1.0);
     let ray = Ray::new(origin, wi).ok_or("漫反射射线起点或方向无效")?;
     Ok(Some(DiffuseRay { ray, throughput }))
 }

@@ -5,13 +5,11 @@ use super::{
     direct::surface_sun_lighting,
     environment::environment_lighting,
     ground::{GroundLighting, ground_irradiance, lambertian_radiance},
+    offset_ray_origin,
     types::{CameraPathComponents, CameraPathRngs, GroundLightingComponent},
 };
 use crate::{
-    geometry::ray::{INTERSECTION_EPSILON, Ray},
-    material::MaterialSample,
-    render::utils::xyz_to_linear_srgb,
-    scene::Scene,
+    geometry::ray::Ray, material::MaterialSample, render::utils::xyz_to_linear_srgb, scene::Scene,
 };
 use nalgebra::Vector3;
 use std::error::Error;
@@ -146,7 +144,7 @@ pub(super) fn trace_camera_path(
         } else {
             -1.0
         };
-        let origin = hit.coords + normal * (side * 10.0 * INTERSECTION_EPSILON);
+        let origin = offset_ray_origin(hit.coords, normal, side);
         ray = Ray::new(origin, sample.wi).ok_or("玻璃路径射线起点或方向无效")?;
     }
     if !radiance

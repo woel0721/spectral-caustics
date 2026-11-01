@@ -1,11 +1,8 @@
 //! 解析太阳的照明约定、直接 BSDF 求值与二值阴影。
 
-use super::{ground::GroundLighting, types::GroundLightingComponent};
+use super::{ground::GroundLighting, offset_ray_origin, types::GroundLightingComponent};
 use crate::{
-    geometry::{
-        hit::Hit,
-        ray::{INTERSECTION_EPSILON, Ray},
-    },
+    geometry::{hit::Hit, ray::Ray},
     material::{BsdfValue, EvaluateMode, Material},
     render::utils::xyz_to_linear_srgb,
     scene::Scene,
@@ -36,7 +33,7 @@ pub(super) fn visible_to_light(
     normal: Vector3<f64>,
     wi: Vector3<f64>,
 ) -> Result<bool, Box<dyn Error>> {
-    let origin = position + normal * (10.0 * INTERSECTION_EPSILON);
+    let origin = offset_ray_origin(position, normal, 1.0);
     let shadow_ray = Ray::new(origin, wi).ok_or("阴影光线起点或方向无效")?;
     Ok(scene.intersect(&shadow_ray).is_none())
 }
