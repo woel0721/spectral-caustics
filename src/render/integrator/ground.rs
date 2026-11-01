@@ -189,14 +189,7 @@ pub(super) fn ground_irradiance(
     };
     let mut e = GroundIrradianceComponents::default();
     if sun.component != GroundLightingComponent::Caustics {
-        let normal = hit.normal / hit.normal.norm();
-        let cosine = normal.dot(&sun.wi).clamp(0.0, 1.0);
-        if cosine > 0.0
-            && sun.irradiance_xyz != Vector3::zeros()
-            && visible_to_light(scene, hit.coords, normal, sun.wi)?
-        {
-            e.direct_xyz = sun.irradiance_xyz * cosine;
-        }
+        e.direct_xyz = direct_ground_irradiance(scene, hit, sun.wi, sun.irradiance_xyz)?;
     }
     if sun.component != GroundLightingComponent::Direct {
         // 已包含折射路径的可见性和入射几何；不能再用直射方向的阴影清零。
@@ -204,4 +197,24 @@ pub(super) fn ground_irradiance(
             .ok_or("焦散辐照度采样失败")?;
     }
     Ok(e)
+}
+
+/// 只计算解析太阳的地面入射辐照度；不读取地面图，也不选择输出分量。
+/// 调用者负责是否计入 Direct；材质 rho/pi 与棋盘格继续在着色处应用。
+pub(super) fn direct_ground_irradiance(
+    scene: &Scene,
+    hit: &Hit,
+    wi: Vector3<f64>,
+    irradiance_xyz: Vector3<f64>,
+) -> Result<Vector3<f64>, Box<dyn Error>> {
+    let normal = hit.normal / hit.normal.norm();
+    let cosine = normal.dot(&wi).clamp(0.0, 1.0);
+    if cosine > 0.0
+        && irradiance_xyz != Vector3::zeros()
+        && visible_to_light(scene, hit.coords, normal, wi)?
+    {
+        Ok(irradiance_xyz * cosine)
+    } else {
+        Ok(Vector3::zeros())
+    }
 }

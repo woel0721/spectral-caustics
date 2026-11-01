@@ -3,8 +3,8 @@
 use super::{
     direct::surface_sun_lighting,
     environment::environment_lighting,
-    ground::{GroundLighting, SunGroundLighting, ground_irradiance, lambertian_radiance},
-    types::{DiffuseRay, GroundLightingComponent},
+    ground::{GroundLighting, direct_ground_irradiance, lambertian_radiance},
+    types::DiffuseRay,
 };
 use crate::{
     geometry::{
@@ -50,19 +50,9 @@ pub(super) fn sample_one_diffuse_indirect(
     let direct = if let Some(g) = ground.filter(|g| next.object_id == Some(g.object_id))
         && let Some(sun) = &g.sun
     {
-        // 复用地面直射分支，仅查询解析太阳；不读取焦散专用图。
-        let direct_ground = GroundLighting {
-            sun: Some(SunGroundLighting {
-                component: GroundLightingComponent::Direct,
-                ..*sun
-            }),
-            ..*g
-        };
-        let e = ground_irradiance(scene, &next, &direct_ground)?;
-        xyz_to_linear_srgb(
-            lambertian_radiance(e.direct_xyz, g.rho).ok_or("第二表面地面直射计算失败")?,
-        )
-        .ok_or("第二表面地面 XYZ 转换失败")?
+        let e = direct_ground_irradiance(scene, &next, sun.wi, sun.irradiance_xyz)?;
+        xyz_to_linear_srgb(lambertian_radiance(e, g.rho).ok_or("第二表面地面直射计算失败")?)
+            .ok_or("第二表面地面 XYZ 转换失败")?
     } else {
         // 旧完整地面图无法分离焦散，E1 不读取它，改用现有解析 RGB 太阳。
         surface_sun_lighting(scene, &next, next_material, wo_next, light, ground)?
