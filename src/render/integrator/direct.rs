@@ -107,6 +107,9 @@ pub(super) fn direct_lighting(
     let BsdfValue::Rgb(f_r) = material.evaluate(wi, wo, normal, EvaluateMode::Rgb) else {
         return Err("材质 RGB 求值必须返回 RGB BSDF".into());
     };
+    if f_r.iter().any(|value| !value.is_finite() || *value < 0.0) {
+        return Err("直接光照 BSDF 必须有限且非负".into());
+    }
     let cosine = normal.dot(&wi).clamp(0.0, 1.0);
     let direct_rgb = f_r * (light * cosine);
     if !direct_rgb.iter().all(|v| v.is_finite()) {

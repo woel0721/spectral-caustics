@@ -14,6 +14,7 @@ use crate::{
     scene::Scene,
 };
 use nalgebra::Vector3;
+use rand::Rng;
 use std::error::Error;
 
 /// 迭代 A→B→C…，只接收后续 Lambertian 顶点的太阳/环境直接光。
@@ -27,6 +28,9 @@ pub(super) fn trace_diffuse_path(
     rng: &mut dyn rand::RngCore,
     state: &mut CameraPathState,
 ) -> Result<(), Box<dyn Error>> {
+    if state.max_diffuse_bounces == 0 {
+        return Ok(());
+    }
     let prefix_throughput = state.throughput;
     let Some(first) = sample_diffuse_ray(scene, hit, material, -state.ray.direction, rng)? else {
         return Ok(());
@@ -69,6 +73,9 @@ pub(super) fn trace_diffuse_path(
         if state.diffuse_bounces >= state.max_diffuse_bounces {
             break;
         }
+        if !russian_roulette(state, rng)? {
+            break;
+        }
         let Some(next_ray) = sample_diffuse_ray(scene, &next, material, wo, rng)? else {
             break;
         };
@@ -80,6 +87,33 @@ pub(super) fn trace_diffuse_path(
         state.diffuse_bounces += 1;
     }
     Ok(())
+}
+
+/// 第三次漫反射后的顶点已着色，且还有预算时，RR 只控制之后的贡献。
+/// 使用真实路径 RGB 吞吐量（含玻璃前缀）；存活补偿不缩放已累计辐亮度。
+pub(super) fn russian_roulette(
+    state: &mut CameraPathState,
+    rng: &mut dyn rand::RngCore,
+) -> Result<bool, Box<dyn Error>> {
+    if state.diffuse_bounces < 3 || state.diffuse_bounces >= state.max_diffuse_bounces {
+        return Ok(true);
+    }
+    if !state.throughput.iter().all(|v| v.is_finite() && *v >= 0.0) {
+        return Err("Russian Roulette 吞吐量必须有限且非负".into());
+    }
+    let maximum = state.throughput.max();
+    if maximum == 0.0 {
+        return Ok(false);
+    }
+    let survival_probability = maximum.clamp(0.05, 0.95);
+    if rng.random::<f64>() >= survival_probability {
+        return Ok(false);
+    }
+    state.throughput /= survival_probability;
+    if !state.throughput.iter().all(|v| v.is_finite()) {
+        return Err("Russian Roulette 存活补偿计算溢出".into());
+    }
+    Ok(true)
 }
 
 /// 各深度共用一份着色逻辑；返回的 L 已含本顶点的 BSDF 和一次棋盘格调制。
@@ -99,7 +133,7 @@ fn secondary_direct_lighting(
         xyz_to_linear_srgb(lambertian_radiance(e, g.rho).ok_or("第二表面地面直射计算失败")?)
             .ok_or("第二表面地面 XYZ 转换失败")?
     } else {
-        // 旧完整地面图无法分离焦散，E1 不读取它，改用现有解析 RGB 太阳。
+        // 旧完整地面图无法分离焦散，后续顶点不读取它，改用现有解析 RGB 太阳。
         surface_sun_lighting(scene, hit, material, wo, light, ground)?
     };
     let environment = environment_lighting(scene, hit, material, wo, rng)?;

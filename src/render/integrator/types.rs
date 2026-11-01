@@ -3,7 +3,7 @@
 use crate::{geometry::ray::Ray, render::framebuffer::Framebuffer};
 use nalgebra::Vector3;
 
-/// 调试分量；Direct 包含解析太阳、天空照明与背景，Caustics 只显示焦散。
+/// 调试分量；Direct 包含太阳、环境、漫反射间接光与背景，Caustics 只显示焦散。
 /// 三种模式复用相同相机 RNG/玻璃路径，Combined 为两者在线性空间中的和。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroundLightingComponent {
@@ -29,7 +29,7 @@ pub(super) struct CameraPathComponents {
 pub(super) struct CameraPathRngs<'a> {
     pub(super) camera: &'a mut dyn rand::RngCore,
     pub(super) environment: &'a mut dyn rand::RngCore,
-    /// 同时供 E1 的 BSDF 方向与第二表面环境估计使用，关闭 E1 时不消费。
+    /// 供漫反射 BSDF、后续顶点环境与 RR 使用；深度 0 时不消费。
     pub(super) diffuse: &'a mut dyn rand::RngCore,
 }
 
