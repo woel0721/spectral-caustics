@@ -1,0 +1,49 @@
+//! 相机输出分量、单条路径的 RGB 状态与随机流借用。
+
+use crate::{geometry::ray::Ray, render::framebuffer::Framebuffer};
+use nalgebra::Vector3;
+
+/// 调试分量；Direct 包含解析太阳、天空照明与背景，Caustics 只显示焦散。
+/// 三种模式复用相同相机 RNG/玻璃路径，Combined 为两者在线性空间中的和。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroundLightingComponent {
+    Direct,
+    Caustics,
+    Combined,
+}
+
+/// 同一批相机路径的三个结果，均为未曝光的线性 XYZ 辐亮度。
+pub struct CameraLightingImages {
+    pub direct: Framebuffer,
+    pub caustics: Framebuffer,
+    pub combined: Framebuffer,
+}
+
+/// 单条路径或像素均值的线性 RGB 分量，共享玻璃路径和吞吐量。
+#[derive(Default)]
+pub(super) struct CameraPathComponents {
+    pub(super) direct: Vector3<f64>,
+    pub(super) caustics: Vector3<f64>,
+}
+
+pub(super) struct CameraPathRngs<'a> {
+    pub(super) camera: &'a mut dyn rand::RngCore,
+    pub(super) environment: &'a mut dyn rand::RngCore,
+    /// 同时供 E1 的 BSDF 方向与第二表面环境估计使用，关闭 E1 时不消费。
+    pub(super) diffuse: &'a mut dyn rand::RngCore,
+}
+
+pub(super) struct DiffuseRay {
+    pub(super) ray: Ray,
+    pub(super) throughput: Vector3<f64>,
+}
+
+impl CameraPathComponents {
+    pub(super) fn select(&self, component: GroundLightingComponent) -> Vector3<f64> {
+        match component {
+            GroundLightingComponent::Direct => self.direct,
+            GroundLightingComponent::Caustics => self.caustics,
+            GroundLightingComponent::Combined => self.direct + self.caustics,
+        }
+    }
+}

@@ -492,6 +492,16 @@ n(\lambda)=A+\frac{B}{\lambda_{\mu m}^{2}}
 - **验收：** `cargo fmt`、`cargo fmt --check`、`cargo test --locked`（288 项单元测试、38 项集成测试通过，3 项既有 MIS 比较默认忽略）、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 全部通过。13 项 E1 测试另在 release 模式通过；release 示例实际生成并查看 320×240、64/256 SPP 对照 PNG。
 - **范围与限制：** 只完成 E1，属于截断后的受限 RGB 间接光估计器，不是通用无偏 Path Tracer。无多次漫反射、Russian Roulette、漫反射后的玻璃续追、透明阴影、环境/二次焦散、Path Guiding 或通用 Photon Mapping；下一阶段需单独定义计光规则和验收。
 
+E1 验收后，按用户要求将展示配置 `configs/default.json` 调整为 `environment_samples=8`、`environment_mis_heuristic="power"`、`max_diffuse_bounces=1`；Rust 默认值和旧 JSON 缺省行为保持不变。
+
+### 第一轮纯结构重构 — 相机积分器与 Scene 按职责拆分
+
+- [x] `src/render/integrator.rs` 保留为入口，拆出 `camera/path/direct/environment/diffuse/ground/rng/types`；原大型内嵌测试移至 `integrator/tests.rs`，既有 MIS/E1 测试仅调整 imports。
+- [x] `src/scene.rs` 保留 `Scene` 主类型，构建、物体管理、光源/背景、棋盘格、正向光子及测试拆至 `scene/{builder,objects,lighting,checkerboard,photon,tests}.rs`。
+- [x] 保留旧公开路径、函数签名、配置与所有测试；仅用私有子模块、必要的 `pub(super)` 与原 `pub(crate)` 接口，不改算法、RNG 消费顺序、光谱/颜色/Fresnel/MIS/焦散或 E1 行为，不增依赖。
+- **验收：** 重构前后 `cargo test --locked` 均为 288 项单元测试、38 项集成测试通过，3 项既有耗时比较忽略；`cargo fmt --check`、严格全目标 Clippy、`git diff --check` 通过。六组 release 固定 seed 场景（17×13、16 SPP；HDRI/渐变/无环境，E1 0/1，Balance/Power，N=1/3/8）在 1/2/4 线程下的 162 份 XYZ 缓冲和 162 张 PNG 全部与重构前逐字节一致，线程间也一致。原测试名称/结果未变，函数体经 token 对比保持一致（允许 rustfmt 末尾逗号调整）。
+- **范围与保留：** 入口行数从 2628/1013 降为 25/45；`new/from_config` 重复构建、历史照明入口与测试参考实现继续保留。本轮停止，不进入逻辑简化或死代码删除。
+
 ## 6. Codex 执行约定
 
 1. **每次只实现当前一个里程碑**，完成后总结修改文件、运行命令、测试结果和下一步；不要抢跑后续阶段。

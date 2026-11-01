@@ -1,6 +1,25 @@
 //! D2/D3 的受控 PDF、统计回归及可复现比较；旧估计器仅用于测试。
 
 use super::*;
+use super::{
+    direct::visible_to_light,
+    environment::{ENVIRONMENT_BSDF_FRACTION, environment_lighting, power_heuristic},
+    rng::{CAMERA_STREAM, ENVIRONMENT_STREAM, pixel_seed},
+};
+use crate::{
+    config::sceneconfig::EnvironmentMisHeuristic,
+    geometry::{
+        hit::Hit,
+        ray::{INTERSECTION_EPSILON, Ray},
+    },
+    material::{BsdfValue, EvaluateMode, Material, MaterialSample, unit_vector},
+    render::{framebuffer::Framebuffer, utils::linear_srgb_to_xyz},
+    scene::Scene,
+};
+use nalgebra::{Vector2, Vector3};
+use rand::{Rng, SeedableRng, rngs::StdRng};
+use std::{error::Error, f64::consts::PI};
+
 use crate::{
     camera::Camera,
     config::{cameraconfig::CameraConfig, sceneconfig::EnvironmentConfig},

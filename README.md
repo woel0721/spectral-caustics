@@ -538,7 +538,9 @@ if let Some(landing) = take_photon_landing(&scene, ray, prism_id, ground_id, || 
   "horizon_linear_rgb": [0.16, 0.20, 0.28],
   "zenith_linear_rgb": [0.04, 0.08, 0.18]
 },
-"environment_samples": 1
+"environment_samples": 8,
+"environment_mis_heuristic": "power",
+"max_diffuse_bounces": 1
 ```
 
 没有 HDR 贴图时，统一的 `radiance(direction)` 归一化方向后按 `t = clamp(direction.z, 0, 1)` 插值：地平线及下半球返回 horizon，天顶返回 zenith。相机未命中时查询 `radiance(ray.direction)`，表面照明查询 `radiance(wi)`；两者都是相对线性 RGB 辐亮度。旧的 `sky_radiance_linear_rgb` 已删除，旧 JSON 需要移除此字段；配置仍拒绝未知字段。`environment` 缺省/null 关闭环境照明，并保留原常量背景。
@@ -553,11 +555,11 @@ Lambertian: f_r = rho/pi, pdf = cos(theta)/pi
 
 被遮挡样本贡献为零，仍计入总样本数，不按可见样本数重新归一化。入射方向覆盖表面法线的整个正半球；向下的环境方向按同一个模型查询 horizon，不再对世界 z 做上半球照明裁切。均匀环境且无遮挡时任意朝向的 Lambertian 都得到 `rho * L_env`；朝上表面的无遮挡渐变环境，其解析参考值为 `rho * (horizon/3 + 2*zenith/3)`。
 
-`scene.environment_samples` 表示每条相机路径在漫反射终点采样的方向数，须大于零，默认 1。当前示例配置 `camera_spp=256` 会对每像素的 256 条相机路径平均；增大任一采样数可降低噪声，亮度按总样本数归一化。单路径直接光照调试入口使用原固定环境随机流；玻璃入口通过基础 seed、像素编号和环境 stream_id 派生独立环境 RNG。环境采样不会消耗像素抖动或玻璃事件 RNG，固定参数和种子可复现。
+`scene.environment_samples` 表示每条相机路径在漫反射终点采样的方向数，须大于零；Rust 默认值与旧 JSON 缺省为 1，当前展示 JSON 显式使用 8。当前示例配置 `camera_spp=256` 会对每像素的 256 条相机路径平均；增大任一采样数可降低噪声，亮度按总样本数归一化。单路径直接光照调试入口使用原固定环境随机流；玻璃入口通过基础 seed、像素编号和环境 stream_id 派生独立环境 RNG。环境采样不会消耗像素抖动或玻璃事件 RNG，固定参数和种子可复现。
 
 所有相机照明入口都使用此估计器，棋盘格和玻璃吞吐量仍只乘一次。环境贡献/可见背景归入 Direct，Caustics 保持纯折射焦散，三个分量复用相同玻璃路径，继续满足 `Direct + Caustics = Combined`。环境查询不额外添加解析太阳项，原解析太阳或完整地面图分支保持独立；光子能量图不加入环境。
 
-可见性目前为二值：玻璃也遮挡环境射线，不追踪透明环境阴影、天空穿过玻璃形成的焦散；单次漫反射间接反弹由下方 E1 可选启用，尚无物理大气或光谱环境模型。有限样本有 Monte Carlo 噪声，直接光照调试图默认每像素仅一个环境方向，增加 `environment_samples` 可以改善。后续可单独实现玻璃环境透射或进一步降低采样方差。
+可见性目前为二值：玻璃也遮挡环境射线，不追踪透明环境阴影、天空穿过玻璃形成的焦散；单次漫反射间接反弹由下方 E1 可选启用，尚无物理大气或光谱环境模型。有限样本有 Monte Carlo 噪声，直接光照调试图同样读取 `environment_samples`，当前展示配置每像素使用 8 个环境方向。后续可单独实现玻璃环境透射或进一步降低采样方差。
 
 ### HDR 阶段 B：将环境贴图接入 Scene
 
@@ -733,7 +735,7 @@ cargo test --release --locked compare_stratified_sampling -- --ignored --nocaptu
 "environment_mis_heuristic": "power"
 ```
 
-`environment_mis_heuristic` 接受 `"balance"` 或 `"power"`，旧 JSON 缺省时为 Balance。`configs/default.json` 已显式选择 Power，但**默认 environment_samples 仍为 1**，继续使用原 D2 单样本估计器；只有 HDRI 且 N>=2 时才应用所选启发式。渐变天空也保留原行为。
+`environment_mis_heuristic` 接受 `"balance"` 或 `"power"`，旧 JSON 缺省时为 Balance。`configs/default.json` 当前显式选择 Power 和 `environment_samples=8`，使用固定配额的 4+4 策略；只有 HDRI 且 N>=2 时才应用所选启发式。旧 JSON 缺省 N=1 时继续使用 D2 单样本估计器，渐变天空保留原行为。
 
 固定配额必须将实际样本数量计入权重。令 `q_B=n_B*p_B`、`q_E=n_E*p_E`，实现：
 
@@ -768,7 +770,7 @@ cargo test --release --locked compare_power_sampling -- --ignored --nocapture
 
 ### 阶段 E1：单次漫反射间接光照
 
-在 `scene` 中加入 `"max_diffuse_bounces": 1` 可启用；省略时为 0，且只接受 0 或 1。默认 JSON、SPP、环境样本数、HDRI 分布、MIS 算法、曝光和颜色转换均保持原设置。`Scene::new` 同样默认关闭。此开关作用于共用 `trace_camera_path()` 的玻璃相机入口，`render_camera_lit` 仍是单次直接光照调试器。
+在 `scene` 中加入 `"max_diffuse_bounces": 1` 可启用；省略时为 0，且只接受 0 或 1。当前展示 JSON 已显式设置 `max_diffuse_bounces=1`、`environment_samples=8`、`environment_mis_heuristic="power"`；`Scene::new` 和旧 JSON 缺省时仍关闭漫反射反弹。SPP、HDRI 分布、MIS 算法、曝光和颜色转换保持原设置。此开关作用于共用 `trace_camera_path()` 的玻璃相机入口，`render_camera_lit` 仍是单次直接光照调试器。
 
 第一处 Lambertian A 仍保留原太阳、环境和绑定地面光照。E1 通过 `material.sample(wo, normal, rng)` 生成一条连续方向，沿 A 法线偏移 `1e-5 m` 后求最近交点 B。`sample_diffuse_ray()` 计算线性 RGB 吞吐量，`sample_one_diffuse_indirect()` 只计算 B 的现有直接光照，不再续追漫反射或玻璃：
 
@@ -924,7 +926,7 @@ PNG 读回测试在独立临时目录中保存一张 3×2 小图，再解码检�
 
 ## 文件与颜色约定
 
-源码按用途分为五组，`src` 顶层保留程序入口、模块入口、相机和场景：
+源码按职责分组，`src` 顶层保留程序入口、模块入口、相机和场景：
 
 ```text
 configs/
@@ -933,7 +935,14 @@ src/
 ├── main.rs                   # 读取配置、渲染并保存对照图
 ├── lib.rs                    # 对外声明模块
 ├── camera.rs                 # 针孔相机与像素主光线
-├── scene.rs                  # Scene、SceneObject、最近求交与双界面追踪
+├── scene.rs                  # Scene 主类型、私有子模块与原 API 重导出
+├── scene/
+│   ├── builder.rs            # new/from_config 与 Default 构建
+│   ├── objects.rs            # SceneObject、材质管理与最近求交
+│   ├── lighting.rs           # ParallelLight、GroundReceiver 与背景
+│   ├── checkerboard.rs       # 棋盘格与地面反射率调制
+│   ├── photon.rs             # Cauchy、原有正向光子双界面追踪
+│   └── tests.rs              # 原 Scene 单元测试
 ├── config/
 │   ├── mod.rs                # Config、JSON 读写和校验
 │   ├── cameraconfig.rs        # CameraConfig
@@ -959,7 +968,19 @@ src/
 └── render/
     ├── mod.rs                # Render、PNG 输出与相机调试接口导出
     ├── camera_debug.rs       # 相机法线调试遍历与对应测试
-    ├── integrator.rs         # 相机直接光照、玻璃路径、地面 XYZ 辐照度采样与测试
+    ├── integrator.rs         # 模块入口，保持原公开 API 路径
+    ├── integrator/
+    │   ├── camera.rs         # 相机入口、SPP 与 Rayon 像素并行
+    │   ├── path.rs           # 相机路径、Fresnel 玻璃传播
+    │   ├── direct.rs         # 解析太阳、直接光照与阴影
+    │   ├── environment.rs    # 环境积分、Balance/Power MIS
+    │   ├── diffuse.rs        # E1 单次 Lambertian 间接反弹
+    │   ├── ground.rs         # 地面辐照度采样、绑定与分量查询
+    │   ├── rng.rs            # 确定性 pixel_seed 与流常量
+    │   ├── types.rs          # 路径状态、RGB 吞吐量与输出分量类型
+    │   ├── tests.rs          # 原 integrator.rs 内嵌测试
+    │   ├── environment_tests.rs / environment_tests/  # 原 MIS 测试
+    │   └── diffuse_tests.rs / diffuse_tests/          # 原 E1 测试
     ├── caustics.rs           # 分层发射、光路追踪与地面累积
     ├── framebuffer.rs        # 线性 XYZ 图像缓冲
     └── utils.rs              # XYZ/sRGB 颜色转换、法线可视化、双线性权重
@@ -970,7 +991,13 @@ src/
 - `tests/config_render.rs` 验证 JSON 配置驱动的场景、渲染和程序输出。
 - `output/` 保存 PNG 结果。
 
-模块引用与目录对应，例如 `geometry::ray::Ray`、`config::rendersetting::RenderSetting`、`optics::spectrum::cie_xyz`、`render::framebuffer::Framebuffer`。Snell 折射、Cauchy 折射率和 `take_photon` 仍由 `scene.rs` 提供。
+模块引用与目录对应，例如 `geometry::ray::Ray`、`config::rendersetting::RenderSetting`、`optics::spectrum::cie_xyz`、`render::framebuffer::Framebuffer`。Snell 折射在 `optics`；Cauchy 折射率和 `take_photon` 的实现移至 `scene/photon.rs`，仍通过原 `scene::refractive_index`、`scene::take_photon` 等路径提供。
+
+第一轮结构重构只移动函数/类型、调整 imports、限定模块可见性和 re-export。`integrator.rs` 从 2628 行缩减为 25 行，`scene.rs` 从 1013 行缩减为 45 行；原公开函数签名、`Scene` 字段、材质接口和依赖均未改变，新增子模块均为私有，跨职责内部接口只使用 `pub(super)`（原 `take_photon_from_hit` 继续为 `pub(crate)`）。原内嵌测试移至对应 `tests.rs`，既有 MIS/E1 测试只调整 imports，测试名称、预期值和测试专用旧估计器均保留。
+
+重构前后分别运行 `cargo test --locked`：均为 288 项单元测试、38 项集成测试通过，3 项既有耗时比较默认忽略；`cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 通过。另用临时 release 比对工具保存重构前结果：六组 17×13、16 SPP 场景，seed=42–47，含真实 HDRI/渐变/关闭环境、E1 0/1、Balance/Power、N=1/3/8，并加入彩色漫反射墙。1/2/4 线程下共 162 份 XYZ 原始 f64 缓冲、162 张 PNG，在重构前后全部逐字节一致；各线程数之间也一致。覆盖 Direct/Caustics/Combined、单图兼容入口、完整地面图/RGB 入口、直接光调试及光源图；此检查没有修改既有测试预期。
+
+本轮保留的重复包括 `Scene::new` 与 `from_config` 中的部分构建代码、单图/三图及完整地面图兼容入口、测试专用旧路径/环境估计器。两套历史太阳强度约定也保留其不同语义。本轮到模块迁移为止，不做逻辑合并或死代码删除。
 
 `render::utils` 提供 `xyz_to_linear_srgb`、`linear_to_srgb_channel` 和 `linear_rgb_to_srgb8`；`render` 的 PNG 输出调用这些工具函数。法线调试图使用同一模块中的 `normal_to_rgb8`。XYZ 转换使用 D65 白点约定，参考白的 Y = 1。矩阵来自 [W3C CSS Color 4 的颜色转换示例](https://www.w3.org/TR/css-color-4/#color-conversion-code)，保留负值和大于 1 的线性 RGB 分量。
 

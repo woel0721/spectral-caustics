@@ -1,5 +1,33 @@
 //! E1 regression and independent two-plane radiometric references.
 use super::*;
+use super::{
+    diffuse::{sample_diffuse_ray, sample_one_diffuse_indirect},
+    direct::{camera_lighting_setup, direct_lighting},
+    environment::environment_lighting,
+    ground::{
+        GroundLighting, bind_ground_lighting, bind_spectral_ground_lighting, ground_irradiance,
+    },
+    path::{MAX_GLASS_BOUNCES, trace_camera_path},
+    types::{CameraPathComponents, CameraPathRngs, DiffuseRay},
+};
+use crate::{
+    config::sceneconfig::EnvironmentMisHeuristic,
+    geometry::{
+        hit::Hit,
+        ray::{INTERSECTION_EPSILON, PARALLEL_EPSILON, Ray},
+    },
+    material::{BsdfValue, EvaluateMode, Material, MaterialSample},
+    render::{
+        caustics::SpectralLighting,
+        framebuffer::Framebuffer,
+        utils::{linear_srgb_to_xyz, xyz_to_linear_srgb},
+    },
+    scene::Scene,
+};
+use nalgebra::Vector3;
+use rand::{SeedableRng, rngs::StdRng};
+use std::{error::Error, f64::consts::PI};
+
 use crate::{
     camera::Camera,
     config::{
