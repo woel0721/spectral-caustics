@@ -29,8 +29,9 @@
       "horizon_linear_rgb": [0.16, 0.20, 0.28],
       "zenith_linear_rgb": [0.04, 0.08, 0.18]
     },
-    "environment_samples": 1,
+    "environment_samples": 8,
     "environment_mis_heuristic": "power",
+    "max_diffuse_bounces": 1,
     "ground_checkerboard": {
       "cell_size_m": 0.5,
       "even_scale": 1.0,

@@ -84,7 +84,9 @@ mod tests {
         // 展示配置显式启用本地 HDR，Rust/旧 JSON 的缺省值仍不依赖图片文件。
         let mut expected = Config::default();
         expected.render.camera_spp = 256;
+        expected.scene.environment_samples = 8;
         expected.scene.environment_mis_heuristic = sceneconfig::EnvironmentMisHeuristic::Power;
+        expected.scene.max_diffuse_bounces = 1;
         expected.scene.environment.as_mut().unwrap().map_path =
             Some(PathBuf::from("assets/HDRI/autoshop_01_4k.hdr"));
         assert_eq!(config, expected);
