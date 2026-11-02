@@ -35,6 +35,9 @@ mod environment_tests;
 mod tests;
 
 #[cfg(test)]
-mod e2_tests;
+mod bounce_tests;
 #[cfg(test)]
-mod f1_tests;
+mod path_tests;
+
+#[cfg(test)]
+mod test_support;

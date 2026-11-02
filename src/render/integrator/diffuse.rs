@@ -17,46 +17,6 @@ use nalgebra::Vector3;
 use rand::Rng;
 use std::error::Error;
 
-/// 既有状态测试的续追入口；只初始化第一步，迭代统一交给 trace_camera_path。
-#[cfg(test)]
-pub(super) fn trace_diffuse_path(
-    scene: &Scene,
-    hit: &Hit,
-    material: &dyn Material,
-    light: (Vector3<f64>, f64),
-    ground: Option<&GroundLighting<'_>>,
-    rng: &mut dyn rand::RngCore,
-    state: &mut CameraPathState,
-) -> Result<(), Box<dyn Error>> {
-    if state.max_diffuse_bounces == 0 {
-        return Ok(());
-    }
-    let prefix_throughput = state.throughput;
-    let Some(first) = sample_diffuse_ray(scene, hit, material, -state.ray.direction, rng)? else {
-        return Ok(());
-    };
-    state.ray = first.ray;
-    state.throughput = prefix_throughput.component_mul(&first.throughput);
-    state.diffuse_bounces = 1;
-    if state.max_diffuse_bounces == 1 {
-        state.e1_diffuse_weights = Some((first.throughput, prefix_throughput));
-    }
-    let mut unused_camera = super::diffuse_tests::SequenceRng::new(&[]);
-    let mut unused_environment = super::diffuse_tests::SequenceRng::new(&[]);
-    super::path::trace_camera_path(
-        scene,
-        state,
-        &mut super::types::CameraPathRngs {
-            camera: &mut unused_camera,
-            environment: &mut unused_environment,
-            diffuse: rng,
-        },
-        light.0,
-        light.1,
-        ground,
-    )
-}
-
 /// 第三次漫反射后的顶点已着色，且还有预算时，RR 只控制之后的贡献。
 /// 使用真实路径 RGB 吞吐量（含玻璃前缀）；存活补偿不缩放已累计辐亮度。
 pub(super) fn russian_roulette(
@@ -109,23 +69,6 @@ pub(super) fn secondary_direct_lighting(
         .ground_reflectance_scale(hit)
         .ok_or("第二表面棋盘格坐标无效")?;
     Ok((direct + environment) * scale)
-}
-
-/// 原 E1 单连接测试入口，固定深度 1；生产使用统一相机路径循环。
-#[cfg(test)]
-pub(super) fn sample_one_diffuse_indirect(
-    scene: &Scene,
-    hit: &Hit,
-    material: &dyn Material,
-    wo: Vector3<f64>,
-    light: (Vector3<f64>, f64),
-    ground: Option<&GroundLighting<'_>>,
-    rng: &mut dyn rand::RngCore,
-) -> Result<Vector3<f64>, Box<dyn Error>> {
-    let ray = Ray::new(hit.coords, -wo).ok_or("漫反射射线起点或方向无效")?;
-    let mut state = CameraPathState::new(ray, 1);
-    trace_diffuse_path(scene, hit, material, light, ground, rng, &mut state)?;
-    Ok(state.radiance.direct)
 }
 
 /// A 的 RGB 吞吐量为 f_r*cos/pdf，并且仅乘一次 A 的棋盘格反射率。

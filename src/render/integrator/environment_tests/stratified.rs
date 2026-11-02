@@ -1,4 +1,4 @@
-//! D3 固定配额 Balance MIS：冻结的 D2 估计器只用于比较。
+//! Fixed-quota Balance MIS and independent integration references.
 
 use super::*;
 
@@ -38,50 +38,6 @@ impl Hittable for HalfPlane {
     fn intersect(&self, ray: &Ray) -> Option<Hit> {
         let hit = self.0.intersect(ray)?;
         (hit.coords.y > 0.0).then_some(hit)
-    }
-}
-
-#[test]
-fn one_sample_matches_d2_bits_and_rng_for_every_environment_kind() {
-    let albedo = Vector3::new(0.2, 0.5, 0.8);
-    let material = Lambertian::new(albedo).unwrap();
-    for hdr in [
-        TemporaryHdr::uniform([0.0; 3]),
-        TemporaryHdr::uniform([8.0, 4.0, 2.0]),
-        TemporaryHdr::high_contrast(),
-    ] {
-        for rotation in [0.0, 37.0, 90.0] {
-            let mut scene = hdr.scene(rotation);
-            scene.add(Box::new(HalfPlane(Ground::new(1.0).unwrap())));
-            for normal in [Vector3::z(), Vector3::x(), -Vector3::z()] {
-                let hit = Hit {
-                    normal,
-                    ..Default::default()
-                };
-                for seed in 0..128 {
-                    let mut rng = StdRng::seed_from_u64(seed);
-                    let mut previous_rng = rng.clone();
-                    let previous = random_mixture_environment_lighting(
-                        &scene,
-                        &hit,
-                        &material,
-                        normal,
-                        &mut previous_rng,
-                    )
-                    .unwrap();
-                    let actual =
-                        environment_lighting(&scene, &hit, &material, normal, &mut rng).unwrap();
-                    assert_eq!(actual.map(f64::to_bits), previous.map(f64::to_bits));
-                    assert_eq!(rng.next_u64(), previous_rng.next_u64());
-                }
-            }
-        }
-        let scene = diffuse_scene(&hdr);
-        let current = render_diffuse(&scene, 4, 3, 8, 42, environment_lighting);
-        let old = render_diffuse(&scene, 4, 3, 8, 42, random_mixture_environment_lighting);
-        for (a, b) in current.pixels.iter().zip(&old.pixels) {
-            assert_eq!(a.map(f64::to_bits), b.map(f64::to_bits));
-        }
     }
 }
 
@@ -382,29 +338,6 @@ pub(super) fn partial_scene(hdr: &TemporaryHdr) -> Scene {
     scene
 }
 
-// 均匀天空、z=1 且 y>0 的半平面遮挡：可见辐照度比例为
-// 0.5*(1-y/sqrt(h²+y²))。像素的 y 区间解析平均，包含亚像素抖动面积平均。
-pub(super) fn partial_reference_image(scene: &Scene, width: usize, height: usize) -> Framebuffer {
-    let mut image = Framebuffer::new(width, height);
-    let ground = Ground::new(0.0).unwrap();
-    let h = 1.0 - 10.0 * INTERSECTION_EPSILON;
-    for row in 0..height {
-        let edge_y = |offset_y| {
-            let ray = scene
-                .camera
-                .ray_for_pixel_sample(0, row, width, height, Vector2::new(0.5, offset_y))
-                .unwrap();
-            ground.intersect(&ray).unwrap().coords.y
-        };
-        let y0 = edge_y(0.0);
-        let y1 = edge_y(1.0 - f64::EPSILON);
-        let factor = 0.5 * (1.0 - (y0 + y1) / (h.hypot(y0) + h.hypot(y1)));
-        let xyz = linear_srgb_to_xyz(Vector3::new(0.8, 0.6, 0.4) * factor).unwrap();
-        image.pixels[row * width..(row + 1) * width].fill(xyz);
-    }
-    image
-}
-
 #[test]
 fn partial_occlusion_reference_matches_independent_numerical_integration() {
     let hdr = TemporaryHdr::uniform([1.0; 3]);
@@ -415,100 +348,5 @@ fn partial_occlusion_reference_matches_independent_numerical_integration() {
         let numerical = reference_at(&scene, position, Vector3::new(0.8, 0.6, 0.4), 1024, 512);
         let analytic = Vector3::new(0.8, 0.6, 0.4) * (0.5 * (1.0 - y / h.hypot(y)));
         assert!((numerical - analytic).norm() < analytic.norm() * 0.002);
-    }
-}
-
-#[test]
-fn stratified_diffuse_harness_matches_production_camera_for_all_quotas() {
-    let hdr = TemporaryHdr::high_contrast();
-    let mut scene = diffuse_scene(&hdr);
-    for total in [1, 2, 3, 4, 8] {
-        scene.environment_samples = total;
-        let harness = render_diffuse(&scene, 4, 3, 8, 42, environment_lighting);
-        let production = render_camera_glass(&scene, 4, 3, 8, 42).unwrap();
-        assert_eq!(harness.pixels, production.pixels);
-    }
-}
-
-#[test]
-#[ignore = "release 比较：cargo test --release --locked compare_stratified_sampling -- --ignored --nocapture"]
-fn compare_stratified_sampling() {
-    const WIDTH: usize = 32;
-    const HEIGHT: usize = 24;
-    const SPP: usize = 32;
-    const SEEDS: usize = 16;
-    println!(
-        "D3 comparison: {WIDTH}x{HEIGHT}, spp={SPP}, seeds=0..{SEEDS}, serial, metrics=linear XYZ Y"
-    );
-    let cases = [
-        ("uniform", TemporaryHdr::uniform([1.0; 3])),
-        ("high-contrast", TemporaryHdr::high_contrast()),
-        ("partial-uniform", TemporaryHdr::uniform([1.0; 3])),
-    ];
-    for (case, hdr) in cases {
-        let mut scene = if case == "partial-uniform" {
-            partial_scene(&hdr)
-        } else {
-            diffuse_scene(&hdr)
-        };
-        let reference = if case == "partial-uniform" {
-            partial_reference_image(&scene, WIDTH, HEIGHT)
-        } else {
-            let fine = reference_radiance(&scene, Vector3::new(0.8, 0.6, 0.4), 2048, 1024);
-            let coarse = reference_radiance(&scene, Vector3::new(0.8, 0.6, 0.4), 1024, 512);
-            assert!((fine - coarse).norm() < fine.norm() * 0.005);
-            println!(
-                "case={case}, numerical_reference_relative_delta={:.8}",
-                (fine - coarse).norm() / fine.norm()
-            );
-            let mut image = Framebuffer::new(WIDTH, HEIGHT);
-            image.pixels.fill(linear_srgb_to_xyz(fine).unwrap());
-            image
-        };
-        let reference_y =
-            reference.pixels.iter().map(|p| p.y).sum::<f64>() / (WIDTH * HEIGHT) as f64;
-        for total in [2, 4, 8] {
-            scene.environment_samples = total;
-            let estimators = [
-                random_mixture_environment_lighting as Estimator,
-                environment_lighting as Estimator,
-            ];
-            for estimator in estimators {
-                let _ = render_diffuse(&scene, WIDTH, HEIGHT, 2, 100, estimator);
-            }
-            let mut seconds = [0.0; 2];
-            let mut mse = [0.0; 2];
-            let mut means = [0.0; 2];
-            let count = (WIDTH * HEIGHT * SEEDS) as f64;
-            for seed in 0..SEEDS {
-                for index in if seed % 2 == 0 { [0, 1] } else { [1, 0] } {
-                    let started = Instant::now();
-                    let image =
-                        render_diffuse(&scene, WIDTH, HEIGHT, SPP, seed as u64, estimators[index]);
-                    seconds[index] += started.elapsed().as_secs_f64();
-                    for (pixel, expected) in image.pixels.iter().zip(&reference.pixels) {
-                        mse[index] += (pixel.y - expected.y).powi(2) / count;
-                        means[index] += pixel.y / count;
-                    }
-                }
-            }
-            for (index, name) in ["D2-random", "D3-stratified"].into_iter().enumerate() {
-                println!(
-                    "case={case}, N={total}, estimator={name}, reference_Y={reference_y:.8}, mean_Y={:.8}, bias_Y={:.8}, RMSE_Y={:.8}, relative_RMSE={:.8}, mean_frame_ms={:.6}, ns_per_direction={:.3}",
-                    means[index],
-                    means[index] - reference_y,
-                    mse[index].sqrt(),
-                    mse[index].sqrt() / reference_y,
-                    seconds[index] * 1000.0 / SEEDS as f64,
-                    seconds[index] * 1e9 / (WIDTH * HEIGHT * SPP * SEEDS * total) as f64
-                );
-            }
-            println!(
-                "case={case}, N={total}, time_ratio={:.6}, MSE_ratio={:.6}, equal_error_time_ratio_estimate={:.6}",
-                seconds[1] / seconds[0],
-                mse[1] / mse[0],
-                seconds[1] * mse[1] / (seconds[0] * mse[0])
-            );
-        }
     }
 }

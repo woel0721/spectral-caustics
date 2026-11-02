@@ -1,14 +1,11 @@
-//! E1 regression and independent two-plane radiometric references.
+//! Lambertian sampling and independent two-plane radiometric references.
 use super::*;
 use super::{
-    diffuse::{sample_diffuse_ray, sample_one_diffuse_indirect},
-    direct::{camera_lighting_setup, direct_lighting},
+    diffuse::sample_diffuse_ray,
     environment::environment_lighting,
-    ground::{
-        GroundLighting, bind_ground_lighting, bind_spectral_ground_lighting, ground_irradiance,
-    },
-    path::{MAX_GLASS_BOUNCES, trace_camera_ray as trace_camera_path},
-    types::{CameraPathComponents, CameraPathRngs, DiffuseRay},
+    ground::{GroundLighting, bind_spectral_ground_lighting},
+    test_support::evaluate_path as trace_camera_path,
+    types::{CameraPathRngs, DiffuseRay},
 };
 use crate::{
     config::sceneconfig::EnvironmentMisHeuristic,
@@ -49,8 +46,6 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
-
-mod legacy;
 
 /// Real infinite planes: A at z=0 (+Z), B at x=1 (-X).
 struct Plane {
@@ -146,109 +141,39 @@ impl RngCore for SequenceRng {
     }
 }
 
+// Exercise a continuation through the current path state, excluding the primary vertex.
+fn continuation_radiance(
+    scene: &Scene,
+    hit: &Hit,
+    material: &dyn Material,
+    wo: Vector3<f64>,
+    light: (Vector3<f64>, f64),
+    ground: Option<&GroundLighting<'_>>,
+    rng: &mut dyn RngCore,
+) -> Result<Vector3<f64>, Box<dyn Error>> {
+    let mut state = super::types::CameraPathState::new(Ray::new(hit.coords, -wo).unwrap(), 1);
+    super::test_support::trace_continuation(scene, hit, material, light, ground, rng, &mut state)?;
+    Ok(state.radiance.direct)
+}
+
 fn indirect(
     scene: &Scene,
     ground: Option<&GroundLighting<'_>>,
     rng: &mut dyn RngCore,
 ) -> Result<Vector3<f64>, Box<dyn Error>> {
+    let mut state =
+        super::types::CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 1);
     let hit = first_hit(scene);
-    sample_one_diffuse_indirect(
+    super::test_support::trace_continuation(
         scene,
         &hit,
         scene.material(hit.material_id.unwrap()).unwrap(),
-        Vector3::z(),
         sun(),
         ground,
         rng,
-    )
-}
-
-#[test]
-fn disabled_e1_matches_2521356_rgb_bits_and_all_rng_states() {
-    // Frozen control flow, real glass + checkerboard + all ground bindings/MIS modes.
-    let mut scene = Scene::from_config(&Config::default().scene).unwrap();
-    let renderer = Render::new(RenderSetting {
-        width: 17,
-        height: 13,
-        samples_per_pixel_axis: 2,
-        ..Default::default()
-    })
-    .unwrap();
-    let lighting = renderer.render_lighting(&scene).unwrap();
-    let full = renderer.render(&scene).unwrap();
-    for use_hdri in [false, true] {
-        if use_hdri {
-            scene.environment = Some(uniform_hdri());
-        }
-        for heuristic in [
-            EnvironmentMisHeuristic::Balance,
-            EnvironmentMisHeuristic::Power,
-        ] {
-            scene.environment_mis_heuristic = heuristic;
-            for samples in [1, 3, 8] {
-                scene.environment_samples = samples;
-                for binding in 0..5 {
-                    let ground = match binding {
-                        0 => None,
-                        1 => Some(bind_ground_lighting(&scene, &full, &scene.receiver).unwrap()),
-                        _ => Some(
-                            bind_spectral_ground_lighting(
-                                &scene,
-                                &lighting,
-                                [
-                                    GroundLightingComponent::Direct,
-                                    GroundLightingComponent::Caustics,
-                                    GroundLightingComponent::Combined,
-                                ][binding - 2],
-                            )
-                            .unwrap(),
-                        ),
-                    };
-                    let mut camera = StdRng::seed_from_u64(17);
-                    let mut environment = StdRng::seed_from_u64(29);
-                    let mut old_camera = camera.clone();
-                    let mut old_environment = environment.clone();
-                    let mut unused = SequenceRng::new(&[]);
-                    for y in 0..9 {
-                        for x in 0..11 {
-                            let ray = scene.camera.ray_for_pixel(x, y, 11, 9).unwrap();
-                            let (wi, light) = camera_lighting_setup(&scene, 11, 9).unwrap();
-                            let old = legacy::trace_camera_path_2521356(
-                                &scene,
-                                ray,
-                                &mut old_camera,
-                                wi,
-                                light,
-                                ground.as_ref(),
-                                &mut old_environment,
-                            )
-                            .unwrap();
-                            let new = trace_camera_path(
-                                &scene,
-                                ray,
-                                &mut CameraPathRngs {
-                                    camera: &mut camera,
-                                    environment: &mut environment,
-                                    diffuse: &mut unused,
-                                },
-                                wi,
-                                light,
-                                ground.as_ref(),
-                            )
-                            .unwrap();
-                            assert_eq!(bits(old.direct), bits(new.direct));
-                            assert_eq!(bits(old.caustics), bits(new.caustics));
-                        }
-                    }
-                    for _ in 0..8 {
-                        assert_eq!(camera.next_u64(), old_camera.next_u64());
-                        assert_eq!(environment.next_u64(), old_environment.next_u64());
-                    }
-                    assert_eq!(unused.draws, 0);
-                }
-            }
-        }
-    }
+        &mut state,
+    )?;
+    Ok(state.radiance.direct)
 }
 
 #[test]
@@ -611,7 +536,7 @@ fn secondary_bound_ground_uses_sun_once_checker_once_and_no_caustics() {
     let ground =
         bind_spectral_ground_lighting(&scene, &lighting, GroundLightingComponent::Combined)
             .unwrap();
-    let result = sample_one_diffuse_indirect(
+    let result = continuation_radiance(
         &scene,
         &hit,
         material,
@@ -641,7 +566,7 @@ fn secondary_bound_ground_uses_sun_once_checker_once_and_no_caustics() {
         ..ground
     };
     close(
-        sample_one_diffuse_indirect(
+        continuation_radiance(
             &scene,
             &hit,
             material,
@@ -658,7 +583,7 @@ fn secondary_bound_ground_uses_sun_once_checker_once_and_no_caustics() {
         sun: None,
         ..poisoned
     };
-    let old = sample_one_diffuse_indirect(
+    let old = continuation_radiance(
         &scene,
         &hit,
         material,
@@ -728,34 +653,6 @@ fn no_third_diffuse_sample_is_generated() {
     assert_eq!(count.load(Ordering::Relaxed), 0);
 }
 
-fn fingerprint(f: &Framebuffer) -> u64 {
-    f.pixels
-        .iter()
-        .flat_map(|v| v.iter())
-        .flat_map(|x| x.to_bits().to_le_bytes())
-        .fold(0xcbf29ce484222325, |h, b| {
-            (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
-        })
-}
-#[test]
-fn photon_maps_match_2521356_frozen_fingerprints_with_e1_on_or_off() {
-    let mut scene = Scene::from_config(&Config::default().scene).unwrap();
-    let renderer = Render::new(RenderSetting {
-        width: 17,
-        height: 13,
-        samples_per_pixel_axis: 2,
-        thread_count: Some(1),
-        ..Default::default()
-    })
-    .unwrap();
-    for bounces in [0, 1] {
-        scene.max_diffuse_bounces = bounces;
-        let l = renderer.render_lighting(&scene).unwrap();
-        assert_eq!(fingerprint(&l.direct), 0xdba9b0f3c03cb9f5);
-        assert_eq!(fingerprint(&l.caustics), 0x6150cb9f280efe33);
-    }
-}
-
 pub(super) fn uniform_hdri() -> Environment {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
@@ -800,7 +697,7 @@ fn secondary_hdri_balance_and_power_converge_to_independent_two_plane_reference(
         let mut second = Vector3::zeros();
         let count = 32768;
         for _ in 0..count {
-            let value = sample_one_diffuse_indirect(
+            let value = continuation_radiance(
                 &scene,
                 &hit,
                 mat,

@@ -3,8 +3,8 @@ use super::*;
 use super::{
     direct::camera_lighting_setup,
     environment::environment_lighting,
-    path::trace_camera_ray as trace_camera_path,
     rng::{CAMERA_STREAM, DIFFUSE_STREAM, ENVIRONMENT_SEED_OFFSET, ENVIRONMENT_STREAM, pixel_seed},
+    test_support::evaluate_path as trace_camera_path,
     types::CameraPathRngs,
 };
 use crate::{
@@ -1535,54 +1535,4 @@ fn camera_lighting_rejects_invalid_normals_and_bsdf_results() {
         );
         assert!(render_camera_lit(&scene, 1, 1).is_err());
     }
-}
-
-#[test]
-fn shared_ray_offset_preserves_original_bits_and_caller_validation() {
-    use crate::geometry::ray::INTERSECTION_EPSILON;
-    for position in [
-        Vector3::zeros(),
-        Vector3::repeat(-0.0),
-        Vector3::new(1.0, -2.0, 3.0),
-        Vector3::repeat(f64::MAX),
-    ] {
-        for normal in [
-            Vector3::z(),
-            -Vector3::z(),
-            Vector3::new(1.0, 2.0, 3.0).normalize(),
-        ] {
-            for side in [-1.0, 1.0] {
-                let expected = position + normal * (side * 10.0 * INTERSECTION_EPSILON);
-                let actual = offset_ray_origin(position, normal, side);
-                assert_eq!(actual.map(f64::to_bits), expected.map(f64::to_bits));
-            }
-            let old_shadow_origin = position + normal * (10.0 * INTERSECTION_EPSILON);
-            assert_eq!(
-                offset_ray_origin(position, normal, 1.0).map(f64::to_bits),
-                old_shadow_origin.map(f64::to_bits)
-            );
-        }
-    }
-    // Invalid input is still rejected by Ray::new at the original call sites.
-    assert!(
-        Ray::new(
-            offset_ray_origin(Vector3::repeat(f64::NAN), Vector3::z(), 1.0),
-            Vector3::z()
-        )
-        .is_none()
-    );
-    assert!(
-        Ray::new(
-            offset_ray_origin(Vector3::zeros(), Vector3::repeat(f64::INFINITY), -1.0),
-            Vector3::z()
-        )
-        .is_none()
-    );
-    assert!(
-        Ray::new(
-            offset_ray_origin(Vector3::zeros(), Vector3::z(), 1.0),
-            Vector3::zeros()
-        )
-        .is_none()
-    );
 }

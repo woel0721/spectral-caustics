@@ -1,4 +1,3 @@
-use super::stratified::{partial_reference_image, partial_scene};
 use super::*;
 
 #[test]
@@ -175,85 +174,6 @@ fn power_estimates_converge_to_uniform_and_high_contrast_references() {
             );
             assert!((mean - reference).abs() < reference * 0.05);
             assert!((mean - reference).abs() < 5.0 * (mse / 64.0).sqrt() + reference * 1e-4);
-        }
-    }
-}
-
-#[test]
-#[ignore = "release 比较：cargo test --release --locked compare_power_sampling -- --ignored --nocapture"]
-fn compare_power_sampling() {
-    const WIDTH: usize = 32;
-    const HEIGHT: usize = 24;
-    const SPP: usize = 32;
-    const SEEDS: usize = 16;
-    for (case, hdr) in [
-        ("uniform", TemporaryHdr::uniform([1.0; 3])),
-        ("high-contrast", TemporaryHdr::high_contrast()),
-        ("partial-uniform", TemporaryHdr::uniform([1.0; 3])),
-    ] {
-        let mut scene = if case == "partial-uniform" {
-            partial_scene(&hdr)
-        } else {
-            diffuse_scene(&hdr)
-        };
-        let reference = if case == "partial-uniform" {
-            partial_reference_image(&scene, WIDTH, HEIGHT)
-        } else {
-            let value = reference_radiance(&scene, Vector3::new(0.8, 0.6, 0.4), 2048, 1024);
-            let coarse = reference_radiance(&scene, Vector3::new(0.8, 0.6, 0.4), 1024, 512);
-            assert!((value - coarse).norm() < value.norm() * 0.005);
-            let mut image = Framebuffer::new(WIDTH, HEIGHT);
-            image.pixels.fill(linear_srgb_to_xyz(value).unwrap());
-            image
-        };
-        let ref_y = reference.pixels.iter().map(|p| p.y).sum::<f64>() / (WIDTH * HEIGHT) as f64;
-        for total in [2, 3, 8] {
-            scene.environment_samples = total;
-            let mut seconds = [0.0; 2];
-            let mut mse = [0.0; 2];
-            let mut means = [0.0; 2];
-            let modes = [
-                EnvironmentMisHeuristic::Balance,
-                EnvironmentMisHeuristic::Power,
-            ];
-            for mode in modes {
-                scene.environment_mis_heuristic = mode;
-                let _ = render_diffuse(&scene, WIDTH, HEIGHT, 2, 100, environment_lighting);
-            }
-            for seed in 0..SEEDS {
-                for index in if seed % 2 == 0 { [0, 1] } else { [1, 0] } {
-                    scene.environment_mis_heuristic = modes[index];
-                    let started = Instant::now();
-                    let image = render_diffuse(
-                        &scene,
-                        WIDTH,
-                        HEIGHT,
-                        SPP,
-                        seed as u64,
-                        environment_lighting,
-                    );
-                    seconds[index] += started.elapsed().as_secs_f64();
-                    for (pixel, expected) in image.pixels.iter().zip(&reference.pixels) {
-                        mse[index] +=
-                            (pixel.y - expected.y).powi(2) / (WIDTH * HEIGHT * SEEDS) as f64;
-                        means[index] += pixel.y / (WIDTH * HEIGHT * SEEDS) as f64;
-                    }
-                }
-            }
-            for (index, name) in ["balance", "power"].into_iter().enumerate() {
-                println!(
-                    "case={case}, N={total}, mode={name}, reference_Y={ref_y:.8}, mean_Y={:.8}, relative_RMSE={:.8}, mean_frame_ms={:.6}",
-                    means[index],
-                    mse[index].sqrt() / ref_y,
-                    seconds[index] * 1000.0 / SEEDS as f64
-                );
-            }
-            println!(
-                "case={case}, N={total}, time_ratio={:.6}, MSE_ratio={:.6}, equal_error_time_ratio_estimate={:.6}",
-                seconds[1] / seconds[0],
-                mse[1] / mse[0],
-                seconds[1] * mse[1] / (seconds[0] * mse[0])
-            );
         }
     }
 }

@@ -1,7 +1,5 @@
 //! 统一的相机路径迭代：玻璃前缀、有界 Lambertian 链与兼容着色顺序。
 
-#[cfg(test)]
-use super::types::CameraPathComponents;
 use super::{
     diffuse::{russian_roulette, sample_diffuse_ray, secondary_direct_lighting},
     direct::surface_sun_lighting,
@@ -247,19 +245,4 @@ fn accumulate_first_surface(
     let direct = surface_sun_lighting(scene, &hit, material, wo, (light_wi, light), ground)?;
     state.radiance.direct += (direct + environment) * (reflectance_scale * throughput);
     Ok(())
-}
-
-/// 保留既有逐射线测试入口；生产像素循环直接持有并推进路径状态。
-#[cfg(test)]
-pub(super) fn trace_camera_ray(
-    scene: &Scene,
-    ray: Ray,
-    rngs: &mut CameraPathRngs<'_>,
-    light_wi: Vector3<f64>,
-    light: f64,
-    ground: Option<&GroundLighting<'_>>,
-) -> Result<CameraPathComponents, Box<dyn Error>> {
-    let mut state = CameraPathState::new(ray, scene.max_diffuse_bounces);
-    trace_camera_path(scene, &mut state, rngs, light_wi, light, ground)?;
-    Ok(state.radiance)
 }

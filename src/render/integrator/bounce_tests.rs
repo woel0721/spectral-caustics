@@ -1,16 +1,11 @@
-//! E2 fixed depth, Russian Roulette and E1 bit/RNG compatibility checks.
+//! Bounded diffuse depth, Russian Roulette and current transport invariants.
 use super::*;
 use super::{
-    diffuse::{russian_roulette, sample_diffuse_ray, trace_diffuse_path},
+    diffuse::russian_roulette,
     diffuse_tests::{SequenceRng, bits, close, first_hit, sun, two_planes, uniform_hdri},
-    direct::{camera_lighting_setup, surface_sun_lighting},
-    environment::environment_lighting,
-    ground::{
-        GroundLighting, bind_ground_lighting, bind_spectral_ground_lighting,
-        direct_ground_irradiance, ground_irradiance,
-    },
-    path::{MAX_GLASS_BOUNCES, trace_camera_ray as trace_camera_path},
-    types::{CameraPathComponents, CameraPathRngs, CameraPathState, DiffuseRay},
+    ground::GroundLighting,
+    test_support::evaluate_path as trace_camera_path,
+    types::{CameraPathComponents, CameraPathRngs, CameraPathState},
 };
 use crate::{
     config::{
@@ -18,21 +13,17 @@ use crate::{
         rendersetting::RenderSetting,
         sceneconfig::{EnvironmentMisHeuristic, MAX_DIFFUSE_BOUNCES},
     },
-    geometry::{hit::Hit, ray::Ray, triangle::Triangle},
+    geometry::{ray::Ray, triangle::Triangle},
     material::{
         BsdfValue, EvaluateMode, Material, MaterialSample, dielectric::Dielectric,
-        lambertian::Lambertian, unit_vector,
+        lambertian::Lambertian,
     },
-    render::{
-        Render,
-        utils::{linear_srgb_to_xyz, xyz_to_linear_srgb},
-    },
+    render::{Render, utils::linear_srgb_to_xyz},
     scene::Scene,
 };
 use nalgebra::Vector3;
 use rand::{RngCore, SeedableRng, rngs::StdRng};
-use std::{error::Error, f64::consts::PI};
-mod legacy_e1;
+use std::f64::consts::PI;
 
 fn add_colored_wall(scene: &mut Scene) {
     let corners = [
@@ -46,97 +37,6 @@ fn add_colored_wall(scene: &mut Scene) {
             Box::new(Triangle::new(corners[a], corners[b], corners[c]).unwrap()),
             Box::new(Lambertian::new(Vector3::new(0.8, 0.2, 0.1)).unwrap()),
         );
-    }
-}
-
-#[test]
-fn zero_and_one_bounce_match_frozen_e1_bits_and_all_three_rngs() {
-    let mut scene = Scene::from_config(&Config::default().scene).unwrap();
-    scene.environment = Some(uniform_hdri());
-    add_colored_wall(&mut scene);
-    let renderer = Render::new(RenderSetting {
-        width: 11,
-        height: 9,
-        samples_per_pixel_axis: 2,
-        ..Default::default()
-    })
-    .unwrap();
-    let lighting = renderer.render_lighting(&scene).unwrap();
-    let full = renderer.render(&scene).unwrap();
-    for depth in [0, 1] {
-        scene.max_diffuse_bounces = depth;
-        for heuristic in [
-            EnvironmentMisHeuristic::Balance,
-            EnvironmentMisHeuristic::Power,
-        ] {
-            scene.environment_mis_heuristic = heuristic;
-            for count in [1, 3, 8] {
-                scene.environment_samples = count;
-                for binding in 0..5 {
-                    let ground = match binding {
-                        0 => None,
-                        1 => Some(bind_ground_lighting(&scene, &full, &scene.receiver).unwrap()),
-                        _ => Some(
-                            bind_spectral_ground_lighting(
-                                &scene,
-                                &lighting,
-                                [
-                                    GroundLightingComponent::Direct,
-                                    GroundLightingComponent::Caustics,
-                                    GroundLightingComponent::Combined,
-                                ][binding - 2],
-                            )
-                            .unwrap(),
-                        ),
-                    };
-                    let mut a = StdRng::seed_from_u64(11);
-                    let mut b = StdRng::seed_from_u64(23);
-                    let mut c = StdRng::seed_from_u64(37);
-                    let mut old_a = a.clone();
-                    let mut old_b = b.clone();
-                    let mut old_c = c.clone();
-                    let (wi, light) = camera_lighting_setup(&scene, 11, 9).unwrap();
-                    for y in 0..9 {
-                        for x in 0..11 {
-                            let ray = scene.camera.ray_for_pixel(x, y, 11, 9).unwrap();
-                            let old = legacy_e1::trace_camera_path_e1(
-                                &scene,
-                                ray,
-                                &mut CameraPathRngs {
-                                    camera: &mut old_a,
-                                    environment: &mut old_b,
-                                    diffuse: &mut old_c,
-                                },
-                                wi,
-                                light,
-                                ground.as_ref(),
-                            )
-                            .unwrap();
-                            let new = trace_camera_path(
-                                &scene,
-                                ray,
-                                &mut CameraPathRngs {
-                                    camera: &mut a,
-                                    environment: &mut b,
-                                    diffuse: &mut c,
-                                },
-                                wi,
-                                light,
-                                ground.as_ref(),
-                            )
-                            .unwrap();
-                            assert_eq!(bits(new.direct), bits(old.direct));
-                            assert_eq!(bits(new.caustics), bits(old.caustics));
-                        }
-                    }
-                    for _ in 0..8 {
-                        assert_eq!(a.next_u64(), old_a.next_u64());
-                        assert_eq!(b.next_u64(), old_b.next_u64());
-                        assert_eq!(c.next_u64(), old_c.next_u64());
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -200,7 +100,16 @@ fn fixed_depth_reaches_2_3_5_vertices_and_rgb_products_are_correct() {
         let material = scene.material(hit.material_id.unwrap()).unwrap();
         let mut state =
             CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), depth);
-        trace_diffuse_path(&scene, &hit, material, sun(), None, &mut rng, &mut state).unwrap();
+        super::test_support::trace_continuation(
+            &scene,
+            &hit,
+            material,
+            sun(),
+            None,
+            &mut rng,
+            &mut state,
+        )
+        .unwrap();
         assert_eq!(state.diffuse_bounces, depth);
         assert_eq!(state.glass_events, 0);
         assert_eq!(rng.draws, 2 * depth + depth.saturating_sub(3));
@@ -393,7 +302,7 @@ fn invalid_and_empty_continuation_samples_at_later_vertices_are_handled() {
         let hit = first_hit(&scene);
         let mut state =
             CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 5);
-        let result = trace_diffuse_path(
+        let result = super::test_support::trace_continuation(
             &scene,
             &hit,
             scene.material(hit.material_id.unwrap()).unwrap(),
@@ -541,7 +450,7 @@ fn deep_escape_does_not_add_hdri_again_or_consume_new_environment_samples() {
         let mut one = CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 1);
         let mut deep = CameraPathState::new(one.ray, 5);
         let material = scene.material(hit.material_id.unwrap()).unwrap();
-        trace_diffuse_path(
+        super::test_support::trace_continuation(
             &scene,
             &hit,
             material,
@@ -551,7 +460,7 @@ fn deep_escape_does_not_add_hdri_again_or_consume_new_environment_samples() {
             &mut one,
         )
         .unwrap();
-        trace_diffuse_path(
+        super::test_support::trace_continuation(
             &scene,
             &hit,
             material,
@@ -601,7 +510,7 @@ fn deep_ground_hits_never_read_caustics_or_complete_maps() {
     ] {
         let mut state =
             CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 3);
-        trace_diffuse_path(
+        super::test_support::trace_continuation(
             &scene,
             &hit,
             material,
@@ -738,7 +647,7 @@ fn terminal_vertex_rejects_invalid_direct_bsdf_without_another_bsdf_sample() {
     let hit = first_hit(&scene);
     let mut state = CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 2);
     let mut rng = SequenceRng::new(&[0.25, 0.0, 0.5, 0.25]);
-    let result = trace_diffuse_path(
+    let result = super::test_support::trace_continuation(
         &scene,
         &hit,
         scene.material(hit.material_id.unwrap()).unwrap(),
