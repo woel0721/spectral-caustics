@@ -1,7 +1,7 @@
 //! Helpers exercising the current path state; no frozen transport implementation.
 use super::{
     ground::GroundLighting,
-    types::{CameraPathComponents, CameraPathRngs, CameraPathState, LastScatter},
+    types::{CameraPathComponents, CameraPathRngs, CameraPathState},
 };
 use crate::{
     geometry::{hit::Hit, ray::Ray},
@@ -33,15 +33,15 @@ pub(super) fn trace_continuation(
     rng: &mut dyn rand::RngCore,
     state: &mut CameraPathState,
 ) -> Result<(), Box<dyn Error>> {
-    if state.max_diffuse_bounces == 0 {
+    if state.max_non_delta_bounces == 0 {
         return Ok(());
     }
     let Some(first) =
-        super::diffuse::sample_diffuse_ray(scene, hit, material, -state.ray.direction, rng)?
+        super::diffuse::sample_scatter_ray(scene, hit, material, -state.ray.direction, rng)?
     else {
         return Ok(());
     };
-    if !state.apply_scatter(LastScatter::Diffuse, first.throughput)? {
+    if !state.apply_scatter(first.event, first.throughput)? {
         return Ok(());
     }
     state.ray = first.ray;

@@ -7,9 +7,9 @@
 - [x] 米制 Z-up 几何、单三棱镜/有限地面配置、材质绑定与最近交点。
 - [x] 双界面 Snell 折射、Cauchy 色散、Fresnel 透射通量与地面双线性 XYZ 累积。
 - [x] 可追溯 CIE/D65 梯形积分、线性颜色与固定曝光 sRGB PNG。
-- [x] 理想玻璃 Fresnel 相机路径，最多 8 个玻璃事件。
+- [x] 通用 BsdfSample RGB 相机路径，支持 Lambertian、Dielectric、Mirror；共享有界 Delta 预算。
 - [x] HDRI/渐变环境、重要性采样与固定配额 Balance/Power MIS。
-- [x] 0..1024 次额外 Lambertian 连接、RGB 吞吐量与补偿 RR。
+- [x] 0..1024 次额外连续 BSDF 连接（JSON 字段名保留）、RGB 吞吐量与补偿 RR。
 - [x] Direct/Caustics/Combined 共用相机路径，解析太阳避免重复计光。
 - [x] JSON 配置校验、固定种子、Rayon 独立流与线程一致性。
 - [x] Breaking Cleanup：统一当前算法，移除冻结算法、历史适配层和调试流程。
@@ -147,3 +147,15 @@ PR #1 审查以 `e9542ca` 为起点。原始分支的全目标构建和严格 Cl
 - `camera_parallel_benchmark -- 16 64`：光源和三份相机 XYZ 在 1/2/4/6 线程逐位一致；`refract_ray` 成功输出双界面方向和地面落点。
 
 仍是有界估计器，未实现透明 shadow ray、太阳穿玻璃的直接照明、环境焦散图、嵌套介质或新材质。狭窄玻璃路径可能有较高方差；深度和八次玻璃上限仍会截断路径。本轮未执行默认 256 SPP 的全尺寸主程序渲染。
+
+## 通用 BSDF 第一阶段
+
+从 main `687d76f` 审计并迁移所有材质采样调用方，删除材质专用采样 enum/玻璃采样记录及 `is_lambertian()`/`is_delta()` 材质判断。统一采样返回方向、RGB 权重、可选立体角 PDF 和具体散射事件。Dielectric 的 Fresnel 离散选择抵消与 radiance eta² 只在材质内部处理一次。
+
+路径以总深度、连续连接数、最近采样事件和已着色连续顶点历史推进；Delta 数量由总深度减连续深度得到。保留 `max_diffuse_bounces` 配置名，将其语义推广到连续 BSDF 连接。直接光不再按 Lambertian 类型筛选，辐照度图通过显式反射率能力绑定。新增 Mirror、JSON 校验、RGB 镜面后逃逸与光谱焦散隔离测试；已有 Fresnel、RR、MIS/光谱/颜色/分量与线程验证迁移到新接口。
+
+局部环境 NEE 保持二值遮挡；非 Delta miss 不再计光，Delta 链逃逸以完整 RGB throughput 进入 Direct。混合材质的局部 BSDF 样本若为 Delta，保留空配额，不能补采。光源端双界面算法只用于理想介质，不把 Mirror 的反射当作玻璃折射焦散。
+
+第一阶段验证：295 项单元测试 + 39 项集成测试（原 37 项保留，新增 2 项）通过；fmt、全目标 build、严格 Clippy 与 diff 检查通过。工作区原有 Delta 上限 32，旧八次上限测试在初始基线中有 4 项失败；现改为按上限测试边界，工作区 32 与提交版 8 均完整通过。HDRI 更换及上限修改保留为用户未提交改动。
+
+实跑 release `camera_direct_caustics -- 4`（512²）、`diffuse_indirect -- 4`（320×240，深度 0/1/4）、`camera_parallel_benchmark -- 4 32` 成功；后者在 1/2/4/6 线程的光源和三个相机 XYZ 缓冲逐位一致。未运行默认 256 SPP 全尺寸主渲染。

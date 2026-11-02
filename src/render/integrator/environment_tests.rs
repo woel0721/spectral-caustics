@@ -10,7 +10,7 @@ use crate::{
         hit::Hit,
         ray::{INTERSECTION_EPSILON, Ray},
     },
-    material::{BsdfValue, EvaluateMode, Material, MaterialSample, unit_vector},
+    material::{BsdfSample, BsdfValue, EvaluateMode, Material, unit_vector},
     scene::Scene,
 };
 use nalgebra::Vector3;
@@ -158,9 +158,14 @@ impl Material for FixedBsdf {
         _: Vector3<f64>,
         _: Vector3<f64>,
         _: &mut dyn rand::RngCore,
-    ) -> Option<MaterialSample> {
+    ) -> Option<BsdfSample> {
         self.samples.fetch_add(1, Ordering::Relaxed);
-        Some(MaterialSample::Continuous { wi: self.wi })
+        Some(BsdfSample {
+            wi: self.wi,
+            weight: Vector3::repeat(0.8),
+            pdf: Some(1.0 / PI),
+            event: crate::material::ScatterType::DiffuseReflection,
+        })
     }
     fn pdf(&self, _: Vector3<f64>, _: Vector3<f64>, _: Vector3<f64>) -> f64 {
         self.pdf

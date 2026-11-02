@@ -1,34 +1,22 @@
-//! 统一的相机路径迭代：玻璃与 Lambertian 混合事件、有界反弹和即时着色。
-
+//! 通用 RGB 相机路径：按 BSDF 事件推进，局部 NEE 与 Delta 链逃逸分开计光。
 use super::{
-    diffuse::{russian_roulette, sample_diffuse_ray, secondary_direct_lighting},
+    diffuse::{russian_roulette, sample_scatter_ray, secondary_direct_lighting},
     direct::surface_sun_lighting,
     environment::environment_lighting,
     ground::{GroundLighting, ground_irradiance, lambertian_radiance},
-    offset_ray_origin,
-    types::{CameraPathRngs, CameraPathState, LastScatter},
+    types::{CameraPathRngs, CameraPathState},
 };
 use crate::{
-    geometry::{hit::Hit, ray::Ray},
-    material::{Material, MaterialSample, unit_vector},
+    geometry::hit::Hit,
+    material::{Material, unit_vector},
     render::utils::xyz_to_linear_srgb,
     scene::Scene,
 };
 use nalgebra::Vector3;
 use std::error::Error;
 
-pub(super) const MAX_GLASS_BOUNCES: usize = 8;
+pub(super) const MAX_DELTA_EVENTS: usize = 8;
 
-/// 迭代推进相机路径，向 state 写入未曝光的 Direct/Caustics 线性 RGB 辐亮度。
-///
-/// 调用方为每条路径创建 CameraPathState；RNG 由像素采样循环持有，不能逐路径重设种子。
-/// wo = -ray.direction，保留朝外几何法线；玻璃只乘 sample.weight。
-/// 新起点沿采样方向所在侧的法线偏移 1e-5 米，第九个玻璃命中处截断。
-/// 尚未漫反射的 miss 查询背景；漫反射后仅最近为 Delta 的 miss 累加环境。
-/// 最近为 Diffuse 的逃逸已由该顶点的环境 NEE/MIS 估计，不再累加。
-/// 首次地面命中使用解析直射和焦散图，环境单独计入一次。
-/// 首次 Lambertian 后迭代追踪有界漫反射链；后续仅累加太阳/环境直接光。
-/// 漫反射后也可继续经过玻璃；玻璃不消耗漫反射预算，不模拟透明 shadow ray。
 pub(super) fn trace_camera_path(
     scene: &Scene,
     state: &mut CameraPathState,
@@ -39,87 +27,40 @@ pub(super) fn trace_camera_path(
 ) -> Result<(), Box<dyn Error>> {
     crate::config::sceneconfig::validate_diffuse_bounces(scene.max_diffuse_bounces)?;
     loop {
-        if state.diffuse_bounces > 0 && !state.throughput.iter().all(|v| v.is_finite() && *v >= 0.0)
-        {
-            return Err("漫反射路径吞吐量计算溢出".into());
+        if !state.throughput.iter().all(|v| v.is_finite() && *v >= 0.0) {
+            return Err("路径吞吐量必须有限且非负".into());
+        }
+        if state.throughput == Vector3::zeros() {
+            break;
         }
         let Some(hit) = scene.intersect(&state.ray) else {
-            // 无漫反射历史时仍允许 background_color 作为相机背景。
-            if state.diffuse_bounces == 0 {
-                state.radiance.direct += state.throughput.component_mul(
-                    &scene
-                        .background_radiance(state.ray.direction)
-                        .ok_or("背景辐亮度无效")?,
-                );
-            } else if state.last_scatter == LastScatter::Delta
+            if state.non_delta_bounces == 0 {
+                let background = scene
+                    .background_radiance(state.ray.direction)
+                    .ok_or("天空或背景颜色无效")?;
+                state.radiance.direct += state.throughput.component_mul(&background);
+            } else if state.last_scatter.is_some_and(|event| event.is_delta())
                 && let Some(environment) = &scene.environment
             {
-                // 局部环境 NEE 的二值 shadow ray 遇到玻璃即遮挡，无法生成
-                // Diffuse -> Delta+ -> Environment；此处用完整吞吐量计入一次。
-                // BSDF、Fresnel 离散概率及 RR 补偿均已包含，不能再加权。
-                let radiance = environment
+                // 局部 NEE 的二值遮挡无法生成这条 Delta 链，完整 weight 已包含事件概率/RR。
+                let li = environment
                     .radiance(state.ray.direction)
                     .ok_or("环境辐亮度无效")?;
-                state.radiance.direct += state.throughput.component_mul(&radiance);
+                state.radiance.direct += state.throughput.component_mul(&li);
             }
+            // 非 Delta miss 由该顶点的局部环境 NEE/MIS 估计，不能再次加背景。
             break;
         };
         let Some(material) = hit.material_id.and_then(|id| scene.material(id)) else {
             break;
         };
         let wo = -state.ray.direction;
-        // 按当前命中的材质分派，两个分支共用事件更新与末尾的 Ray 写回。
-        // 地面绑定已在 bind_spectral_ground_lighting 中排除 delta 材质。
-        let next_ray = if material.is_delta() {
-            // 无论此前是否经过漫反射，都允许采样玻璃。
-            // 玻璃只计 glass_events；已发生的 diffuse_bounces 历史保持不变。
-            if state.glass_events == MAX_GLASS_BOUNCES {
+        if material.has_non_delta() {
+            let normal = unit_vector(hit.normal).ok_or("表面法线无效")?;
+            if normal.dot(&wo) <= 0.0 && !material.has_delta() {
                 break;
             }
-            let normal_length = hit.normal.norm();
-            if !normal_length.is_finite() || normal_length == 0.0 {
-                return Err("命中法线无效，无法采样玻璃路径".into());
-            }
-            let normal = hit.normal / normal_length;
-            // 漫反射后的玻璃属于续追，不能扰动下一条主路径的抖动/玻璃前缀。
-            let rng = if state.diffuse_bounces > 0 {
-                &mut *rngs.diffuse
-            } else {
-                &mut *rngs.camera
-            };
-            let Some(sample) = material.sample(wo, normal, rng) else {
-                break;
-            };
-            let MaterialSample::Glass(sample) = sample else {
-                return Err("delta 材质必须返回玻璃离散事件采样".into());
-            };
-            if !sample.probability.is_finite()
-                || sample.probability <= 0.0
-                || sample.probability > 1.0
-                || !sample.weight.is_finite()
-                || sample.weight < 0.0
-            {
-                return Err("玻璃采样概率或权重无效".into());
-            }
-            if !state.apply_scatter(LastScatter::Delta, Vector3::repeat(sample.weight))? {
-                break;
-            }
-            let side = if sample.wi.dot(&normal) >= 0.0 {
-                1.0
-            } else {
-                -1.0
-            };
-            let origin = offset_ray_origin(hit.coords, normal, side);
-            Ray::new(origin, sample.wi).ok_or("玻璃路径射线起点或方向无效")?
-        } else {
-            if state.diffuse_bounces > 0 {
-                if !material.is_lambertian() {
-                    break;
-                }
-                let normal = unit_vector(hit.normal).ok_or("第二漫反射表面法线无效")?;
-                if normal.dot(&wo) <= 0.0 {
-                    break;
-                }
+            if state.has_non_delta_vertex || state.non_delta_bounces > 0 {
                 let direct = secondary_direct_lighting(
                     scene,
                     &hit,
@@ -130,56 +71,64 @@ pub(super) fn trace_camera_path(
                     rngs.diffuse,
                 )?;
                 state.radiance.direct += state.throughput.component_mul(&direct);
-                if !state.radiance.direct.iter().all(|v| v.is_finite()) {
-                    return Err("漫反射间接光计算溢出".into());
-                }
-                if state.diffuse_bounces >= state.max_diffuse_bounces {
-                    break;
-                }
-                if !russian_roulette(state, rngs.diffuse)? {
-                    break;
-                }
             } else {
-                let reflectance_scale = scene
+                let scale = scene
                     .ground_reflectance_scale(&hit)
                     .ok_or("地面棋盘格坐标无效")?;
-                let environment =
-                    environment_lighting(scene, &hit, material, wo, rngs.environment)?;
+                let env = environment_lighting(scene, &hit, material, wo, rngs.environment)?;
                 let radiance = first_surface_lighting(
                     scene,
                     &hit,
                     material,
                     wo,
-                    environment,
+                    env,
                     (light_wi, light),
                     ground,
                 )?;
-                state.radiance.direct +=
-                    state.throughput.component_mul(&radiance.direct) * reflectance_scale;
+                state.radiance.direct += state.throughput.component_mul(&radiance.direct) * scale;
                 state.radiance.caustics +=
-                    state.throughput.component_mul(&radiance.caustics) * reflectance_scale;
-                if state.max_diffuse_bounces == 0 {
-                    break;
-                }
+                    state.throughput.component_mul(&radiance.caustics) * scale;
             }
-            let Some(next) = sample_diffuse_ray(scene, &hit, material, wo, rngs.diffuse)? else {
-                break;
-            };
-            if !state.apply_scatter(LastScatter::Diffuse, next.throughput)? {
-                break;
-            }
-            next.ray
+        }
+        // 记录访问过的连续顶点，混合材质抽到 Delta 时也不能重读焦散图。
+        state.has_non_delta_vertex |= material.has_non_delta();
+        let continuous_budget = state.non_delta_bounces < state.max_non_delta_bounces;
+        let delta_budget = state.delta_events() < MAX_DELTA_EVENTS;
+        if (!continuous_budget || !material.has_non_delta())
+            && (!delta_budget || !material.has_delta())
+        {
+            break;
+        }
+        // 以非 Delta 连接数量控制 RR，保留浅层/终点不抽样的约定。
+        if material.has_non_delta() && continuous_budget && !russian_roulette(state, rngs.diffuse)?
+        {
+            break;
+        }
+        let rng = if state.non_delta_bounces == 0 && !state.has_non_delta_vertex {
+            &mut *rngs.camera
+        } else {
+            &mut *rngs.diffuse
         };
-        state.ray = next_ray;
+        let Some(next) = sample_scatter_ray(scene, &hit, material, wo, rng)? else {
+            break;
+        };
+        // 混合材质按完整概率采样；没有预算的分量终止，不能重新选择另一个分量。
+        if next.event.is_delta() && !delta_budget || !next.event.is_delta() && !continuous_budget {
+            break;
+        }
+        if !state.apply_scatter(next.event, next.throughput)? {
+            break;
+        }
+        state.ray = next.ray;
     }
     if !state
         .radiance
         .direct
         .iter()
         .chain(state.radiance.caustics.iter())
-        .all(|value| value.is_finite())
+        .all(|v| v.is_finite())
     {
-        return Err("玻璃路径颜色非法或计算溢出".into());
+        return Err("路径颜色非法或计算溢出".into());
     }
     Ok(())
 }

@@ -1,6 +1,6 @@
 //! 单面 Lambertian 漫反射，正半球内 f_r = albedo / π。
 
-use super::{BsdfValue, EvaluateMode, Material, MaterialSample, to_world, unit_vector};
+use super::{BsdfSample, BsdfValue, EvaluateMode, Material, ScatterType, to_world, unit_vector};
 use crate::optics::spectrum::rgb_reflectance;
 use nalgebra::Vector3;
 use rand::{Rng, RngCore};
@@ -29,8 +29,8 @@ impl Lambertian {
 }
 
 impl Material for Lambertian {
-    fn is_lambertian(&self) -> bool {
-        true
+    fn irradiance_reflectance(&self) -> Option<Vector3<f64>> {
+        Some(self.albedo)
     }
 
     fn evaluate(
@@ -61,7 +61,7 @@ impl Material for Lambertian {
         wo: Vector3<f64>,
         normal: Vector3<f64>,
         rng: &mut dyn RngCore,
-    ) -> Option<MaterialSample> {
+    ) -> Option<BsdfSample> {
         let (wo, normal) = (unit_vector(wo)?, unit_vector(normal)?);
         if normal.dot(&wo) <= 0.0 {
             return None;
@@ -73,8 +73,12 @@ impl Material for Lambertian {
         let phi = 2.0 * PI * rng.random::<f64>();
         let radius = u.sqrt();
         let local = Vector3::new(radius * phi.cos(), radius * phi.sin(), (1.0 - u).sqrt());
-        Some(MaterialSample::Continuous {
-            wi: unit_vector(to_world(local, normal)?)?,
+        let wi = unit_vector(to_world(local, normal)?)?;
+        Some(BsdfSample {
+            wi,
+            weight: self.albedo,
+            pdf: Some(self.pdf(wi, wo, normal)),
+            event: ScatterType::DiffuseReflection,
         })
     }
 
@@ -153,17 +157,18 @@ mod tests {
         let mut mean = Vector3::zeros();
         let mut mean_cos_squared = 0.0;
         for _ in 0..16384 {
-            let MaterialSample::Continuous { wi } = material.sample(wo, n, &mut rng).unwrap()
-            else {
-                panic!("Lambertian 必须返回连续方向采样");
-            };
-            assert_eq!(material.sample(wo, n, &mut replay).unwrap().wi(), wi);
+            let sample = material.sample(wo, n, &mut rng).unwrap();
+            let wi = sample.wi;
+            assert_eq!(material.sample(wo, n, &mut replay).unwrap().wi, wi);
             assert!((wi.norm() - 1.0).abs() < 1e-12);
             let cos_theta = n.dot(&wi);
             let pdf = material.pdf(wi, wo, n);
             assert!(cos_theta > 0.0 && pdf > 0.0);
             assert!((pdf - cos_theta / PI).abs() < 1e-14);
             // 正确的 Lambertian 重要性采样权重 f_r cosθ / p 应恰好恢复 albedo。
+            assert_eq!(sample.pdf, Some(pdf));
+            assert_eq!(sample.event, ScatterType::DiffuseReflection);
+            assert_eq!(sample.weight, albedo);
             let weight = rgb_bsdf(&material, wi, wo, n) * (cos_theta / pdf);
             assert!((weight - albedo).norm() < 1e-12);
             let spectral_weight = spectral_bsdf(&material, wi, wo, n, 550.0) * (cos_theta / pdf);
@@ -187,11 +192,8 @@ mod tests {
                 let wi = white
                     .sample(normal * 2.0, normal * 3.0, &mut white_rng)
                     .unwrap()
-                    .wi();
-                assert_eq!(
-                    black.sample(normal, normal, &mut black_rng).unwrap().wi(),
-                    wi
-                );
+                    .wi;
+                assert_eq!(black.sample(normal, normal, &mut black_rng).unwrap().wi, wi);
                 assert!(wi.dot(&normal) > 0.0);
                 assert_eq!(white.pdf(wi, normal, normal), black.pdf(wi, normal, normal));
             }

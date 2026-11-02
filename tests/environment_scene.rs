@@ -9,7 +9,7 @@ use spectral_caustics::{
         sceneconfig::{EnvironmentConfig, EnvironmentMisHeuristic, ObjectConfig, SceneConfig},
     },
     environment::{Environment, EnvironmentMap},
-    material::{GlassEvent, MaterialSample},
+    material::ScatterType,
     render::{
         Render, SpectralLighting, framebuffer::Framebuffer, render_camera_glass,
         render_camera_glass_components, utils::linear_srgb_to_xyz,
@@ -348,13 +348,15 @@ fn glass_reflection_and_transmission_query_hdr_in_the_final_direction() {
             .unwrap();
         let hit = scene.intersect(&ray).unwrap();
         let material = scene.material(hit.material_id.unwrap()).unwrap();
-        let Some(MaterialSample::Glass(sample)) =
-            material.sample(-ray.direction, hit.normal, &mut rng)
-        else {
-            panic!("玻璃必须产生离散事件");
-        };
-        let index = usize::from(sample.event == GlassEvent::Transmission);
-        expected += map.radiance(sample.wi).unwrap() * sample.weight / 256.0;
+        let sample = material
+            .sample(-ray.direction, hit.normal, &mut rng)
+            .unwrap();
+        let index = usize::from(sample.event == ScatterType::SpecularTransmission);
+        expected += map
+            .radiance(sample.wi)
+            .unwrap()
+            .component_mul(&sample.weight)
+            / 256.0;
         checked[index] = true;
     }
     assert_eq!(checked, [true; 2]);

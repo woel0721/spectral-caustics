@@ -3,7 +3,6 @@
 use super::direct::visible_to_light;
 use crate::{
     geometry::{hit::Hit, ray::PARALLEL_EPSILON},
-    material::{BsdfValue, EvaluateMode},
     render::{
         caustics::{SpectralLighting, ground_to_pixel},
         framebuffer::Framebuffer,
@@ -129,15 +128,10 @@ pub(super) fn bind_spectral_ground_lighting<'a>(
         .and_then(|object| object.material_id())
         .and_then(|id| scene.material(id))
         .ok_or("地面编号或地面材质无效")?;
-    if material.is_delta() {
-        return Err("辐照度贴图要求中性 Lambertian 地面".into());
-    }
-    // Lambertian 的普通 BSDF 是 rho/pi；法向求值只读取材质，不包含光照和余弦。
-    let BsdfValue::Rgb(bsdf) =
-        material.evaluate(Vector3::z(), Vector3::z(), Vector3::z(), EvaluateMode::Rgb)
-    else {
-        return Err("地面 RGB 求值必须返回 RGB BSDF".into());
-    };
+    let rho = material
+        .irradiance_reflectance()
+        .ok_or("辐照度贴图要求中性 Lambertian 地面")?;
+    let bsdf = rho / PI;
     if bsdf
         .iter()
         .any(|v| !v.is_finite() || *v < 0.0 || *v * PI > 1.0 + 1e-12)
@@ -169,8 +163,15 @@ pub(super) fn ground_irradiance(
             ground.sun_irradiance_xyz,
         )?,
         // 焦散已包含折射路径可见性，不能用太阳 shadow ray 再次清零。
-        caustics_xyz: sample_ground_irradiance(ground.irradiance, ground.receiver, hit.coords)
-            .ok_or("焦散辐照度采样失败")?,
+        caustics_xyz: if scene
+            .prism_id
+            .is_none_or(|id| scene.supports_ideal_caustics(id))
+        {
+            sample_ground_irradiance(ground.irradiance, ground.receiver, hit.coords)
+                .ok_or("焦散辐照度采样失败")?
+        } else {
+            Vector3::zeros()
+        },
     })
 }
 

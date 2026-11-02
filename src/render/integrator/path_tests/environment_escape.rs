@@ -7,7 +7,7 @@ use crate::{
     material::dielectric::Dielectric,
     render::integrator::{
         diffuse::russian_roulette,
-        types::{CameraPathRngs, CameraPathState, LastScatter},
+        types::{CameraPathRngs, CameraPathState},
     },
     scene::Scene,
 };
@@ -73,8 +73,11 @@ fn transmission_escape_uses_rgb_throughput_and_final_gradient_direction() {
         scene.environment.as_mut().unwrap().intensity = intensity;
         // NEE and continuation choose the same direction. NEE is blocked by glass.
         let state = trace(&scene, &[0.25, 0.0], &[0.25, 0.0, 0.99]);
-        assert_eq!((state.diffuse_bounces, state.glass_events), (1, 1));
-        assert_eq!(state.last_scatter, LastScatter::Delta);
+        assert_eq!((state.non_delta_bounces, state.delta_events()), (1, 1));
+        assert_eq!(
+            state.last_scatter,
+            Some(crate::material::ScatterType::SpecularTransmission)
+        );
         assert!(scene.intersect(&state.ray).is_none());
         let direction = Vector3::new((2.0_f64 / 3.0).sqrt(), 0.0, 1.0 / 3.0_f64.sqrt());
         close(state.ray.direction, direction);
@@ -92,8 +95,11 @@ fn transmission_escape_uses_rgb_throughput_and_final_gradient_direction() {
 fn reflection_escape_has_unit_fresnel_weight_and_no_extra_probability_factor() {
     let scene = escape_scene(2);
     let state = trace(&scene, &[0.25, 0.0], &[0.25, 0.0, 0.0]);
-    assert_eq!((state.diffuse_bounces, state.glass_events), (1, 1));
-    assert_eq!(state.last_scatter, LastScatter::Delta);
+    assert_eq!((state.non_delta_bounces, state.delta_events()), (1, 1));
+    assert_eq!(
+        state.last_scatter,
+        Some(crate::material::ScatterType::SpecularReflection)
+    );
     close(
         state.ray.direction,
         Vector3::new(-0.5, 0.0, 0.75_f64.sqrt()),
@@ -106,8 +112,11 @@ fn reflection_escape_has_unit_fresnel_weight_and_no_extra_probability_factor() {
 fn two_transmission_interfaces_cancel_eta_squared_in_escape_radiance() {
     let scene = escape_scene(2);
     let state = trace(&scene, &[0.25, 0.0], &[0.25, 0.0, 0.99, 0.99]);
-    assert_eq!((state.diffuse_bounces, state.glass_events), (1, 2));
-    assert_eq!(state.last_scatter, LastScatter::Delta);
+    assert_eq!((state.non_delta_bounces, state.delta_events()), (1, 2));
+    assert_eq!(
+        state.last_scatter,
+        Some(crate::material::ScatterType::SpecularTransmission)
+    );
     close(state.ray.direction, Vector3::new(0.5, 0.0, 0.75_f64.sqrt()));
     close(state.throughput, ALBEDO); // (1/1.5)^2 * (1.5/1)^2 = 1.
     close(state.radiance.direct, ALBEDO.component_mul(&SKY));
@@ -120,8 +129,15 @@ fn no_environment_keeps_camera_background_out_of_mixed_escape_lighting() {
     scene.background_color = Vector3::repeat(1000.0);
     for words in [&[0.25, 0.0, 0.0][..], &[0.25, 0.0, 0.99, 0.99][..]] {
         let state = trace(&scene, &[], words);
-        assert_eq!(state.last_scatter, LastScatter::Delta);
-        assert_eq!(state.diffuse_bounces, 1);
+        assert_eq!(
+            state.last_scatter,
+            Some(if words.len() == 3 {
+                crate::material::ScatterType::SpecularReflection
+            } else {
+                crate::material::ScatterType::SpecularTransmission
+            })
+        );
+        assert_eq!(state.non_delta_bounces, 1);
         close(state.radiance.direct, Vector3::zeros());
     }
 }
@@ -163,10 +179,13 @@ fn diffuse_escape_is_counted_only_by_nee_even_with_a_glass_prefix() {
         )
         .unwrap();
         assert_eq!(
-            (state.diffuse_bounces, state.glass_events),
+            (state.non_delta_bounces, state.delta_events()),
             (1, usize::from(prefix))
         );
-        assert_eq!(state.last_scatter, LastScatter::Diffuse);
+        assert_eq!(
+            state.last_scatter,
+            Some(crate::material::ScatterType::DiffuseReflection)
+        );
         close(
             state.radiance.direct,
             ALBEDO.component_mul(&SKY) * if prefix { 4.0 / 9.0 } else { 1.0 },
@@ -198,8 +217,11 @@ fn diffuse_after_glass_resets_escape_eligibility_and_keeps_secondary_nee() {
             0.25, 0.75, // B's continuation also escapes; must not add it again.
         ],
     );
-    assert_eq!((state.diffuse_bounces, state.glass_events), (2, 2));
-    assert_eq!(state.last_scatter, LastScatter::Diffuse);
+    assert_eq!((state.non_delta_bounces, state.delta_events()), (2, 2));
+    assert_eq!(
+        state.last_scatter,
+        Some(crate::material::ScatterType::DiffuseReflection)
+    );
     assert!(scene.intersect(&state.ray).is_none());
     close(
         state.radiance.direct,
@@ -219,7 +241,11 @@ fn glass_escape_preserves_prior_radiance_and_roulette_compensated_throughput() {
         5,
     );
     for _ in 0..3 {
-        assert!(state.apply_scatter(LastScatter::Diffuse, ALBEDO).unwrap());
+        assert!(
+            state
+                .apply_scatter(crate::material::ScatterType::DiffuseReflection, ALBEDO)
+                .unwrap()
+        );
     }
     let prefix = ALBEDO.component_mul(&ALBEDO).component_mul(&ALBEDO);
     let mut diffuse = SequenceRng::new(&[0.0, 0.99, 0.99]); // RR survives, then two transmissions.
@@ -241,7 +267,7 @@ fn glass_escape_preserves_prior_radiance_and_roulette_compensated_throughput() {
         None,
     )
     .unwrap();
-    assert_eq!((state.diffuse_bounces, state.glass_events), (3, 2));
+    assert_eq!((state.non_delta_bounces, state.delta_events()), (3, 2));
     close(state.throughput, prefix / prefix.max());
     close(
         state.radiance.direct,
@@ -357,22 +383,31 @@ fn mixed_escape_queries_rotated_hdri_with_intensity_without_new_rng_draws() {
 }
 
 #[test]
-fn mixed_environment_escape_respects_the_eight_glass_event_limit() {
-    for count in [8, 9] {
+fn mixed_environment_escape_respects_the_delta_event_limit() {
+    for count in [
+        crate::render::integrator::path::MAX_DELTA_EVENTS,
+        crate::render::integrator::path::MAX_DELTA_EVENTS + 1,
+    ] {
         let mut scene = escape_scene(0);
         for i in 1..=count {
-            let x = f64::from(i) / 10.0;
+            let x = i as f64 / (2.0 * crate::render::integrator::path::MAX_DELTA_EVENTS as f64);
             scene.add_with_material(
                 Box::new(glass_patch(x, x * 3.0_f64.sqrt(), false)),
                 Box::new(Dielectric::new(1.0).unwrap()),
             );
         }
         let state = trace(&scene, &[0.25, 0.0], &[0.25, 0.0]);
-        assert_eq!((state.diffuse_bounces, state.glass_events), (1, 8));
-        assert_eq!(state.last_scatter, LastScatter::Delta);
+        assert_eq!(
+            (state.non_delta_bounces, state.delta_events()),
+            (1, crate::render::integrator::path::MAX_DELTA_EVENTS)
+        );
+        assert_eq!(
+            state.last_scatter,
+            Some(crate::material::ScatterType::SpecularTransmission)
+        );
         close(
             state.radiance.direct,
-            if count == 8 {
+            if count == crate::render::integrator::path::MAX_DELTA_EVENTS {
                 ALBEDO.component_mul(&SKY)
             } else {
                 Vector3::zeros()
@@ -392,12 +427,18 @@ fn mixed_escape_rejects_invalid_environment_and_radiance_overflow() {
         let mut state = CameraPathState::new(Ray::new(Vector3::zeros(), Vector3::z()).unwrap(), 1);
         assert!(
             state
-                .apply_scatter(LastScatter::Diffuse, Vector3::repeat(throughput))
+                .apply_scatter(
+                    crate::material::ScatterType::DiffuseReflection,
+                    Vector3::repeat(throughput)
+                )
                 .unwrap()
         );
         assert!(
             state
-                .apply_scatter(LastScatter::Delta, Vector3::repeat(1.0))
+                .apply_scatter(
+                    crate::material::ScatterType::SpecularTransmission,
+                    Vector3::repeat(1.0)
+                )
                 .unwrap()
         );
         let error = trace_camera_path(

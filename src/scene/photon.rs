@@ -86,6 +86,12 @@ pub(crate) fn take_photon_from_hit(
         return None;
     }
 
+    // 显式绑定材质时，只有理想 Dielectric 能使用此双透射算法。
+    // 无材质几何仍允许调用方显式提供折射率（独立光学实验 API）。
+    if !scene.supports_ideal_caustics(prism_id) {
+        return None;
+    }
+
     // 空气 -> 玻璃：朝外法线朝向入射介质。
     let cos_enter = -ray.direction.dot(&first_hit.normal);
     let f_enter = fresnel_dielectric(cos_enter, AIR_IOR, glass_ior)?;
@@ -118,5 +124,16 @@ pub(crate) fn take_photon_from_hit(
         })
     } else {
         None
+    }
+}
+
+impl Scene {
+    /// 无材质几何保留显式光学实验；绑定材质后必须声明理想介质能力。
+    pub(crate) fn supports_ideal_caustics(&self, prism_id: usize) -> bool {
+        self.objects.get(prism_id).is_some_and(|object| {
+            object
+                .material_id()
+                .is_none_or(|id| self.material(id).is_some_and(|m| m.ior().is_some()))
+        })
     }
 }

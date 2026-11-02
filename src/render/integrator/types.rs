@@ -1,6 +1,6 @@
 //! 相机输出分量、单条路径的 RGB 状态与随机流借用。
 
-use crate::{geometry::ray::Ray, render::framebuffer::Framebuffer};
+use crate::{geometry::ray::Ray, material::ScatterType, render::framebuffer::Framebuffer};
 use nalgebra::Vector3;
 
 /// 同一批相机路径的三个结果，均为未曝光的线性 XYZ 辐亮度。
@@ -25,72 +25,59 @@ pub(super) struct CameraPathRngs<'a> {
     pub(super) diffuse: &'a mut dyn rand::RngCore,
 }
 
-pub(super) struct DiffuseRay {
+pub(super) struct ScatterRay {
     pub(super) ray: Ray,
     pub(super) throughput: Vector3<f64>,
+    pub(super) event: ScatterType,
 }
 
-/// 最近接受的路径事件；Camera 只用于尚未发生表面散射的主光线。
-/// 它不代表整条路径历史，是否经历过漫反射仍由 diffuse_bounces 判断。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LastScatter {
-    Camera,
-    Diffuse,
-    Delta,
-}
-
-/// 一条有界相机路径；throughput 为线性 RGB，两个事件计数彼此独立。
+/// RGB 路径状态；预算描述连续/Delta 事件，不依赖材质类型。
 pub(super) struct CameraPathState {
     pub(super) ray: Ray,
-    pub(super) last_scatter: LastScatter,
+    pub(super) last_scatter: Option<ScatterType>,
     pub(super) throughput: Vector3<f64>,
     pub(super) radiance: CameraPathComponents,
-    pub(super) diffuse_bounces: usize,
-    pub(super) glass_events: usize,
-    pub(super) max_diffuse_bounces: usize,
+    pub(super) path_depth: usize,
+    pub(super) has_non_delta_vertex: bool,
+    pub(super) non_delta_bounces: usize,
+    pub(super) max_non_delta_bounces: usize,
 }
-
 impl CameraPathState {
-    pub(super) fn new(ray: Ray, max_diffuse_bounces: usize) -> Self {
+    pub(super) fn new(ray: Ray, max_non_delta_bounces: usize) -> Self {
         Self {
             ray,
-            last_scatter: LastScatter::Camera,
+            last_scatter: None,
             throughput: Vector3::repeat(1.0),
             radiance: CameraPathComponents::default(),
-            diffuse_bounces: 0,
-            glass_events: 0,
-            max_diffuse_bounces,
+            path_depth: 0,
+            has_non_delta_vertex: false,
+            non_delta_bounces: 0,
+            max_non_delta_bounces,
         }
     }
+    pub(super) fn delta_events(&self) -> usize {
+        self.path_depth - self.non_delta_bounces
+    }
 
-    /// 共用吞吐量和事件更新；返回 false 表示零吞吐量终止，不再发出射线。
-    /// 调用者负责采样、构造下一条 Ray，并在成功后统一写回 ray。
     pub(super) fn apply_scatter(
         &mut self,
-        scatter: LastScatter,
+        scatter: ScatterType,
         weight: Vector3<f64>,
     ) -> Result<bool, &'static str> {
+        if !weight.iter().all(|v| v.is_finite() && *v >= 0.0) {
+            return Err("BSDF 采样权重必须有限且非负");
+        }
         self.throughput = self.throughput.component_mul(&weight);
-        match scatter {
-            LastScatter::Delta => {
-                // 玻璃计数记录已采样事件，零权重也计一次；不消费漫反射预算。
-                self.glass_events += 1;
-                self.last_scatter = scatter;
-                if !self.throughput.iter().all(|value| value.is_finite()) {
-                    return Err("玻璃路径吞吐量计算溢出");
-                }
+        if !self.throughput.iter().all(|v| v.is_finite()) {
+            return Err("路径吞吐量计算溢出");
+        }
+        if scatter.is_delta() || self.throughput != Vector3::zeros() {
+            self.path_depth += 1;
+            self.last_scatter = Some(scatter);
+            if !scatter.is_delta() {
+                self.non_delta_bounces += 1;
             }
-            LastScatter::Diffuse => {}
-            LastScatter::Camera => unreachable!("主光线发射不是材质散射"),
         }
-        if self.throughput == Vector3::zeros() {
-            return Ok(false);
-        }
-        if scatter == LastScatter::Diffuse {
-            // 漫反射计数记录非零吞吐量的续追连接，不消费玻璃预算。
-            self.diffuse_bounces += 1;
-            self.last_scatter = scatter;
-        }
-        Ok(true)
+        Ok(self.throughput != Vector3::zeros())
     }
 }

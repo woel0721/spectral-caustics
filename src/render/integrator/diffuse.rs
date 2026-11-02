@@ -5,11 +5,11 @@ use super::{
     environment::environment_lighting,
     ground::{GroundLighting, direct_ground_irradiance, lambertian_radiance},
     offset_ray_origin,
-    types::{CameraPathState, DiffuseRay},
+    types::{CameraPathState, ScatterRay},
 };
 use crate::{
     geometry::{hit::Hit, ray::Ray},
-    material::{BsdfValue, EvaluateMode, Material, MaterialSample, unit_vector},
+    material::{Material, unit_vector},
     render::utils::xyz_to_linear_srgb,
     scene::Scene,
 };
@@ -23,7 +23,7 @@ pub(super) fn russian_roulette(
     state: &mut CameraPathState,
     rng: &mut dyn rand::RngCore,
 ) -> Result<bool, Box<dyn Error>> {
-    if state.diffuse_bounces < 3 || state.diffuse_bounces >= state.max_diffuse_bounces {
+    if state.non_delta_bounces < 3 || state.non_delta_bounces >= state.max_non_delta_bounces {
         return Ok(true);
     }
     if !state.throughput.iter().all(|v| v.is_finite() && *v >= 0.0) {
@@ -68,54 +68,47 @@ pub(super) fn secondary_direct_lighting(
     Ok((direct + environment) * scale)
 }
 
-/// A 的 RGB 吞吐量为 f_r*cos/pdf，并且仅乘一次 A 的棋盘格反射率。
-pub(super) fn sample_diffuse_ray(
+/// 所有事件统一使用材质返回的权重；不在积分器中再次计算 f*cos/pdf。
+pub(super) fn sample_scatter_ray(
     scene: &Scene,
     hit: &Hit,
     material: &dyn Material,
     wo: Vector3<f64>,
     rng: &mut dyn rand::RngCore,
-) -> Result<Option<DiffuseRay>, Box<dyn Error>> {
-    if !material.is_lambertian() || material.is_delta() {
-        return Ok(None);
-    }
-    let normal = unit_vector(hit.normal).ok_or("漫反射采样法线无效")?;
-    let wo = unit_vector(wo).ok_or("漫反射采样出射方向无效")?;
-    if normal.dot(&wo) <= 0.0 {
-        return Ok(None);
-    }
+) -> Result<Option<ScatterRay>, Box<dyn Error>> {
+    let normal = unit_vector(hit.normal).ok_or("BSDF 采样法线无效")?;
     let Some(sample) = material.sample(wo, normal, rng) else {
         return Ok(None);
     };
-    let MaterialSample::Continuous { wi } = sample else {
-        return Err("Lambertian 采样必须返回连续方向".into());
-    };
-    let wi = unit_vector(wi).ok_or("漫反射采样方向无效")?;
-    let cosine = normal.dot(&wi).clamp(0.0, 1.0);
-    if cosine == 0.0 {
+    let wi = unit_vector(sample.wi).ok_or("BSDF 采样方向无效")?;
+    if sample.event.is_delta() != sample.pdf.is_none()
+        || sample.pdf.is_some_and(|p| !p.is_finite() || p <= 0.0)
+        || !sample.weight.iter().all(|v| v.is_finite() && *v >= 0.0)
+    {
+        return Err("BSDF 采样权重、事件或立体角 PDF 无效".into());
+    }
+    if sample.event.is_delta() && !material.has_delta()
+        || !sample.event.is_delta() && !material.has_non_delta()
+    {
+        return Err("BSDF 采样事件与声明的分量不一致".into());
+    }
+    // 当前连续材质均为单面反射；背面/切线方向是零贡献，不补采。
+    if !sample.event.is_delta() && (normal.dot(&wi) <= 0.0 || normal.dot(&wo) <= 0.0) {
         return Ok(None);
-    }
-    let pdf = material.pdf(wi, wo, normal);
-    if !pdf.is_finite() || pdf <= 0.0 {
-        return Err("漫反射采样 PDF 必须有限且为正".into());
-    }
-    let BsdfValue::Rgb(bsdf) = material.evaluate(wi, wo, normal, EvaluateMode::Rgb) else {
-        return Err("漫反射 RGB 求值必须返回 RGB BSDF".into());
-    };
-    if bsdf.iter().any(|v| !v.is_finite() || *v < 0.0) {
-        return Err("漫反射 BSDF 必须有限且非负".into());
     }
     let scale = scene
         .ground_reflectance_scale(hit)
-        .ok_or("漫反射棋盘格坐标无效")?;
-    let throughput = bsdf * (cosine / pdf) * scale;
-    if throughput.iter().any(|v| !v.is_finite() || *v < 0.0) {
-        return Err("漫反射吞吐量计算溢出".into());
-    }
-    if throughput == Vector3::zeros() {
+        .ok_or("棋盘格坐标无效")?;
+    let throughput = sample.weight * scale;
+    if throughput == Vector3::zeros() && !sample.event.is_delta() {
         return Ok(None);
     }
-    let origin = offset_ray_origin(hit.coords, normal, 1.0);
-    let ray = Ray::new(origin, wi).ok_or("漫反射射线起点或方向无效")?;
-    Ok(Some(DiffuseRay { ray, throughput }))
+    let side = if wi.dot(&normal) >= 0.0 { 1.0 } else { -1.0 };
+    let ray = Ray::new(offset_ray_origin(hit.coords, normal, side), wi)
+        .ok_or("BSDF 射线起点或方向无效")?;
+    Ok(Some(ScatterRay {
+        ray,
+        throughput,
+        event: sample.event,
+    }))
 }

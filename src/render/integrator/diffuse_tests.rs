@@ -1,11 +1,11 @@
 //! Lambertian sampling and independent two-plane radiometric references.
 use super::*;
 use super::{
-    diffuse::sample_diffuse_ray,
+    diffuse::sample_scatter_ray,
     environment::environment_lighting,
     ground::{GroundLighting, bind_spectral_ground_lighting},
     test_support::evaluate_path,
-    types::{CameraPathRngs, DiffuseRay},
+    types::{CameraPathRngs, ScatterRay},
 };
 use crate::{
     config::sceneconfig::EnvironmentMisHeuristic,
@@ -13,7 +13,7 @@ use crate::{
         hit::Hit,
         ray::{INTERSECTION_EPSILON, PARALLEL_EPSILON, Ray},
     },
-    material::{BsdfValue, EvaluateMode, Material, MaterialSample},
+    material::{BsdfSample, BsdfValue, EvaluateMode, Material},
     render::{
         caustics::SpectralLighting,
         framebuffer::Framebuffer,
@@ -32,7 +32,7 @@ use crate::{
         sceneconfig::{CheckerboardConfig, EnvironmentConfig},
     },
     geometry::{ground::Ground, object::Hittable},
-    material::{GlassEvent, GlassSample, dielectric::Dielectric, lambertian::Lambertian},
+    material::{ScatterType, dielectric::Dielectric, lambertian::Lambertian},
     scene::{Checkerboard, Environment},
 };
 use rand::RngCore;
@@ -188,7 +188,9 @@ fn cosine_sample_rgb_weight_and_offset_are_correct() {
     );
     let hit = first_hit(&scene);
     let mat = scene.material(hit.material_id.unwrap()).unwrap();
-    let DiffuseRay { ray, throughput: t } = sample_diffuse_ray(
+    let ScatterRay {
+        ray, throughput: t, ..
+    } = sample_scatter_ray(
         &scene,
         &hit,
         mat,
@@ -303,7 +305,7 @@ impl Material for Unsupported {
         _: Vector3<f64>,
         _: EvaluateMode,
     ) -> BsdfValue {
-        panic!("unsupported secondary must stop")
+        BsdfValue::Rgb(Vector3::zeros())
     }
 }
 
@@ -353,7 +355,7 @@ fn secondary_sun_shadow_and_primary_back_face_are_zero() {
     let hit = first_hit(&scene);
     let mut rng = SequenceRng::new(&[]);
     assert!(
-        sample_diffuse_ray(
+        sample_scatter_ray(
             &scene,
             &hit,
             scene.material(hit.material_id.unwrap()).unwrap(),
@@ -366,25 +368,10 @@ fn secondary_sun_shadow_and_primary_back_face_are_zero() {
     assert_eq!(rng.draws, 0);
 }
 
-struct Controlled {
-    sample: Option<MaterialSample>,
-    pdf: f64,
-    bsdf: BsdfValue,
-}
+struct Controlled(Option<BsdfSample>);
 impl Material for Controlled {
-    fn is_lambertian(&self) -> bool {
-        true
-    }
-    fn sample(
-        &self,
-        _: Vector3<f64>,
-        _: Vector3<f64>,
-        _: &mut dyn RngCore,
-    ) -> Option<MaterialSample> {
-        self.sample
-    }
-    fn pdf(&self, _: Vector3<f64>, _: Vector3<f64>, _: Vector3<f64>) -> f64 {
-        self.pdf
+    fn sample(&self, _: Vector3<f64>, _: Vector3<f64>, _: &mut dyn RngCore) -> Option<BsdfSample> {
+        self.0
     }
     fn evaluate(
         &self,
@@ -393,7 +380,7 @@ impl Material for Controlled {
         _: Vector3<f64>,
         _: EvaluateMode,
     ) -> BsdfValue {
-        self.bsdf
+        panic!("continuation must use sample.weight without re-evaluating BSDF");
     }
 }
 #[test]
@@ -403,79 +390,93 @@ fn invalid_diffuse_samples_fail_explicitly_or_terminate() {
         normal: Vector3::z(),
         ..Default::default()
     };
-    let valid = || Controlled {
-        sample: Some(MaterialSample::Continuous { wi: Vector3::z() }),
-        pdf: 1.0 / PI,
-        bsdf: BsdfValue::Rgb(Vector3::repeat(0.8 / PI)),
+    let valid = BsdfSample {
+        wi: Vector3::z(),
+        weight: Vector3::new(0.2, 0.5, 0.8),
+        pdf: Some(1.0 / PI),
+        event: ScatterType::DiffuseReflection,
     };
-    let run = |m: &Controlled, h: &Hit| {
-        sample_diffuse_ray(&scene, h, m, Vector3::z(), &mut SequenceRng::new(&[]))
+    let run = |sample, hit: &Hit| {
+        sample_scatter_ray(
+            &scene,
+            hit,
+            &Controlled(sample),
+            Vector3::z(),
+            &mut SequenceRng::new(&[]),
+        )
     };
-    for pdf in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MIN_POSITIVE * 0.01] {
-        let mut mat = valid();
-        mat.pdf = pdf;
-        if pdf > 0.0 {
-            mat.bsdf = BsdfValue::Rgb(Vector3::repeat(f64::MAX));
-        }
-        assert!(run(&mat, &hit).is_err());
-    }
-    for bsdf in [
-        BsdfValue::Rgb(Vector3::repeat(-1.0)),
-        BsdfValue::Rgb(Vector3::repeat(f64::NAN)),
-        BsdfValue::Rgb(Vector3::repeat(f64::INFINITY)),
-        BsdfValue::Spectral(1.0),
+    let result = run(Some(valid), &hit).unwrap().unwrap();
+    close(result.throughput, valid.weight);
+    for pdf in [
+        None,
+        Some(0.0),
+        Some(-1.0),
+        Some(f64::NAN),
+        Some(f64::INFINITY),
     ] {
-        let mut mat = valid();
-        mat.bsdf = bsdf;
-        assert!(run(&mat, &hit).is_err());
+        assert!(run(Some(BsdfSample { pdf, ..valid }), &hit).is_err());
+    }
+    for weight in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            run(
+                Some(BsdfSample {
+                    weight: Vector3::repeat(weight),
+                    ..valid
+                }),
+                &hit
+            )
+            .is_err()
+        );
     }
     for wi in [
         Vector3::zeros(),
         Vector3::repeat(f64::NAN),
         Vector3::repeat(f64::INFINITY),
     ] {
-        let mut mat = valid();
-        mat.sample = Some(MaterialSample::Continuous { wi });
-        assert!(run(&mat, &hit).is_err());
+        assert!(run(Some(BsdfSample { wi, ..valid }), &hit).is_err());
     }
     for wi in [-Vector3::z(), Vector3::x()] {
-        let mut mat = valid();
-        mat.sample = Some(MaterialSample::Continuous { wi });
-        assert!(run(&mat, &hit).unwrap().is_none());
+        assert!(
+            run(Some(BsdfSample { wi, ..valid }), &hit)
+                .unwrap()
+                .is_none()
+        );
     }
-    let mut mat = valid();
-    mat.sample = None;
-    assert!(run(&mat, &hit).unwrap().is_none());
-    mat.sample = Some(MaterialSample::Glass(GlassSample {
-        wi: Vector3::z(),
-        event: GlassEvent::Reflection,
-        probability: 1.0,
-        weight: 1.0,
-    }));
-    assert!(run(&mat, &hit).is_err());
-    mat = valid();
-    mat.bsdf = BsdfValue::Rgb(Vector3::zeros());
-    assert!(run(&mat, &hit).unwrap().is_none());
+    assert!(run(None, &hit).unwrap().is_none());
     assert!(
         run(
-            &valid(),
-            &Hit {
-                normal: Vector3::zeros(),
-                ..hit
-            }
+            Some(BsdfSample {
+                weight: Vector3::zeros(),
+                ..valid
+            }),
+            &hit
         )
-        .is_err()
+        .unwrap()
+        .is_none()
     );
     assert!(
         run(
-            &valid(),
-            &Hit {
-                coords: Vector3::repeat(f64::NAN),
-                ..hit
-            }
+            Some(BsdfSample {
+                event: ScatterType::SpecularReflection,
+                pdf: None,
+                ..valid
+            }),
+            &hit
         )
         .is_err()
     );
+    for bad_hit in [
+        Hit {
+            normal: Vector3::zeros(),
+            ..hit
+        },
+        Hit {
+            coords: Vector3::repeat(f64::NAN),
+            ..hit
+        },
+    ] {
+        assert!(run(Some(valid), &bad_hit).is_err());
+    }
 }
 
 #[test]
@@ -577,9 +578,6 @@ struct CountingLambertian {
     count: Arc<AtomicUsize>,
 }
 impl Material for CountingLambertian {
-    fn is_lambertian(&self) -> bool {
-        true
-    }
     fn evaluate(
         &self,
         wi: Vector3<f64>,
@@ -597,7 +595,7 @@ impl Material for CountingLambertian {
         wo: Vector3<f64>,
         n: Vector3<f64>,
         rng: &mut dyn RngCore,
-    ) -> Option<MaterialSample> {
+    ) -> Option<BsdfSample> {
         self.count.fetch_add(1, Ordering::Relaxed);
         self.mat.sample(wo, n, rng)
     }

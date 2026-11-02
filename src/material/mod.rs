@@ -2,8 +2,7 @@
 
 pub mod dielectric;
 pub mod lambertian;
-
-pub use dielectric::{GlassEvent, GlassSample};
+pub mod mirror;
 
 use crate::config::materialconfig::MaterialConfig;
 use dielectric::Dielectric;
@@ -36,23 +35,31 @@ impl BsdfValue {
     }
 }
 
-/// 一次材质采样的统一结果，区分连续方向与玻璃的离散事件。
-#[derive(Debug, Clone, Copy)]
-pub enum MaterialSample {
-    /// 连续方向按立体角分布采样；BSDF 和密度由 evaluate、pdf 查询。
-    Continuous { wi: Vector3<f64> },
-    /// 理想玻璃的离散事件，包含已计算好的吞吐量权重。
-    Glass(GlassSample),
+/// 采样到的散射事件，描述事件本身而非具体材质。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScatterType {
+    DiffuseReflection,
+    GlossyReflection,
+    SpecularReflection,
+    SpecularTransmission,
+}
+impl ScatterType {
+    pub fn is_delta(self) -> bool {
+        matches!(self, Self::SpecularReflection | Self::SpecularTransmission)
+    }
 }
 
-impl MaterialSample {
+/// RGB radiance 传输的一次完整 BSDF 采样。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BsdfSample {
     /// 从交点向外指的单位世界方向。
-    pub fn wi(&self) -> Vector3<f64> {
-        match self {
-            Self::Continuous { wi } => *wi,
-            Self::Glass(sample) => sample.wi,
-        }
-    }
+    pub wi: Vector3<f64>,
+    /// 连续事件为 f * |n·wi| / p；Delta 已除离散选择概率。
+    /// Dielectric 透射已包含 (eta_i/eta_t)²，调用方只乘一次。
+    pub weight: Vector3<f64>,
+    /// 相对于立体角的完整采样密度（含混合分量选择概率）；Delta 为 None。
+    pub pdf: Option<f64>,
+    pub event: ScatterType,
 }
 
 /// 可通过 `Box<dyn Material>` 保存和并行只读访问的运行时材质。
@@ -76,22 +83,15 @@ pub trait Material: Send + Sync {
         mode: EvaluateMode,
     ) -> BsdfValue;
 
-    /// 给定已知的世界方向 wo，返回统一的方向/事件采样记录。
-    ///
-    /// wi、wo 都从交点向外指，约定同 evaluate。
-    /// rng 由调用方持有和设种子；Lambertian 使用法线正半球的余弦加权采样。
-    /// 非法 wo/normal 或切线 wo 返回 None，且不消耗随机数；Lambertian 也拒绝背面。
-    /// Lambertian 返回 Continuous，使用 evaluate * |n·wi| / pdf 更新吞吐量。
-    /// Dielectric 返回 Glass，支持两侧，normal 必须是玻璃朝外的几何法线，不能预先翻面。
-    /// Glass 中的 weight 是 radiance 吞吐量乘数，已抵消余弦与离散事件概率；
-    /// 直接乘 weight，不再乘 Fresnel、余弦或除以 probability，也不用普通 evaluate/pdf。
-    /// 默认没有采样实现。
+    /// 返回已包含 BSDF、余弦和完整采样概率的 RGB throughput weight。
+    /// wo 与 normal 必须有效；normal 保留朝外几何方向，介质自行判断内外。
+    /// 混合材质按原始概率选择事件，不能重采样被拒绝的方向。
     fn sample(
         &self,
         _wo: Vector3<f64>,
         _normal: Vector3<f64>,
         _rng: &mut dyn RngCore,
-    ) -> Option<MaterialSample> {
+    ) -> Option<BsdfSample> {
         None
     }
 
@@ -104,17 +104,22 @@ pub trait Material: Send + Sync {
         0.0
     }
 
-    /// 是否只有理想镜面/透射分量，需通过采样而非普通方向求值。
-    fn is_delta(&self) -> bool {
+    /// 是否存在可由 evaluate/pdf 处理的连续分量；混合材质可同时返回两种能力。
+    fn has_non_delta(&self) -> bool {
+        true
+    }
+    fn has_delta(&self) -> bool {
         false
     }
 
-    /// 有限深度路径只续追单面 Lambertian 表面；其他连续材质默认不参与。
-    fn is_lambertian(&self) -> bool {
-        false
+    /// 方向无关的 Lambertian RGB 反射率；仅用于无方向信息的辐照度图绑定。
+    /// 默认不支持该绑定，不能从单个方向的 BSDF 值推测材质类型。
+    fn irradiance_reflectance(&self) -> Option<Vector3<f64>> {
+        None
     }
 
-    /// 介质内部折射率；非透射材质没有此参数。
+    /// 理想双界面介质的折射率；Some 显式允许独立的玻璃光谱焦散算法。
+    /// 粗糙/其他透射模型不得借此声明兼容。
     fn ior(&self) -> Option<f64> {
         None
     }
@@ -127,6 +132,9 @@ pub fn from_config(config: &MaterialConfig) -> Result<Box<dyn Material>, String>
             Ok(Box::new(Lambertian::new(Vector3::from(*albedo))?))
         }
         MaterialConfig::Dielectric { ior } => Ok(Box::new(Dielectric::new(*ior)?)),
+        MaterialConfig::Mirror { reflectance } => {
+            Ok(Box::new(mirror::Mirror::new(Vector3::from(*reflectance))?))
+        }
     }
 }
 

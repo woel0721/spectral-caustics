@@ -4,7 +4,7 @@ use super::direct::visible_to_light;
 use crate::{
     config::sceneconfig::EnvironmentMisHeuristic,
     geometry::hit::Hit,
-    material::{BsdfValue, EvaluateMode, Material, MaterialSample, unit_vector},
+    material::{BsdfValue, EvaluateMode, Material, unit_vector},
     scene::Scene,
 };
 use nalgebra::Vector3;
@@ -41,7 +41,7 @@ pub(super) fn environment_lighting(
     let Some(environment) = &scene.environment else {
         return Ok(Vector3::zeros());
     };
-    if material.is_delta() {
+    if !material.has_non_delta() {
         return Ok(Vector3::zeros());
     }
     if scene.environment_samples == 0 {
@@ -73,10 +73,14 @@ pub(super) fn environment_lighting(
             let Some(sample) = material.sample(wo, normal, rng) else {
                 continue;
             };
-            let MaterialSample::Continuous { wi } = sample else {
-                return Err("非 delta 材质的环境采样必须返回连续方向".into());
-            };
-            wi
+            if sample.event.is_delta() {
+                // 混合材质中此配额抽到 Delta：局部连续 NEE 不估计它，也不重采样。
+                continue;
+            }
+            if sample.pdf.is_none_or(|p| !p.is_finite() || p <= 0.0) {
+                return Err("环境 BSDF 样本的立体角 PDF 无效".into());
+            }
+            sample.wi
         } else {
             environment
                 .sample_direction(rng)

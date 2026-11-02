@@ -2,7 +2,7 @@
 use super::{
     diffuse_tests::{SequenceRng, close, sun, two_planes},
     path::trace_camera_path,
-    types::{CameraPathRngs, CameraPathState, LastScatter},
+    types::{CameraPathRngs, CameraPathState},
 };
 use crate::{
     geometry::{
@@ -56,9 +56,12 @@ fn glass_prefix_and_deep_diffuse_keep_independent_counts_and_roulette_order() {
             None,
         )
         .unwrap();
-        assert_eq!(state.glass_events, 1);
-        assert_eq!(state.diffuse_bounces, if survive { 5 } else { 3 });
-        assert_eq!(state.last_scatter, LastScatter::Diffuse);
+        assert_eq!(state.delta_events(), 1);
+        assert_eq!(state.non_delta_bounces, if survive { 5 } else { 3 });
+        assert_eq!(
+            state.last_scatter,
+            Some(crate::material::ScatterType::DiffuseReflection)
+        );
         assert_eq!(camera.draws, 1);
         assert_eq!(environment.draws, 0);
         assert_eq!(diffuse.draws, if survive { 12 } else { 7 });
@@ -106,9 +109,12 @@ fn diffuse_to_glass_continues_with_an_independent_glass_event() {
         None,
     )
     .unwrap();
-    assert_eq!(state.diffuse_bounces, 2);
-    assert_eq!(state.glass_events, 1);
-    assert_eq!(state.last_scatter, LastScatter::Delta);
+    assert_eq!(state.non_delta_bounces, 2);
+    assert_eq!(state.delta_events(), 1);
+    assert_eq!(
+        state.last_scatter,
+        Some(crate::material::ScatterType::SpecularTransmission)
+    );
     assert_eq!(camera.draws, 0);
     assert_eq!(environment.draws, 0);
     assert_eq!(diffuse.draws, 5);
@@ -117,13 +123,10 @@ fn diffuse_to_glass_continues_with_an_independent_glass_event() {
 
 #[test]
 fn first_surface_is_shaded_before_continuation_sampling() {
-    use crate::material::{BsdfValue, EvaluateMode, Material, MaterialSample};
+    use crate::material::{BsdfSample, BsdfValue, EvaluateMode, Material};
     use rand::RngCore;
     struct InvalidDirect;
     impl Material for InvalidDirect {
-        fn is_lambertian(&self) -> bool {
-            true
-        }
         fn evaluate(
             &self,
             _: Vector3<f64>,
@@ -138,7 +141,7 @@ fn first_surface_is_shaded_before_continuation_sampling() {
             _: Vector3<f64>,
             _: Vector3<f64>,
             _: &mut dyn RngCore,
-        ) -> Option<MaterialSample> {
+        ) -> Option<BsdfSample> {
             panic!("a failed first-surface evaluation must not issue a continuation");
         }
     }
@@ -164,8 +167,8 @@ fn first_surface_is_shaded_before_continuation_sampling() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("BSDF"));
-    assert_eq!(state.diffuse_bounces, 0);
-    assert_eq!(state.last_scatter, LastScatter::Camera);
+    assert_eq!(state.non_delta_bounces, 0);
+    assert_eq!(state.last_scatter, None);
     assert_eq!(diffuse.draws, 0);
 }
 
@@ -190,7 +193,7 @@ fn event_state_tracks_camera_delta_and_diffuse_with_independent_budgets() {
             }
             let mut state =
                 CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), depth);
-            assert_eq!(state.last_scatter, LastScatter::Camera);
+            assert_eq!(state.last_scatter, None);
             let mut camera = SequenceRng::new(if glass_prefix { &[0.9] } else { &[] });
             let mut environment = SequenceRng::new(&[]);
             // Fourth diffuse connection is issued only after a surviving RR draw.
@@ -209,16 +212,16 @@ fn event_state_tracks_camera_delta_and_diffuse_with_independent_budgets() {
                 None,
             )
             .unwrap();
-            assert_eq!(state.glass_events, usize::from(glass_prefix));
-            assert_eq!(state.diffuse_bounces, depth);
+            assert_eq!(state.delta_events(), usize::from(glass_prefix));
+            assert_eq!(state.non_delta_bounces, depth);
             assert_eq!(
                 state.last_scatter,
                 if depth > 0 {
-                    LastScatter::Diffuse
+                    Some(crate::material::ScatterType::DiffuseReflection)
                 } else if glass_prefix {
-                    LastScatter::Delta
+                    Some(crate::material::ScatterType::SpecularTransmission)
                 } else {
-                    LastScatter::Camera
+                    None
                 }
             );
             assert_eq!(camera.draws, usize::from(glass_prefix));
@@ -232,18 +235,27 @@ fn event_state_tracks_camera_delta_and_diffuse_with_independent_budgets() {
 #[test]
 fn glass_event_limit_does_not_consume_the_diffuse_budget() {
     use crate::{geometry::ground::Ground, scene::Scene};
-    for count in [8, 9] {
+    for count in [
+        super::path::MAX_DELTA_EVENTS,
+        super::path::MAX_DELTA_EVENTS + 1,
+    ] {
         let mut scene = Scene::new();
         scene.environment = None;
         scene.max_diffuse_bounces = 4;
         for height in 1..=count {
             scene.add_with_material(
-                Box::new(Ground::new(f64::from(height)).unwrap()),
+                Box::new(Ground::new(height as f64).unwrap()),
                 Box::new(Dielectric::new(1.0).unwrap()),
             );
         }
-        let mut state =
-            CameraPathState::new(Ray::new(Vector3::z() * 12.0, -Vector3::z()).unwrap(), 4);
+        let mut state = CameraPathState::new(
+            Ray::new(
+                Vector3::z() * (super::path::MAX_DELTA_EVENTS as f64 + 4.0),
+                -Vector3::z(),
+            )
+            .unwrap(),
+            4,
+        );
         let mut camera = SequenceRng::new(&[]); // IOR=1 transmits deterministically.
         let mut environment = SequenceRng::new(&[]);
         let mut diffuse = SequenceRng::new(&[]);
@@ -260,12 +272,18 @@ fn glass_event_limit_does_not_consume_the_diffuse_budget() {
             None,
         )
         .unwrap();
-        assert_eq!(state.glass_events, 8);
-        assert_eq!(state.diffuse_bounces, 0);
-        assert_eq!(state.last_scatter, LastScatter::Delta);
+        assert_eq!(
+            state.delta_events(),
+            crate::render::integrator::path::MAX_DELTA_EVENTS
+        );
+        assert_eq!(state.non_delta_bounces, 0);
+        assert_eq!(
+            state.last_scatter,
+            Some(crate::material::ScatterType::SpecularTransmission)
+        );
         close(
             state.radiance.direct,
-            if count == 8 {
+            if count == crate::render::integrator::path::MAX_DELTA_EVENTS {
                 scene.background_color
             } else {
                 Vector3::zeros()
@@ -321,9 +339,12 @@ fn diffuse_glass_diffuse_crosses_two_fresnel_interfaces_and_preserves_rgb_weight
     )
     .unwrap();
 
-    assert_eq!(state.diffuse_bounces, 1);
-    assert_eq!(state.glass_events, 2);
-    assert_eq!(state.last_scatter, LastScatter::Delta);
+    assert_eq!(state.non_delta_bounces, 1);
+    assert_eq!(state.delta_events(), 2);
+    assert_eq!(
+        state.last_scatter,
+        Some(crate::material::ScatterType::SpecularTransmission)
+    );
     assert_eq!((camera.draws, environment.draws, diffuse.draws), (0, 0, 4));
     // Lambertian A contributes albedo A; entering and leaving the slab
     // multiply by (1/1.5)^2 and (1.5/1)^2, canceling in radiance transport.
@@ -341,12 +362,17 @@ fn diffuse_glass_diffuse_crosses_two_fresnel_interfaces_and_preserves_rgb_weight
 }
 
 #[test]
-fn glass_budget_after_diffuse_still_stops_at_the_ninth_interface() {
+fn glass_budget_after_diffuse_still_respects_the_delta_event_limit() {
     let a = Vector3::new(0.8, 0.5, 0.2);
     let b = Vector3::new(0.4, 0.7, 0.9);
     let (wi, light) = sun();
     let k = light * wi.z / std::f64::consts::PI;
-    for (prefix, total) in [(false, 8_usize), (false, 9), (true, 8), (true, 9)] {
+    for (prefix, total) in [
+        (false, super::path::MAX_DELTA_EVENTS),
+        (false, super::path::MAX_DELTA_EVENTS + 1),
+        (true, super::path::MAX_DELTA_EVENTS),
+        (true, super::path::MAX_DELTA_EVENTS + 1),
+    ] {
         let mut scene = two_planes(a, b);
         scene.max_diffuse_bounces = 1;
         if prefix {
@@ -363,7 +389,7 @@ fn glass_budget_after_diffuse_still_stops_at_the_ninth_interface() {
             );
         }
         for i in 1..=total - usize::from(prefix) {
-            let x = i as f64 / 10.0;
+            let x = i as f64 / (2.0 * super::path::MAX_DELTA_EVENTS as f64);
             scene.add_with_material(
                 Box::new(glass_patch(x, x * 3.0_f64.sqrt(), false)),
                 Box::new(Dielectric::new(1.0).unwrap()),
@@ -387,12 +413,18 @@ fn glass_budget_after_diffuse_still_stops_at_the_ninth_interface() {
             None,
         )
         .unwrap();
-        assert_eq!(state.diffuse_bounces, 1);
-        assert_eq!(state.glass_events, 8);
-        assert_eq!(state.last_scatter, LastScatter::Delta);
+        assert_eq!(state.non_delta_bounces, 1);
+        assert_eq!(
+            state.delta_events(),
+            crate::render::integrator::path::MAX_DELTA_EVENTS
+        );
+        assert_eq!(
+            state.last_scatter,
+            Some(crate::material::ScatterType::SpecularTransmission)
+        );
         assert_eq!((camera.draws, environment.draws, diffuse.draws), (0, 0, 2));
         close(state.throughput, a);
-        let expected = if total == 8 {
+        let expected = if total == crate::render::integrator::path::MAX_DELTA_EVENTS {
             a + a.component_mul(&b)
         } else {
             a
@@ -430,8 +462,11 @@ fn diffuse_glass_reflection_keeps_unit_weight_and_excludes_escape_background() {
         None,
     )
     .unwrap();
-    assert_eq!((state.diffuse_bounces, state.glass_events), (1, 1));
-    assert_eq!(state.last_scatter, LastScatter::Delta);
+    assert_eq!((state.non_delta_bounces, state.delta_events()), (1, 1));
+    assert_eq!(
+        state.last_scatter,
+        Some(crate::material::ScatterType::SpecularReflection)
+    );
     assert_eq!((camera.draws, environment.draws, diffuse.draws), (0, 0, 3));
     close(state.throughput, a); // Reflection weight is F/F=1, with no extra Fresnel factor.
     close(
@@ -445,4 +480,59 @@ fn diffuse_glass_reflection_keeps_unit_weight_and_excludes_escape_background() {
         a * (sun().1 * sun().0.z / std::f64::consts::PI),
     );
     close(state.radiance.caustics, Vector3::zeros());
+}
+
+#[test]
+fn diffuse_mirror_escape_uses_rgb_sample_weight_once_and_keeps_rng_streams() {
+    use crate::material::mirror::Mirror;
+    let albedo = Vector3::new(0.2, 0.5, 0.8);
+    let reflectance = Vector3::new(0.9, 0.6, 0.3);
+    let sky = Vector3::new(1.2, 1.5, 2.0);
+    let mut scene = two_planes(albedo, Vector3::repeat(0.7));
+    let mut environment = crate::scene::Scene::new().environment.unwrap();
+    environment.horizon_color = sky;
+    environment.zenith_color = sky;
+    scene.environment = Some(environment);
+    scene.add_with_material(
+        Box::new(glass_patch(0.2, 0.2 * 3.0_f64.sqrt(), false)),
+        Box::new(Mirror::new(reflectance).unwrap()),
+    );
+    let mut state = CameraPathState::new(
+        crate::geometry::ray::Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(),
+        1,
+    );
+    let (mut camera, mut environment, mut continuation) = (
+        SequenceRng::new(&[]),
+        SequenceRng::new(&[0.25, 0.5]),
+        SequenceRng::new(&[0.25, 0.0]),
+    );
+    trace_camera_path(
+        &scene,
+        &mut state,
+        &mut CameraPathRngs {
+            camera: &mut camera,
+            environment: &mut environment,
+            diffuse: &mut continuation,
+        },
+        sun().0,
+        0.0,
+        None,
+    )
+    .unwrap();
+    assert_eq!(state.path_depth, 2);
+    assert_eq!(state.non_delta_bounces, 1);
+    assert_eq!(
+        state.last_scatter,
+        Some(crate::material::ScatterType::SpecularReflection)
+    );
+    close(state.throughput, albedo.component_mul(&reflectance));
+    close(
+        state.radiance.direct,
+        albedo.component_mul(&sky) + albedo.component_mul(&reflectance).component_mul(&sky),
+    );
+    close(state.radiance.caustics, Vector3::zeros());
+    assert_eq!(
+        (camera.draws, environment.draws, continuation.draws),
+        (0, 2, 2)
+    );
 }

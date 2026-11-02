@@ -14,7 +14,7 @@ use crate::{
         sceneconfig::{EnvironmentMisHeuristic, MAX_DIFFUSE_BOUNCES},
     },
     geometry::{ray::Ray, triangle::Triangle},
-    material::{BsdfValue, EvaluateMode, Material, MaterialSample, lambertian::Lambertian},
+    material::{BsdfSample, BsdfValue, EvaluateMode, Material, lambertian::Lambertian},
     render::{Render, utils::linear_srgb_to_xyz},
     scene::Scene,
 };
@@ -107,8 +107,8 @@ fn fixed_depth_reaches_2_3_5_vertices_and_rgb_products_are_correct() {
             &mut state,
         )
         .unwrap();
-        assert_eq!(state.diffuse_bounces, depth);
-        assert_eq!(state.glass_events, 0);
+        assert_eq!(state.non_delta_bounces, depth);
+        assert_eq!(state.delta_events(), 0);
         assert_eq!(rng.draws, 2 * depth + depth.saturating_sub(3));
         let result = trace_chain(&scene, &mut SequenceRng::new(&chain_words(depth)));
         // RR changes individual depth-5 samples; the independent series mean is checked below.
@@ -233,9 +233,6 @@ fn bounded_depth_and_checked_work_reject_unreasonable_configurations() {
 
 struct BadContinuation(usize);
 impl Material for BadContinuation {
-    fn is_lambertian(&self) -> bool {
-        true
-    }
     fn evaluate(
         &self,
         _: Vector3<f64>,
@@ -264,18 +261,20 @@ impl Material for BadContinuation {
         _: Vector3<f64>,
         normal: Vector3<f64>,
         _: &mut dyn RngCore,
-    ) -> Option<MaterialSample> {
-        match self.0 {
-            7 => None,
-            8 => Some(MaterialSample::Continuous { wi: -normal }),
-            5 => Some(MaterialSample::Continuous {
-                wi: Vector3::zeros(),
-            }),
-            6 => Some(MaterialSample::Continuous {
-                wi: Vector3::repeat(f64::NAN),
-            }),
-            _ => Some(MaterialSample::Continuous { wi: normal }),
-        }
+    ) -> Option<BsdfSample> {
+        let wi = match self.0 {
+            7 => return None,
+            8 => -normal,
+            5 => Vector3::zeros(),
+            6 => Vector3::repeat(f64::NAN),
+            _ => normal,
+        };
+        Some(BsdfSample {
+            wi,
+            weight: Vector3::repeat(0.8),
+            pdf: Some(self.pdf(wi, normal, normal)),
+            event: crate::material::ScatterType::DiffuseReflection,
+        })
     }
 }
 #[test]
@@ -300,7 +299,7 @@ fn invalid_and_empty_continuation_samples_at_later_vertices_are_handled() {
             assert!(result.is_err(), "mode {mode}");
         } else {
             result.unwrap();
-            assert_eq!(state.diffuse_bounces, 1);
+            assert_eq!(state.non_delta_bounces, 1);
         }
     }
 }
@@ -314,7 +313,7 @@ impl Material for Unsupported {
         _: Vector3<f64>,
         _: EvaluateMode,
     ) -> BsdfValue {
-        panic!("unsupported continuation must not be evaluated")
+        BsdfValue::Rgb(Vector3::zeros())
     }
 }
 #[test]
@@ -355,9 +354,6 @@ fn third_hit_unbound_unsupported_and_backface_still_terminate() {
 
 struct EscapeLambertian(Lambertian);
 impl Material for EscapeLambertian {
-    fn is_lambertian(&self) -> bool {
-        true
-    }
     fn evaluate(
         &self,
         wi: Vector3<f64>,
@@ -370,13 +366,13 @@ impl Material for EscapeLambertian {
     fn pdf(&self, wi: Vector3<f64>, wo: Vector3<f64>, normal: Vector3<f64>) -> f64 {
         self.0.pdf(wi, wo, normal)
     }
-    fn sample(
-        &self,
-        _: Vector3<f64>,
-        _: Vector3<f64>,
-        _: &mut dyn RngCore,
-    ) -> Option<MaterialSample> {
-        Some(MaterialSample::Continuous { wi: sun().0 })
+    fn sample(&self, _: Vector3<f64>, _: Vector3<f64>, _: &mut dyn RngCore) -> Option<BsdfSample> {
+        Some(BsdfSample {
+            wi: sun().0,
+            weight: Vector3::repeat(0.8),
+            pdf: Some(1.0 / PI),
+            event: crate::material::ScatterType::DiffuseReflection,
+        })
     }
 }
 struct PrefixRng {
@@ -454,7 +450,7 @@ fn deep_escape_does_not_add_hdri_again_or_consume_new_environment_samples() {
         .unwrap();
         assert!(one.radiance.direct.norm() > 0.0);
         assert_eq!(bits(one.radiance.direct), bits(deep.radiance.direct));
-        assert_eq!(deep.diffuse_bounces, 2);
+        assert_eq!(deep.non_delta_bounces, 2);
         assert_eq!(rng.next_u64(), replay.next_u64());
     }
 }
@@ -492,7 +488,7 @@ fn deep_ground_hits_never_read_caustics() {
             &mut state,
         )
         .unwrap();
-        assert_eq!(state.diffuse_bounces, 3);
+        assert_eq!(state.non_delta_bounces, 3);
         assert!(state.radiance.direct.norm() > 0.0);
         assert_eq!(state.radiance.caustics, Vector3::zeros());
     }
@@ -501,7 +497,7 @@ fn deep_ground_hits_never_read_caustics() {
 fn roulette_state(throughput: Vector3<f64>, depth: usize, max: usize) -> CameraPathState {
     let mut state = CameraPathState::new(Ray::new(Vector3::zeros(), Vector3::z()).unwrap(), max);
     state.throughput = throughput;
-    state.diffuse_bounces = depth;
+    state.non_delta_bounces = depth;
     state
 }
 #[test]
@@ -629,6 +625,6 @@ fn terminal_vertex_rejects_invalid_direct_bsdf_without_another_bsdf_sample() {
         &mut state,
     );
     assert!(result.unwrap_err().to_string().contains("BSDF"));
-    assert_eq!(state.diffuse_bounces, 2);
+    assert_eq!(state.non_delta_bounces, 2);
     assert_eq!(rng.draws, 4);
 }

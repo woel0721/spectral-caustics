@@ -135,7 +135,7 @@ fn zero_pdf_missing_and_zero_contribution_samples_do_not_reallocate_quotas() {
             wo: Vector3<f64>,
             normal: Vector3<f64>,
             rng: &mut dyn RngCore,
-        ) -> Option<MaterialSample> {
+        ) -> Option<BsdfSample> {
             let sample = self.0.sample(wo, normal, rng);
             (self.0.samples.load(Ordering::Relaxed) > 1)
                 .then_some(sample)

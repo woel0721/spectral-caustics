@@ -15,12 +15,12 @@ use crate::{
         sceneconfig::{EnvironmentConfig, ObjectConfig, ParallelLightConfig, SceneConfig},
     },
     geometry::{ground::Ground, hit::Hit, object::Hittable, prism::Prism, triangle::Triangle},
-    material::{GlassEvent, GlassSample, Material, dielectric::Dielectric, lambertian::Lambertian},
+    material::{Material, ScatterType, dielectric::Dielectric, lambertian::Lambertian},
     render::utils::xyz_to_linear_srgb,
 };
 use crate::{
     geometry::ray::Ray,
-    material::{BsdfValue, EvaluateMode, MaterialSample},
+    material::{BsdfSample, BsdfValue, EvaluateMode},
     render::{SpectralLighting, framebuffer::Framebuffer, utils::linear_srgb_to_xyz},
     scene::{GroundReceiver, Scene},
 };
@@ -234,7 +234,7 @@ fn opaque_visibility_blocks_sky_below_a_glass_plane() {
     scene.environment = Scene::new().environment;
     scene.add_with_material(
         Box::new(Ground::new(1.0).unwrap()),
-        Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.25, 0.5)))),
+        Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.5)))),
     );
     let lighting = split_ground_map(&scene);
     let images = render_camera_glass_components(&scene, &lighting, 3, 2, 8, 42).unwrap();
@@ -265,7 +265,7 @@ fn glass_misses_use_the_final_direction_for_sky_gradient() {
         scene.objects.clear();
         scene.add_with_material(
             Box::new(Ground::new(1.0).unwrap()),
-            Box::new(TestGlass(Some(transmission(direction, 0.5, weight)))),
+            Box::new(TestGlass(Some(transmission(direction, weight)))),
         );
         assert!((trace_center_pixel(&scene, 42) - expected * weight).norm() < 1e-12);
     }
@@ -285,7 +285,7 @@ fn checkerboard_is_applied_once_after_glass_with_sky_and_caustics() {
     .unwrap();
     scene.add_with_material(
         Box::new(Ground::new(1.0).unwrap()),
-        Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.25, 0.5)))),
+        Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.5)))),
     );
     let mut lighting = split_ground_map(&scene);
     let e = Vector3::new(0.1, 0.2, 0.4);
@@ -355,7 +355,7 @@ fn camera_components_trace_once_and_keep_glass_and_environment_rng_independent()
 fn check_camera_components_rng() {
     use std::sync::{Arc, Mutex};
 
-    type Event = (Vector3<f64>, Vector3<f64>, GlassEvent, f64);
+    type Event = (Vector3<f64>, Vector3<f64>, ScatterType, Vector3<f64>);
     struct RecordingGlass {
         glass: Dielectric,
         events: Arc<Mutex<Vec<Event>>>,
@@ -375,18 +375,19 @@ fn check_camera_components_rng() {
             wo: Vector3<f64>,
             normal: Vector3<f64>,
             rng: &mut dyn rand::RngCore,
-        ) -> Option<MaterialSample> {
+        ) -> Option<BsdfSample> {
             let sample = self.glass.sample(wo, normal, rng)?;
-            let MaterialSample::Glass(glass) = sample else {
-                unreachable!()
-            };
+            let glass = sample;
             self.events
                 .lock()
                 .unwrap()
                 .push((wo, glass.wi, glass.event, glass.weight));
             Some(sample)
         }
-        fn is_delta(&self) -> bool {
+        fn has_non_delta(&self) -> bool {
+            false
+        }
+        fn has_delta(&self) -> bool {
             true
         }
     }
@@ -411,12 +412,12 @@ fn check_camera_components_rng() {
     assert!(
         reference_events
             .iter()
-            .any(|e| e.2 == GlassEvent::Reflection)
+            .any(|e| e.2 == ScatterType::SpecularReflection)
     );
     assert!(
         reference_events
             .iter()
-            .any(|e| e.2 == GlassEvent::Transmission)
+            .any(|e| e.2 == ScatterType::SpecularTransmission)
     );
     for environment_samples in [1, 7] {
         scene.environment_samples = environment_samples;
@@ -545,7 +546,7 @@ fn glass_shadows_only_direct_and_camera_throughput_still_weights_caustics() {
     let mut scene = neutral_ground_scene(0.8);
     scene.add_with_material(
         Box::new(Ground::new(1.0).unwrap()),
-        Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.25, 0.5)))),
+        Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.5)))),
     );
     let mut lighting = split_ground_map(&scene);
     // 给地面一个已知的焦散 E；无限玻璃面会遮挡每一条向上的 shadow ray。
@@ -698,7 +699,7 @@ fn glass_background_scene() -> Scene {
     scene
 }
 
-struct TestGlass(Option<MaterialSample>);
+struct TestGlass(Option<BsdfSample>);
 
 impl Material for TestGlass {
     fn evaluate(
@@ -716,22 +717,25 @@ impl Material for TestGlass {
         _wo: Vector3<f64>,
         _normal: Vector3<f64>,
         _rng: &mut dyn rand::RngCore,
-    ) -> Option<MaterialSample> {
+    ) -> Option<BsdfSample> {
         self.0
     }
 
-    fn is_delta(&self) -> bool {
+    fn has_non_delta(&self) -> bool {
+        false
+    }
+    fn has_delta(&self) -> bool {
         true
     }
 }
 
-fn transmission(wi: Vector3<f64>, probability: f64, weight: f64) -> MaterialSample {
-    MaterialSample::Glass(GlassSample {
+fn transmission(wi: Vector3<f64>, weight: f64) -> BsdfSample {
+    BsdfSample {
         wi,
-        event: GlassEvent::Transmission,
-        probability,
-        weight,
-    })
+        event: ScatterType::SpecularTransmission,
+        pdf: None,
+        weight: Vector3::repeat(weight),
+    }
 }
 
 fn trace_center_pixel(scene: &Scene, seed: u64) -> Vector3<f64> {
@@ -778,16 +782,19 @@ fn camera_spp_averages_independent_paths_and_is_reproducible() {
             _wo: Vector3<f64>,
             _normal: Vector3<f64>,
             _rng: &mut dyn rand::RngCore,
-        ) -> Option<MaterialSample> {
+        ) -> Option<BsdfSample> {
             let index = self.0.fetch_add(1, Ordering::Relaxed);
-            Some(MaterialSample::Glass(GlassSample {
+            Some(BsdfSample {
                 wi: Vector3::z(),
-                event: GlassEvent::Reflection,
-                probability: 0.5,
-                weight: if index & 1 == 0 { 0.25 } else { 1.75 },
-            }))
+                event: ScatterType::SpecularReflection,
+                pdf: None,
+                weight: Vector3::repeat(if index & 1 == 0 { 0.25 } else { 1.75 }),
+            })
         }
-        fn is_delta(&self) -> bool {
+        fn has_non_delta(&self) -> bool {
+            false
+        }
+        fn has_delta(&self) -> bool {
             true
         }
     }
@@ -916,16 +923,13 @@ fn glass_renderer_weights_background_on_both_sides_and_repeats_seeded_paths() {
         let mut saw_transmission = false;
         for seed in 0..64 {
             let wo = -scene.camera.ray_for_pixel(0, 0, 1, 1).unwrap().direction;
-            let MaterialSample::Glass(sample) = glass
+            let sample = glass
                 .sample(wo, Vector3::z(), &mut StdRng::seed_from_u64(seed))
-                .unwrap()
-            else {
-                panic!("必须是玻璃采样");
-            };
-            saw_reflection |= sample.event == GlassEvent::Reflection;
-            saw_transmission |= sample.event == GlassEvent::Transmission;
+                .unwrap();
+            saw_reflection |= sample.event == ScatterType::SpecularReflection;
+            saw_transmission |= sample.event == ScatterType::SpecularTransmission;
             let rgb = trace_center_pixel(&scene, seed);
-            assert!((rgb - scene.background_color * sample.weight).norm() < 1e-12);
+            assert!((rgb - scene.background_color.component_mul(&sample.weight)).norm() < 1e-12);
         }
         assert!(saw_reflection);
         if position[0] == 0.0 {
@@ -984,7 +988,7 @@ fn glass_renderer_reaches_diffuse_light_and_retains_binary_shadows() {
             )
             .unwrap(),
         ),
-        Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.25, 0.5)))),
+        Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.5)))),
     );
     // 斜向 shadow ray 绕过有限玻璃面；概率与余弦不能再乘到吞吐量上。
     scene.light.direction = Vector3::new(0.8, 0.0, -0.6);
@@ -997,11 +1001,14 @@ fn glass_renderer_reaches_diffuse_light_and_retains_binary_shadows() {
 }
 
 #[test]
-fn glass_renderer_allows_eight_events_and_truncates_the_ninth_glass_hit() {
-    for count in [8, 9] {
+fn glass_renderer_respects_the_delta_event_budget() {
+    for count in [
+        super::path::MAX_DELTA_EVENTS,
+        super::path::MAX_DELTA_EVENTS + 1,
+    ] {
         let mut scene = glass_background_scene();
         scene.camera = Camera::from_config(&CameraConfig {
-            position: [0.0, 0.0, 12.0],
+            position: [0.0, 0.0, super::path::MAX_DELTA_EVENTS as f64 + 4.0],
             target: [0.0; 3],
             up: [0.0, 1.0, 0.0],
             fov_y_degrees: 45.0,
@@ -1009,11 +1016,11 @@ fn glass_renderer_allows_eight_events_and_truncates_the_ninth_glass_hit() {
         .unwrap();
         for height in 1..=count {
             scene.add_with_material(
-                Box::new(Ground::new(f64::from(height)).unwrap()),
+                Box::new(Ground::new(height as f64).unwrap()),
                 Box::new(Dielectric::new(1.0).unwrap()),
             );
         }
-        let expected = if count == 8 {
+        let expected = if count == crate::render::integrator::path::MAX_DELTA_EVENTS {
             scene.background_color
         } else {
             Vector3::zeros()
@@ -1026,7 +1033,7 @@ fn glass_renderer_allows_eight_events_and_truncates_the_ninth_glass_hit() {
 
 #[test]
 fn glass_renderer_handles_failed_samples_and_rejects_invalid_values() {
-    for sample in [None, Some(transmission(-Vector3::z(), 1.0, 0.0))] {
+    for sample in [None, Some(transmission(-Vector3::z(), 0.0))] {
         let mut scene = glass_background_scene();
         scene.add_with_material(
             Box::new(Ground::new(1.0).unwrap()),
@@ -1037,20 +1044,24 @@ fn glass_renderer_handles_failed_samples_and_rejects_invalid_values() {
             vec![Vector3::zeros()]
         );
     }
-    let mut invalid = vec![MaterialSample::Continuous { wi: -Vector3::z() }];
+    let mut invalid = vec![BsdfSample {
+        wi: -Vector3::z(),
+        weight: Vector3::repeat(0.8),
+        pdf: Some(1.0 / PI),
+        event: crate::material::ScatterType::DiffuseReflection,
+    }];
     for value in [f64::NAN, f64::INFINITY, -1.0] {
-        invalid.push(transmission(-Vector3::z(), 1.0, value));
-        invalid.push(transmission(-Vector3::z(), value, 1.0));
+        invalid.push(transmission(-Vector3::z(), value));
     }
-    for probability in [0.0, 1.1] {
-        invalid.push(transmission(-Vector3::z(), probability, 1.0));
-    }
+    let mut wrong_pdf = transmission(-Vector3::z(), 1.0);
+    wrong_pdf.pdf = Some(1.0);
+    invalid.push(wrong_pdf);
     for wi in [
         Vector3::zeros(),
         Vector3::repeat(f64::NAN),
         Vector3::repeat(f64::INFINITY),
     ] {
-        invalid.push(transmission(wi, 1.0, 1.0));
+        invalid.push(transmission(wi, 1.0));
     }
     for sample in invalid {
         let mut scene = glass_background_scene();
@@ -1064,7 +1075,7 @@ fn glass_renderer_handles_failed_samples_and_rejects_invalid_values() {
     for height in [1.0, 1.5] {
         scene.add_with_material(
             Box::new(Ground::new(height).unwrap()),
-            Box::new(TestGlass(Some(transmission(-Vector3::z(), 1.0, 1e308)))),
+            Box::new(TestGlass(Some(transmission(-Vector3::z(), 1e308)))),
         );
     }
     assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());

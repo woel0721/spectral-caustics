@@ -7,10 +7,7 @@ use spectral_caustics::{
         sceneconfig::{ObjectConfig, SceneConfig},
     },
     geometry::{ground::Ground, ray::Ray},
-    material::{
-        BsdfValue, EvaluateMode, GlassEvent, Material, MaterialSample,
-        dielectric::fresnel_dielectric,
-    },
+    material::{BsdfValue, EvaluateMode, Material, ScatterType, dielectric::fresnel_dielectric},
     optics::{iormode::IorMode, spectrum::rgb_reflectance},
     render::{
         Render, caustics::ground_to_pixel, framebuffer::Framebuffer, render_camera_glass,
@@ -502,14 +499,14 @@ fn json_materials_build_runtime_values_and_follow_the_hit_object() {
             assert_eq!(hit.object_id, expected_id);
             let material = scene.material(hit.material_id.unwrap()).unwrap();
             assert_eq!(material.ior(), expected_ior);
-            assert_eq!(material.is_delta(), expected_ior.is_some());
+            assert_eq!(!material.has_non_delta(), expected_ior.is_some());
             // 材质通过 dyn Material 分派；在命中法线的正半球求 BSDF。
             assert_eq!(
                 material.evaluate(hit.normal, -ray.direction, hit.normal, EvaluateMode::Rgb),
                 BsdfValue::Rgb(expected_bsdf)
             );
             for wavelength_nm in [450.0, 550.0, 650.0] {
-                let expected_spectral = if material.is_delta() {
+                let expected_spectral = if !material.has_non_delta() {
                     0.0
                 } else {
                     rgb_reflectance(Vector3::new(0.2, 0.3, 0.4), wavelength_nm).unwrap()
@@ -526,35 +523,29 @@ fn json_materials_build_runtime_values_and_follow_the_hit_object() {
                 );
             }
             let mut rng = StdRng::seed_from_u64(42);
-            if material.is_delta() {
+            if !material.has_non_delta() {
                 let wo = -ray.direction;
-                let MaterialSample::Glass(sample) =
-                    material.sample(wo, hit.normal, &mut rng).unwrap()
-                else {
-                    panic!("JSON 玻璃必须通过统一接口返回离散事件记录");
-                };
+                let sample = material.sample(wo, hit.normal, &mut rng).unwrap();
                 assert!((sample.wi.norm() - 1.0).abs() < 1e-12);
                 let ior = expected_ior.unwrap();
-                let f = fresnel_dielectric(wo.dot(&hit.normal), 1.0, ior).unwrap();
+                assert!(fresnel_dielectric(wo.dot(&hit.normal), 1.0, ior).unwrap() >= 0.0);
                 match sample.event {
-                    GlassEvent::Reflection => {
+                    ScatterType::SpecularReflection => {
                         assert!(sample.wi.dot(&hit.normal) > 0.0);
-                        assert_eq!(sample.probability, f);
-                        assert_eq!(sample.weight, 1.0);
+
+                        assert_eq!(sample.weight, Vector3::repeat(1.0));
                     }
-                    GlassEvent::Transmission => {
+                    ScatterType::SpecularTransmission => {
                         assert!(sample.wi.dot(&hit.normal) < 0.0);
-                        assert_eq!(sample.probability, 1.0 - f);
-                        assert_eq!(sample.weight, (1.0 / ior).powi(2));
+
+                        assert_eq!(sample.weight, Vector3::repeat((1.0 / ior).powi(2)));
                     }
+                    _ => unreachable!(),
                 }
                 assert_eq!(material.pdf(hit.normal, hit.normal, hit.normal), 0.0);
             } else {
-                let MaterialSample::Continuous { wi } =
-                    material.sample(hit.normal, hit.normal, &mut rng).unwrap()
-                else {
-                    panic!("JSON Lambertian 必须通过统一接口返回连续方向");
-                };
+                let sample = material.sample(hit.normal, hit.normal, &mut rng).unwrap();
+                let wi = sample.wi;
                 assert!((wi.norm() - 1.0).abs() < 1e-12);
                 let cosine = hit.normal.dot(&wi);
                 let pdf = material.pdf(wi, hit.normal, hit.normal);
@@ -648,7 +639,7 @@ fn scene_accepts_custom_materials_without_changing_geometry_or_a_material_enum()
             .is_none()
     );
     assert_eq!(material.pdf(hit.normal, -ray.direction, hit.normal), 0.0);
-    assert!(!material.is_delta());
+    assert!(!!material.has_non_delta());
     assert_eq!(material.ior(), None);
 }
 

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub enum MaterialConfig {
     Lambertian { albedo: [f64; 3] },
     Dielectric { ior: f64 },
+    Mirror { reflectance: [f64; 3] },
 }
 
 impl Default for MaterialConfig {
@@ -22,7 +23,10 @@ impl MaterialConfig {
 
     pub fn validate(&self) -> Result<(), String> {
         match self {
-            Self::Lambertian { albedo } => {
+            Self::Lambertian { albedo }
+            | Self::Mirror {
+                reflectance: albedo,
+            } => {
                 if albedo
                     .iter()
                     .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))

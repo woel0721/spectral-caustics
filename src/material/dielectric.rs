@@ -1,28 +1,9 @@
 //! 理想光滑介质：普通 BSDF 为零，通过 Fresnel 概率采样反射/透射事件。
 
-use super::{BsdfValue, EvaluateMode, Material, MaterialSample, unit_vector};
+use super::{BsdfSample, BsdfValue, EvaluateMode, Material, ScatterType, unit_vector};
 use crate::optics::refract;
 use nalgebra::Vector3;
 use rand::{Rng, RngCore};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GlassEvent {
-    Reflection,
-    Transmission,
-}
-
-/// 一次理想玻璃的离散事件采样；各字段均在线性域内使用。
-#[derive(Debug, Clone, Copy)]
-pub struct GlassSample {
-    /// 从交点向外指的单位世界方向，可直接用作下一条射线的方向。
-    pub wi: Vector3<f64>,
-    pub event: GlassEvent,
-    /// 选择当前事件的离散概率 F 或 1-F，不是相对于立体角的 PDF。
-    pub probability: f64,
-    /// 相机 radiance 追踪的吞吐量乘数，已包含余弦及事件概率的抵消。
-    /// 反射为 1，透射为 (eta_i/eta_t)²；调用方直接乘它，不再除 probability。
-    pub weight: f64,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dielectric {
@@ -65,7 +46,7 @@ impl Material for Dielectric {
         wo: Vector3<f64>,
         normal: Vector3<f64>,
         rng: &mut dyn RngCore,
-    ) -> Option<MaterialSample> {
+    ) -> Option<BsdfSample> {
         let (wo, normal) = (unit_vector(wo)?, unit_vector(normal)?);
         let cos_o = wo.dot(&normal);
         if cos_o == 0.0 {
@@ -81,25 +62,32 @@ impl Material for Dielectric {
         // 全反射直接选反射；F=0 时直接透射，避免采样零概率事件。
         let reflection = f == 1.0 || (f > 0.0 && rng.random::<f64>() < f);
         let sample = if reflection {
-            GlassSample {
+            BsdfSample {
                 wi: unit_vector(2.0 * cos_i * normal - wo)?,
-                event: GlassEvent::Reflection,
-                probability: f,
-                weight: 1.0, // F / p_reflection = 1。
+                event: ScatterType::SpecularReflection,
+                pdf: None,
+                weight: Vector3::repeat(1.0), // F / p_reflection = 1。
             }
         } else {
-            GlassSample {
+            BsdfSample {
                 wi: unit_vector(refract(-wo, normal, eta_i, eta_t)?)?,
-                event: GlassEvent::Transmission,
-                probability: 1.0 - f,
+                event: ScatterType::SpecularTransmission,
+                pdf: None,
                 // (1-F) / p_transmission 已抵消，保留 radiance 的折射率平方项。
-                weight: (eta_i / eta_t).powi(2),
+                weight: Vector3::repeat((eta_i / eta_t).powi(2)),
             }
         };
-        (sample.weight.is_finite() && sample.weight > 0.0).then_some(MaterialSample::Glass(sample))
+        sample
+            .weight
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0)
+            .then_some(sample)
     }
 
-    fn is_delta(&self) -> bool {
+    fn has_non_delta(&self) -> bool {
+        false
+    }
+    fn has_delta(&self) -> bool {
         true
     }
 
@@ -154,11 +142,11 @@ mod tests {
     use super::*;
     use rand::{SeedableRng, rngs::StdRng};
 
-    fn glass_result(sample: Option<MaterialSample>) -> Option<GlassSample> {
-        match sample? {
-            MaterialSample::Glass(sample) => Some(sample),
-            MaterialSample::Continuous { .. } => panic!("Dielectric 必须返回玻璃离散事件"),
-        }
+    fn glass_result(sample: Option<BsdfSample>) -> Option<BsdfSample> {
+        let sample = sample?;
+        assert!(sample.event.is_delta());
+        assert_eq!(sample.pdf, None);
+        Some(sample)
     }
 
     struct FixedRng {
@@ -196,19 +184,19 @@ mod tests {
             let mut reflect_rng = FixedRng::new(0);
             let reflected =
                 glass_result(glass.sample(wo * 3.0, Vector3::z() * 7.0, &mut reflect_rng)).unwrap();
-            assert_eq!(reflected.event, GlassEvent::Reflection);
+            assert_eq!(reflected.event, ScatterType::SpecularReflection);
             assert!((reflected.wi - wo).norm() < 1e-14);
-            assert!((reflected.probability - 0.04).abs() < 1e-14);
-            assert_eq!(reflected.weight, 1.0);
+
+            assert_eq!(reflected.weight, Vector3::repeat(1.0));
             assert_eq!(reflect_rng.draws, 1);
 
             let mut transmit_rng = FixedRng::new(u64::MAX);
             let transmitted =
                 glass_result(glass.sample(wo, Vector3::z(), &mut transmit_rng)).unwrap();
-            assert_eq!(transmitted.event, GlassEvent::Transmission);
+            assert_eq!(transmitted.event, ScatterType::SpecularTransmission);
             assert!((transmitted.wi + wo).norm() < 1e-14);
-            assert!((transmitted.probability - 0.96).abs() < 1e-14);
-            assert!((transmitted.weight - transmission_weight).abs() < 1e-14);
+
+            assert!((transmitted.weight - Vector3::repeat(transmission_weight)).norm() < 1e-14);
             assert_eq!(transmit_rng.draws, 1);
         }
     }
@@ -235,8 +223,12 @@ mod tests {
             ] {
                 let wo = super::super::to_world(local_wo, normal).unwrap();
                 for (random, event, local_expected) in [
-                    (0, GlassEvent::Reflection, expected_reflection),
-                    (u64::MAX, GlassEvent::Transmission, expected_transmission),
+                    (0, ScatterType::SpecularReflection, expected_reflection),
+                    (
+                        u64::MAX,
+                        ScatterType::SpecularTransmission,
+                        expected_transmission,
+                    ),
                 ] {
                     let sample =
                         glass_result(glass.sample(wo, normal, &mut FixedRng::new(random))).unwrap();
@@ -245,7 +237,7 @@ mod tests {
                     assert!((sample.wi - expected).norm() < 1e-12);
                     assert!((sample.wi.norm() - 1.0).abs() < 1e-12);
                     let same_side = sample.wi.dot(&normal) * wo.dot(&normal) > 0.0;
-                    assert_eq!(same_side, event == GlassEvent::Reflection);
+                    assert_eq!(same_side, event == ScatterType::SpecularReflection);
                 }
             }
         }
@@ -259,9 +251,9 @@ mod tests {
         for random in [0, u64::MAX] {
             let mut rng = FixedRng::new(random);
             let sample = glass_result(glass.sample(wo, normal, &mut rng)).unwrap();
-            assert_eq!(sample.event, GlassEvent::Reflection);
-            assert_eq!(sample.probability, 1.0);
-            assert_eq!(sample.weight, 1.0);
+            assert_eq!(sample.event, ScatterType::SpecularReflection);
+
+            assert_eq!(sample.weight, Vector3::repeat(1.0));
             assert!((sample.wi - Vector3::new(-wo.x, 0.0, wo.z)).norm() < 1e-12);
             assert_eq!(rng.draws, 0);
         }
@@ -269,9 +261,9 @@ mod tests {
         for wo in [Vector3::new(0.6, 0.0, 0.8), Vector3::new(0.6, 0.0, -0.8)] {
             let mut rng = FixedRng::new(0);
             let sample = glass_result(matched.sample(wo, normal, &mut rng)).unwrap();
-            assert_eq!(sample.event, GlassEvent::Transmission);
-            assert_eq!(sample.probability, 1.0);
-            assert_eq!(sample.weight, 1.0);
+            assert_eq!(sample.event, ScatterType::SpecularTransmission);
+
+            assert_eq!(sample.weight, Vector3::repeat(1.0));
             assert!((sample.wi + wo).norm() < 1e-12);
             assert_eq!(rng.draws, 0);
         }
@@ -318,20 +310,19 @@ mod tests {
                 let repeated = glass_result(glass.sample(wo, normal, &mut replay)).unwrap();
                 assert_eq!(sample.wi, repeated.wi);
                 assert_eq!(sample.event, repeated.event);
-                assert_eq!(sample.probability, repeated.probability);
+
                 assert_eq!(sample.weight, repeated.weight);
                 match sample.event {
-                    GlassEvent::Reflection => {
-                        assert_eq!(sample.probability, f);
-                        assert_eq!(sample.weight, 1.0);
+                    ScatterType::SpecularReflection => {
+                        assert_eq!(sample.weight, Vector3::repeat(1.0));
                         reflected += 1;
-                        reflection_estimate += sample.weight;
+                        reflection_estimate += sample.weight.x;
                     }
-                    GlassEvent::Transmission => {
-                        assert_eq!(sample.probability, 1.0 - f);
-                        assert_eq!(sample.weight, (eta_i / eta_t).powi(2));
-                        transmission_estimate += sample.weight;
+                    ScatterType::SpecularTransmission => {
+                        assert_eq!(sample.weight, Vector3::repeat((eta_i / eta_t).powi(2)));
+                        transmission_estimate += sample.weight.x;
                     }
+                    _ => unreachable!(),
                 }
             }
             assert!((f64::from(reflected) / 32768.0 - f).abs() < 0.006);
@@ -354,13 +345,13 @@ mod tests {
                 glass_result(glass.sample(wo, Vector3::z(), &mut FixedRng::new(random))).unwrap();
             assert_eq!(sample.wi, expected.wi);
             assert_eq!(sample.event, expected.event);
-            assert_eq!(sample.probability, expected.probability);
+
             assert_eq!(sample.weight, expected.weight);
             assert_eq!(
                 glass
                     .sample(wo, Vector3::z(), &mut FixedRng::new(random))
                     .unwrap()
-                    .wi(),
+                    .wi,
                 sample.wi
             );
             assert_eq!(glass.pdf(sample.wi, wo, Vector3::z()), 0.0);
@@ -447,7 +438,7 @@ mod tests {
     fn ideal_dielectric_preserves_ior_and_has_no_regular_bsdf_component() {
         let glass: Box<dyn Material> = Box::new(Dielectric::new(1.33).unwrap());
         assert_eq!(glass.ior(), Some(1.33));
-        assert!(glass.is_delta());
+        assert!(!glass.has_non_delta());
         for wi in [Vector3::z(), -Vector3::z(), Vector3::repeat(f64::NAN)] {
             assert_eq!(
                 glass.evaluate(wi, Vector3::z(), Vector3::z(), EvaluateMode::Rgb),
