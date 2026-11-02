@@ -13,6 +13,8 @@ use crate::{
 };
 use nalgebra::Vector3;
 
+mod environment_escape;
+
 #[test]
 fn glass_prefix_and_deep_diffuse_keep_independent_counts_and_roulette_order() {
     let mut scene = two_planes(Vector3::repeat(0.8), Vector3::repeat(0.7));
@@ -437,7 +439,7 @@ fn diffuse_glass_reflection_keeps_unit_weight_and_excludes_escape_background() {
         Vector3::new(-0.5, 0.0, 0.75_f64.sqrt()),
     );
     assert!(scene.intersect(&state.ray).is_none());
-    // A later Delta does not erase the diffuse history or enable the deferred escape term.
+    // Without an environment, a later Delta must not turn camera background into illumination.
     close(
         state.radiance.direct,
         a * (sun().1 * sun().0.z / std::f64::consts::PI),
