@@ -1,4 +1,4 @@
-//! 统一的相机路径迭代：玻璃前缀、有界 Lambertian 链与即时表面照明。
+//! 统一的相机路径迭代：玻璃与 Lambertian 混合事件、有界反弹和即时着色。
 
 use super::{
     diffuse::{russian_roulette, sample_diffuse_ray, secondary_direct_lighting},
@@ -24,10 +24,10 @@ pub(super) const MAX_GLASS_BOUNCES: usize = 8;
 /// 调用方为每条路径创建 CameraPathState；RNG 由像素采样循环持有，不能逐路径重设种子。
 /// wo = -ray.direction，保留朝外几何法线；玻璃只乘 sample.weight。
 /// 新起点沿采样方向所在侧的法线偏移 1e-5 米，第九个玻璃命中处截断。
-/// 漫反射之前的 miss 查询背景；后续 miss 截断，避免重复计入环境。
+/// 尚未漫反射的 miss 查询背景；漫反射后的 miss 暂不累加逃逸环境（待后续 MIS 阶段）。
 /// 首次地面命中使用解析直射和焦散图，环境单独计入一次。
 /// 首次 Lambertian 后迭代追踪有界漫反射链；后续仅累加太阳/环境直接光。
-/// 漫反射后遇玻璃终止，不模拟透明 shadow ray。
+/// 漫反射后也可继续经过玻璃；玻璃不消耗漫反射预算，不模拟透明 shadow ray。
 pub(super) fn trace_camera_path(
     scene: &Scene,
     state: &mut CameraPathState,
@@ -60,11 +60,8 @@ pub(super) fn trace_camera_path(
         // 按当前命中的材质分派，两个分支共用事件更新与末尾的 Ray 写回。
         // 地面绑定已在 bind_spectral_ground_lighting 中排除 delta 材质。
         let next_ray = if material.is_delta() {
-            // F2a 的传播限制：Diffuse → Glass 仍终止，且不采样任何玻璃事件。
-            // F2b 开放混合传播时在这里移除限制；本阶段不改变估计器范围。
-            if state.last_scatter == LastScatter::Diffuse {
-                break;
-            }
+            // F2b 第一步：无论此前是否经过漫反射，都允许采样玻璃。
+            // 玻璃只计 glass_events；已发生的 diffuse_bounces 历史保持不变。
             if state.glass_events == MAX_GLASS_BOUNCES {
                 break;
             }

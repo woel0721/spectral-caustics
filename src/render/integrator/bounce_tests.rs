@@ -15,7 +15,7 @@ use crate::{
     },
     geometry::{ray::Ray, triangle::Triangle},
     material::{
-        BsdfValue, EvaluateMode, Material, MaterialSample, dielectric::Dielectric,
+        BsdfValue, EvaluateMode, Material, MaterialSample,
         lambertian::Lambertian,
     },
     render::{Render, utils::linear_srgb_to_xyz},
@@ -321,8 +321,8 @@ impl Material for Unsupported {
     }
 }
 #[test]
-fn third_hit_glass_unbound_unsupported_and_backface_stop_without_new_glass_events() {
-    for kind in 0..4 {
+fn third_hit_unbound_unsupported_and_backface_still_terminate() {
+    for kind in 1..4 {
         let mut scene = two_planes(Vector3::repeat(0.8), Vector3::repeat(0.7));
         scene.max_diffuse_bounces = 5;
         let mut vertices = [
@@ -335,9 +335,6 @@ fn third_hit_glass_unbound_unsupported_and_backface_stop_without_new_glass_event
         }
         let geometry = Box::new(Triangle::new(vertices[0], vertices[1], vertices[2]).unwrap());
         match kind {
-            0 => {
-                scene.add_with_material(geometry, Box::new(Dielectric::new(1.5).unwrap()));
-            }
             1 => {
                 scene.add(geometry);
             }
