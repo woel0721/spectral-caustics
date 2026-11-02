@@ -7,7 +7,7 @@
 - [x] 米制 Z-up 几何、单三棱镜/有限地面配置、材质绑定与最近交点。
 - [x] 双界面 Snell 折射、Cauchy 色散、Fresnel 透射通量与地面双线性 XYZ 累积。
 - [x] 可追溯 CIE/D65 梯形积分、线性颜色与固定曝光 sRGB PNG。
-- [x] 通用 BsdfSample RGB 相机路径，支持 Lambertian、Dielectric、Mirror、GgxMetal；共享有界 Delta 预算。
+- [x] 通用 BsdfSample RGB 相机路径，支持 Lambertian、Dielectric、Mirror、GgxMetal；共享最多 32 次 Delta 事件预算。
 - [x] HDRI/渐变环境、重要性采样与固定配额 Balance/Power MIS。
 - [x] 0..1024 次额外连续 BSDF 连接（JSON 字段名保留）、RGB 吞吐量与补偿 RR。
 - [x] Direct/Caustics/Combined 共用相机路径，解析太阳避免重复计光。
@@ -178,3 +178,9 @@ Mirror、粗糙/光滑 GGX 的 JSON 场景在 Balance/Power、深度 0/1/4、see
 - 第二阶段 release 再次实跑 `camera_direct_caustics -- 4`（512²）、`diffuse_indirect -- 4`（320×240、0/1/4 深度）、`camera_parallel_benchmark -- 4 32`、`refract_ray`。基准 1/2/4/6 线程光源/三个相机 XYZ 逐位一致。另使用临时 JSON 实跑 Mirror、roughness=0.45 GGX、roughness=0 GGX 的 64×48、16 SPP、4 线程主程序；RGB8 输出解码确认 Direct 非零、Caustics 全黑、Combined=Direct。
 
 仍未实现 RoughDielectric、Plastic、各向异性、微表面多次散射能量补偿、光谱金属 BSDF、金属反射焦散、透明 shadow ray、嵌套介质与通用光子映射。解析太阳不通过 Delta 方向直接求值；只采样支持的表面/环境路径。有限深度截断、NDF 无效样本与玻璃二值遮挡的边界保留，当前系统不能宣称通用无偏 Path Tracer。没有运行默认 512²/256 SPP 全尺寸主渲染。
+
+## 默认展示配置与 Delta 上限更新
+
+用户随后要求将此前保留的改动一并提交：展示 JSON 改用随仓库提供的 `assets/HDRI/herkulessaulen_4k.hdr`，相应配置测试与 README 同步；`MAX_DELTA_EVENTS` 从 8 提高到 32，现有预算边界测试按此常量验证。上文关于保留未提交修改及提交版上限 8 的内容是两个 BSDF 重构提交时的验收记录。
+
+提交前再次通过 fmt、全目标 build、354 项测试（311 单元 + 43 集成）、严格 Clippy 和 diff 检查。

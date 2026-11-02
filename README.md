@@ -13,7 +13,7 @@ cargo run --release --locked
 cargo run --release --locked -- /path/to/config.json
 ```
 
-默认读取 [configs/default.json](configs/default.json)，使用随仓库提供的 `assets/HDRI/autoshop_01_4k.hdr`。配置、HDR 路径及输出路径中的相对路径均相对于启动目录。主程序接受一个可选 JSON 路径，配置读写不加载 HDR；运行时构建 Scene 才加载并缓存贴图。
+默认读取 [configs/default.json](configs/default.json)，使用随仓库提供的 `assets/HDRI/herkulessaulen_4k.hdr`。配置、HDR 路径及输出路径中的相对路径均相对于启动目录。主程序接受一个可选 JSON 路径，配置读写不加载 HDR；运行时构建 Scene 才加载并缓存贴图。
 
 主程序生成五张图，辅助图与配置指定的主图保存在同一目录：
 
@@ -57,7 +57,7 @@ cargo run --release --locked --example refract_ray
 | `scene.environment_samples` | 1 | 8 |
 | `scene.environment_mis_heuristic` | `balance` | `power` |
 | `scene.max_diffuse_bounces` | 0 | 4 |
-| `scene.environment.map_path` | 无贴图 | 本地 autoshop HDR |
+| `scene.environment.map_path` | 无贴图 | 随附 herkulessaulen HDR |
 
 `SceneConfig::default()` 启用渐变天空；JSON 省略 `environment` 或设为 `null` 则关闭环境照明，miss 使用 `background_linear_rgb`。环境对象内的 `map_path` 缺省/null 使用渐变；HDR 存在时优先查询贴图，`rotation_degrees` 绕世界 +Z 旋转，`intensity` 在线性空间缩放背景和照明。
 
@@ -122,7 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 光谱贡献为 `k × D65(λ) × CMF(λ) × Δλ`，D65 归一化使完整发射光谱 Y=1；空间通量除以总发射数和接收像素面积。固定模式只追踪一条白光折射路径，色散模式逐波长追踪；直接落地仅合成并 splat 一次。双线性 splat 保持区域内能量，非法光谱能量返回错误。
 
-**相机端。** 相机路径在任何漫反射深度都可以采样玻璃 Fresnel 反射/折射；整条路径的 Delta 事件由 `MAX_DELTA_EVENTS` 限制（仓库缺省 8，Dielectric/Mirror/光滑 GGX 合计）。反射权重为 1，透射权重为 `(η_i/η_t)²`，已抵消事件概率，不再额外乘 Fresnel、余弦或除概率。首先命中的可着色表面立即计光，随后最多续追 `max_diffuse_bounces` 次连续 BSDF 连接（字段名保留，包含 Diffuse/Glossy），范围 0..1024；4 表示最多访问 5 个连续着色顶点。
+**相机端。** 相机路径在任何漫反射深度都可以采样玻璃 Fresnel 反射/折射；整条路径的 Delta 事件由 `MAX_DELTA_EVENTS` 限制（仓库缺省 32，Dielectric/Mirror/光滑 GGX 合计）。反射权重为 1，透射权重为 `(η_i/η_t)²`，已抵消事件概率，不再额外乘 Fresnel、余弦或除概率。首先命中的可着色表面立即计光，随后最多续追 `max_diffuse_bounces` 次连续 BSDF 连接（字段名保留，包含 Diffuse/Glossy），范围 0..1024；4 表示最多访问 5 个连续着色顶点。
 
 首个地面顶点将解析太阳和焦散图分别计入 Direct/Caustics，环境只加一次。后续连续 BSDF 顶点仅累加太阳和环境直接光到 Direct，不读取焦散图；玻璃顶点可在漫反射之间继续反射/折射，不读取焦散图。未绑定/不支持的材质及背面终止。没有漫反射历史的 miss 查询相机背景；已有漫反射历史时，只有最近散射为 Delta 且存在 `scene.environment` 才将 `throughput ⊙ environment.radiance(最终方向)` 加入 Direct。完整吞吐量已含 BSDF、余弦/PDF、玻璃离散权重和 RR 存活补偿，不再重复加权。最近散射为非 Delta 的 miss 仍截断；`environment=None` 时，`background_color` 仅用于相机背景，不照亮漫反射后的路径。逃逸环境不进入 Caustics。
 

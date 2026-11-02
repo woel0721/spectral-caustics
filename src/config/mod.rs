@@ -95,7 +95,7 @@ mod tests {
         expected.scene.environment_mis_heuristic = sceneconfig::EnvironmentMisHeuristic::Power;
         expected.scene.max_diffuse_bounces = 4;
         expected.scene.environment.as_mut().unwrap().map_path =
-            Some(PathBuf::from("assets/HDRI/autoshop_01_4k.hdr"));
+            Some(PathBuf::from("assets/HDRI/herkulessaulen_4k.hdr"));
         assert_eq!(config, expected);
         assert_eq!(config.scene.objects.len(), 2);
         assert!(matches!(

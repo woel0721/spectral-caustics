@@ -10,7 +10,7 @@ use crate::{material::unit_vector, scene::Scene};
 use nalgebra::Vector3;
 use std::error::Error;
 
-pub(super) const MAX_DELTA_EVENTS: usize = 8;
+pub(super) const MAX_DELTA_EVENTS: usize = 32;
 
 pub(super) fn trace_camera_path(
     scene: &Scene,
