@@ -71,11 +71,21 @@ cargo run --release --locked --example refract_ray
 - `scene.light`：平行光方向、水平矩形发射窗口、高度和总通量；`receiver` 只限制光子图范围，不限制解析太阳照明。相机超出有限地面的边缘看到背景。
 - `scene.ground_checkerboard`：世界 x/y 的棋盘格，按 floor 处理负坐标；比例在每个地面顶点各应用一次，不改变光子图。缺省/null 关闭。
 
-材质 JSON 保留带 `type` 的 `MaterialConfig` enum：`lambertian { albedo }`、`dielectric { ior }`、`mirror { reflectance }`；RGB 反射率必须有限且位于 [0,1]。运行时仍保存 `Box<dyn Material>`。
+材质 JSON 保留带 `type` 的 `MaterialConfig` enum：`lambertian { albedo }`、`dielectric { ior }`、`mirror { reflectance }`、`ggx_metal { eta, k, roughness }`；RGB 反射率必须有限且位于 [0,1]。运行时仍保存 `Box<dyn Material>`。
 
 `MaterialSample`/`GlassSample`/`GlassEvent` 与 `is_lambertian()` 已删除，`sample()` 返回 `BsdfSample { wi, weight, pdf, event }`。`pdf: Some(p)` 为连续立体角密度；Delta 为 `None`，其离散概率和透射 eta² 已包含在 RGB weight 中。`ScatterType` 区分 DiffuseReflection、GlossyReflection、SpecularReflection、SpecularTransmission。`has_non_delta()`/`has_delta()` 声明可用分量，混合材质可同时声明两者；路径依实际采样事件更新状态，预算耗尽时不重选分量。局部 NEE 的 BSDF 配额若抽到 Delta，则保留为零贡献，不重新分配配额。
 
 相机分量入口通过 `irradiance_reflectance()` 显式要求绑定地面为中性灰 Lambertian。彩色漫反射墙可以续追；彩色地面可通过独立 RGB 相机 API 渲染，但不能绑定当前中性灰光谱焦散图。
+
+GGX Metal 使用相对于空气的三个 RGB 复折射率 `eta + i*k`：eta 有限且 >0，k 有限且 ≥0，roughness 有限且位于 [0,1]。例如（参数仅为演示，不代表实测金属）：
+
+```json
+{"type":"ggx_metal","eta":[0.2,0.8,1.5],"k":[3.0,2.0,1.0],"roughness":0.4}
+```
+
+`alpha=roughness²`，实现各向同性 Trowbridge–Reitz D、height-correlated Smith G、精确非偏振导体 Fresnel。采样完整半球 NDF `p(h)=D(h)|n·h|`，反射 PDF 为 `p(h)/(4|wo·h|)`，不是 VNDF；错误半向量/背半球反射保留零贡献，不补采或重归一化。`roughness≤0.001` 统一切换为理想镜面，Fresnel RGB 权重、事件与 PDF 随之切换，无连续密度。公式参考 [PBRT 微表面模型](https://www.pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory) 和 [导体 BRDF](https://www.pbr-book.org/4ed/Reflection_Models/Conductor_BRDF)。
+
+只模拟微表面单次散射，不做多次散射能量补偿；粗糙时能量损失符合此模型的简化。eta/k 是 RGB 参数，不将其插值为真实光谱；GGX 的 Spectral 求值返回零，光谱焦散算法不使用它。没有 RoughDielectric、Plastic、各向异性或通用金属焦散；灰 GGX 地面也不能绑定缺少入射方向信息的当前辐照度图，可使用独立 RGB 相机渲染。
 
 ## API 与模块
 
@@ -108,15 +118,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 计光与物理边界
 
-**光源端。** 空气 → 玻璃 → 空气 → 地面，Cauchy 模型 `n(λ)=1.5046+0.0042/λ_μm²` 仅是演示玻璃；固定模式使用 1.52。双透射通量乘 `(1-F_enter)(1-F_exit)`，不含相机 radiance 的折射率平方因子。全反射、其他遮挡、未落地或落在 receiver 外的通量直接丢弃，不重新分配；不续追反射光子。绑定材质的棱镜仅在声明理想介质 `ior()` 能力时进入此算法；Mirror 不生成旧折射焦散，且相机不会把以前玻璃场景的焦散图套到 Mirror 棱镜。没有材质绑定的几何仍可通过显式折射率闭包做独立光学实验。
+**光源端。** 空气 → 玻璃 → 空气 → 地面，Cauchy 模型 `n(λ)=1.5046+0.0042/λ_μm²` 仅是演示玻璃；固定模式使用 1.52。双透射通量乘 `(1-F_enter)(1-F_exit)`，不含相机 radiance 的折射率平方因子。全反射、其他遮挡、未落地或落在 receiver 外的通量直接丢弃，不重新分配；不续追反射光子。绑定材质的棱镜仅在声明理想介质 `ior()` 能力时进入此算法；Mirror/GGX Metal 不生成旧折射焦散，且相机不会把以前玻璃场景的焦散图套到 Mirror/GGX 棱镜。没有材质绑定的几何仍可通过显式折射率闭包做独立光学实验。
 
 光谱贡献为 `k × D65(λ) × CMF(λ) × Δλ`，D65 归一化使完整发射光谱 Y=1；空间通量除以总发射数和接收像素面积。固定模式只追踪一条白光折射路径，色散模式逐波长追踪；直接落地仅合成并 splat 一次。双线性 splat 保持区域内能量，非法光谱能量返回错误。
 
-**相机端。** 相机路径在任何漫反射深度都可以采样玻璃 Fresnel 反射/折射；整条路径合计最多 8 个 Delta 事件（Dielectric/Mirror 合计）。反射权重为 1，透射权重为 `(η_i/η_t)²`，已抵消事件概率，不再额外乘 Fresnel、余弦或除概率。首先命中的可着色表面立即计光，随后最多续追 `max_diffuse_bounces` 次连续 BSDF 连接（字段名保留），范围 0..1024；4 表示最多访问 5 个漫反射顶点。
+**相机端。** 相机路径在任何漫反射深度都可以采样玻璃 Fresnel 反射/折射；整条路径的 Delta 事件由 `MAX_DELTA_EVENTS` 限制（仓库缺省 8，Dielectric/Mirror/光滑 GGX 合计）。反射权重为 1，透射权重为 `(η_i/η_t)²`，已抵消事件概率，不再额外乘 Fresnel、余弦或除概率。首先命中的可着色表面立即计光，随后最多续追 `max_diffuse_bounces` 次连续 BSDF 连接（字段名保留，包含 Diffuse/Glossy），范围 0..1024；4 表示最多访问 5 个连续着色顶点。
 
 首个地面顶点将解析太阳和焦散图分别计入 Direct/Caustics，环境只加一次。后续连续 BSDF 顶点仅累加太阳和环境直接光到 Direct，不读取焦散图；玻璃顶点可在漫反射之间继续反射/折射，不读取焦散图。未绑定/不支持的材质及背面终止。没有漫反射历史的 miss 查询相机背景；已有漫反射历史时，只有最近散射为 Delta 且存在 `scene.environment` 才将 `throughput ⊙ environment.radiance(最终方向)` 加入 Direct。完整吞吐量已含 BSDF、余弦/PDF、玻璃离散权重和 RR 存活补偿，不再重复加权。最近散射为非 Delta 的 miss 仍截断；`environment=None` 时，`background_color` 仅用于相机背景，不照亮漫反射后的路径。逃逸环境不进入 Caustics。
 
-第三次漫反射连接后的顶点已着色且仍有预算时执行 RR：`p=clamp(max(RGB throughput),0.05,0.95)`，存活吞吐量除以 p；不会缩放已累计辐亮度。浅层与最后顶点不抽 RR。各顶点直接乘 `BsdfSample.weight` 更新 RGB 吞吐量，连续事件的权重由材质计算为 `f_r cosθ/pdf`；Lambertian 配套余弦 PDF 为 `cosθ/π`。
+第三次连续散射连接后的顶点已着色且仍有预算时执行 RR：`p=clamp(max(RGB throughput),0.05,0.95)`，存活吞吐量除以 p；不会缩放已累计辐亮度。浅层与最后顶点不抽 RR。各顶点直接乘 `BsdfSample.weight` 更新 RGB 吞吐量，连续事件的权重由材质计算为 `f_r cosθ/pdf`；Lambertian 配套余弦 PDF 为 `cosθ/π`。
 
 **环境和太阳。** HDRI 按亮度×球面像素立体角建立 CDF，95% 重要性采样与 5% 全球均匀采样混合，使用完整 PDF。N≥2 时，BSDF 配额 floor(N/2)，HDRI 配额为剩余数；Balance 分母为 `n_b p_b+n_e p_e`，Power 使用 β=2 和真实样本数量。N=1 使用随机 50/50 混合；无贴图的渐变使用纯 BSDF 采样。零贡献、遮挡和背半球样本保留在原配额内。
 

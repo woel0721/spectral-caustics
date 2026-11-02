@@ -296,8 +296,8 @@ fn diffuse_miss_does_not_add_hdri_background() {
     assert!(e.norm() > 0.0);
 }
 
-struct Unsupported;
-impl Material for Unsupported {
+struct Absorber;
+impl Material for Absorber {
     fn evaluate(
         &self,
         _: Vector3<f64>,
@@ -310,7 +310,7 @@ impl Material for Unsupported {
 }
 
 #[test]
-fn secondary_unsupported_unbound_and_back_faces_terminate() {
+fn secondary_absorbing_unbound_and_back_faces_terminate() {
     for kind in 1..4 {
         let mut scene = two_planes(Vector3::repeat(0.8), Vector3::repeat(0.7));
         scene.objects.pop();
@@ -324,7 +324,7 @@ fn secondary_unsupported_unbound_and_back_faces_terminate() {
         });
         match kind {
             1 => {
-                scene.add_with_material(geometry, Box::new(Unsupported));
+                scene.add_with_material(geometry, Box::new(Absorber));
             }
             2 => {
                 scene.add(geometry);

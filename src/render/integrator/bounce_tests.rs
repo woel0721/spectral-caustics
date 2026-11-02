@@ -304,8 +304,8 @@ fn invalid_and_empty_continuation_samples_at_later_vertices_are_handled() {
     }
 }
 
-struct Unsupported;
-impl Material for Unsupported {
+struct Absorber;
+impl Material for Absorber {
     fn evaluate(
         &self,
         _: Vector3<f64>,
@@ -317,7 +317,7 @@ impl Material for Unsupported {
     }
 }
 #[test]
-fn third_hit_unbound_unsupported_and_backface_still_terminate() {
+fn third_hit_unbound_absorbing_and_backface_still_terminate() {
     for kind in 1..4 {
         let mut scene = two_planes(Vector3::repeat(0.8), Vector3::repeat(0.7));
         scene.max_diffuse_bounces = 5;
@@ -335,7 +335,7 @@ fn third_hit_unbound_unsupported_and_backface_still_terminate() {
                 scene.add(geometry);
             }
             2 => {
-                scene.add_with_material(geometry, Box::new(Unsupported));
+                scene.add_with_material(geometry, Box::new(Absorber));
             }
             _ => {
                 scene.add_with_material(
@@ -366,11 +366,16 @@ impl Material for EscapeLambertian {
     fn pdf(&self, wi: Vector3<f64>, wo: Vector3<f64>, normal: Vector3<f64>) -> f64 {
         self.0.pdf(wi, wo, normal)
     }
-    fn sample(&self, _: Vector3<f64>, _: Vector3<f64>, _: &mut dyn RngCore) -> Option<BsdfSample> {
+    fn sample(
+        &self,
+        wo: Vector3<f64>,
+        normal: Vector3<f64>,
+        _: &mut dyn RngCore,
+    ) -> Option<BsdfSample> {
         Some(BsdfSample {
             wi: sun().0,
-            weight: Vector3::repeat(0.8),
-            pdf: Some(1.0 / PI),
+            weight: self.0.albedo(),
+            pdf: Some(self.0.pdf(sun().0, wo, normal)),
             event: crate::material::ScatterType::DiffuseReflection,
         })
     }

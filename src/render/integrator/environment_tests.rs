@@ -156,14 +156,21 @@ impl Material for FixedBsdf {
     fn sample(
         &self,
         _: Vector3<f64>,
-        _: Vector3<f64>,
+        normal: Vector3<f64>,
         _: &mut dyn rand::RngCore,
     ) -> Option<BsdfSample> {
         self.samples.fetch_add(1, Ordering::Relaxed);
+        if self.pdf == 0.0 {
+            return None;
+        }
+        let weight = match self.value {
+            BsdfValue::Rgb(v) => v * (normal.dot(&self.wi).max(0.0) / self.pdf),
+            _ => Vector3::repeat(f64::NAN),
+        };
         Some(BsdfSample {
             wi: self.wi,
-            weight: Vector3::repeat(0.8),
-            pdf: Some(1.0 / PI),
+            weight,
+            pdf: Some(self.pdf),
             event: crate::material::ScatterType::DiffuseReflection,
         })
     }
@@ -274,6 +281,7 @@ fn hdri_sampling_accepts_zero_bsdf_pdf_and_rejects_invalid_numeric_results() {
     }
     material.pdf = 0.25;
     for value in [
+        BsdfValue::Rgb(Vector3::repeat(-1.0)),
         BsdfValue::Spectral(1.0),
         BsdfValue::Rgb(Vector3::repeat(f64::NAN)),
         BsdfValue::Rgb(Vector3::repeat(f64::INFINITY)),
@@ -451,3 +459,52 @@ fn diffuse_scene(hdr: &TemporaryHdr) -> Scene {
 
 mod power;
 mod stratified;
+
+#[test]
+fn ggx_balance_and_power_match_hemisphere_integral_with_rejected_bsdf_quotas() {
+    use crate::material::ggx_metal::GgxMetal;
+    let hdr = TemporaryHdr::uniform([1.0, 2.0, 4.0]);
+    let mut scene = hdr.scene(37.0);
+    scene.environment_samples = 3;
+    let m = GgxMetal::new(
+        Vector3::new(0.2, 0.8, 1.5),
+        Vector3::new(3.0, 2.0, 1.0),
+        0.65,
+    )
+    .unwrap();
+    let wo = Vector3::new(0.8, 0.0, 0.6);
+    let hit = Hit {
+        normal: Vector3::z(),
+        ..Default::default()
+    };
+    let mut reference = Vector3::zeros();
+    for j in 0..128 {
+        let c = (j as f64 + 0.5) / 128.0;
+        for i in 0..256 {
+            let angle = 2.0 * PI * (i as f64 + 0.5) / 256.0;
+            let r = (1.0 - c * c).sqrt();
+            let wi = Vector3::new(r * angle.cos(), r * angle.sin(), c);
+            let BsdfValue::Rgb(f) = m.evaluate(wi, wo, Vector3::z(), EvaluateMode::Rgb) else {
+                panic!()
+            };
+            reference +=
+                f.component_mul(&Vector3::new(1.0, 2.0, 4.0)) * (c * 2.0 * PI / (128.0 * 256.0));
+        }
+    }
+    for heuristic in [
+        EnvironmentMisHeuristic::Balance,
+        EnvironmentMisHeuristic::Power,
+    ] {
+        scene.environment_mis_heuristic = heuristic;
+        let mut sum = Vector3::zeros();
+        let mut rng = StdRng::seed_from_u64(42);
+        for _ in 0..16384 {
+            sum += environment_lighting(&scene, &hit, &m, wo, &mut rng).unwrap();
+        }
+        let mean = sum / 16384.0;
+        assert!(
+            (mean - reference).norm() < 0.04,
+            "{heuristic:?}: {mean} vs {reference}"
+        );
+    }
+}

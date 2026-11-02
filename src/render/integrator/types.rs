@@ -18,10 +18,10 @@ pub(super) struct CameraPathComponents {
 }
 
 pub(super) struct CameraPathRngs<'a> {
-    /// 像素抖动与首次漫反射之前的玻璃事件。
+    /// 像素抖动与首次连续着色顶点之前的 Delta 事件。
     pub(super) camera: &'a mut dyn rand::RngCore,
     pub(super) environment: &'a mut dyn rand::RngCore,
-    /// 漫反射 BSDF、后续玻璃/环境与 RR；深度 0 时不消费。
+    /// 连续 BSDF、后续 Delta/环境与 RR；混合材质也使用此流。
     pub(super) diffuse: &'a mut dyn rand::RngCore,
 }
 

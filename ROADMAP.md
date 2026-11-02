@@ -7,7 +7,7 @@
 - [x] 米制 Z-up 几何、单三棱镜/有限地面配置、材质绑定与最近交点。
 - [x] 双界面 Snell 折射、Cauchy 色散、Fresnel 透射通量与地面双线性 XYZ 累积。
 - [x] 可追溯 CIE/D65 梯形积分、线性颜色与固定曝光 sRGB PNG。
-- [x] 通用 BsdfSample RGB 相机路径，支持 Lambertian、Dielectric、Mirror；共享有界 Delta 预算。
+- [x] 通用 BsdfSample RGB 相机路径，支持 Lambertian、Dielectric、Mirror、GgxMetal；共享有界 Delta 预算。
 - [x] HDRI/渐变环境、重要性采样与固定配额 Balance/Power MIS。
 - [x] 0..1024 次额外连续 BSDF 连接（JSON 字段名保留）、RGB 吞吐量与补偿 RR。
 - [x] Direct/Caustics/Combined 共用相机路径，解析太阳避免重复计光。
@@ -159,3 +159,22 @@ PR #1 审查以 `e9542ca` 为起点。原始分支的全目标构建和严格 Cl
 第一阶段验证：295 项单元测试 + 39 项集成测试（原 37 项保留，新增 2 项）通过；fmt、全目标 build、严格 Clippy 与 diff 检查通过。工作区原有 Delta 上限 32，旧八次上限测试在初始基线中有 4 项失败；现改为按上限测试边界，工作区 32 与提交版 8 均完整通过。HDRI 更换及上限修改保留为用户未提交改动。
 
 实跑 release `camera_direct_caustics -- 4`（512²）、`diffuse_indirect -- 4`（320×240，深度 0/1/4）、`camera_parallel_benchmark -- 4 32` 成功；后者在 1/2/4/6 线程的光源和三个相机 XYZ 缓冲逐位一致。未运行默认 256 SPP 全尺寸主渲染。
+
+## 通用 BSDF 第二阶段 — GGX Metal
+
+新增独立的 `material/ggx.rs`（D/G、精确导体 Fresnel、半向量采样和反射 Jacobian/PDF）与 `ggx_metal.rs`。仅支持 RGB 各向同性单次散射金属，`alpha=roughness²`；roughness≤0.001 采用理想镜面。完整 NDF 采样的无效反射保留为零样本，不能重采样或除以有效接受率。JSON enum 新增 eta/k/roughness 参数及校验。Scene 的 trait object 存储、RGB 相机和三分量入口保留。
+
+补充半球 NDF 归一化、逆 CDF、D/G/F 独立数值参考、Fresnel 退化/极值、sample/pdf/evaluate 一致性、互易性、PDF 质量与接受率、吞吐量均值和半球积分、粗糙度零极限与近切线数值测试。实际路径包含 GGX → Mirror → Dielectric 双界面 → Lambertian、重复 GGX 与 RR；测试混合 Diffuse/Delta 的局部 NEE 空配额和总体均值，非 Delta 逃逸不会重复计光。
+
+Mirror、粗糙/光滑 GGX 的 JSON 场景在 Balance/Power、深度 0/1/4、seed 42/123、Rayon 1/2/4（含重复 1）线程下逐位一致，三个输出可加。旧玻璃场景生成的非零焦散图不会被套到 Mirror/GGX 棱镜；新反射材质场景的焦散图为零。光谱图地面仍显式要求中性 Lambertian，灰 GGX 也会被拒绝；独立 RGB 相机可渲染 GGX 地面。
+
+### 本次最终验收与改动数量
+
+- 审查起点为远端和本地一致的 main `687d76f`，先阅读 AGENTS/路线图并检索材质采样和路径的全仓库调用方。初始工作区测试为 288 通过、4 失败：已有上限 32 的本地改动与旧八次上限断言冲突；此时集成测试未继续执行。没有覆盖或提交用户的 HDRI/上限修改。
+- 删除源码/示例文件 0 个；删除 4 种旧函数/API 入口及其对应定义：`MaterialSample::wi` 1 处、`Material::is_lambertian` 及实现 7 处、`Material::is_delta` 及实现 5 处、`sample_diffuse_ray` 1 处，合计移除/替换 14 处旧定义（包含测试材质实现）。新的 `ScatterType::is_delta` 判断事件，语义不同。另移除 3 个旧采样类型 MaterialSample/GlassSample/GlassEvent，不提供兼容适配层。
+- 完整测试删除 0 项，5 项重命名/按当前事件语义改写；新增 25 项。329 → 354 项：311 单元 + 43 集成（19 配置/渲染、18 环境、6 材质传输），无 ignored。旧离散 probability 字段校验改为当前 weight/PDF/event 契约检查，Fresnel 频率、两界面 eta²、光谱能量、RR 补偿及现有 MIS/线程测试保留。
+- 实际消除的重复是路径中的玻璃专用吞吐量更新与连续材质的再次 evaluate/pdf 权重重算；所有续追统一使用 sample.weight 和一次事件更新。`path.rs` 仅做通用事件推进，地面辐照度转换移至直接着色模块。保留独立 D/G/F 数值参考、概率质量/接受率和能量积分测试，RGB/XYZ 两种输出以及光源 flux/相机 radiance 两种权重，不为了行数而混合它们。
+- `cargo fmt` 已执行。`cargo fmt --check`、`cargo build --locked --all-targets`、`cargo test --locked`、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 全部通过。最终代码分别在工作区 32 次 Delta + 用户 HDRI，以及提交配置 8 次 Delta + 仓库 HDRI 下完整通过这五项检查；临时验证后恢复用户文件。
+- 第二阶段 release 再次实跑 `camera_direct_caustics -- 4`（512²）、`diffuse_indirect -- 4`（320×240、0/1/4 深度）、`camera_parallel_benchmark -- 4 32`、`refract_ray`。基准 1/2/4/6 线程光源/三个相机 XYZ 逐位一致。另使用临时 JSON 实跑 Mirror、roughness=0.45 GGX、roughness=0 GGX 的 64×48、16 SPP、4 线程主程序；RGB8 输出解码确认 Direct 非零、Caustics 全黑、Combined=Direct。
+
+仍未实现 RoughDielectric、Plastic、各向异性、微表面多次散射能量补偿、光谱金属 BSDF、金属反射焦散、透明 shadow ray、嵌套介质与通用光子映射。解析太阳不通过 Delta 方向直接求值；只采样支持的表面/环境路径。有限深度截断、NDF 无效样本与玻璃二值遮挡的边界保留，当前系统不能宣称通用无偏 Path Tracer。没有运行默认 512²/256 SPP 全尺寸主渲染。

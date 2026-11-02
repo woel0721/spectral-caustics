@@ -165,7 +165,7 @@ fn environment_direction_contribution(
     let BsdfValue::Rgb(f_r) = material.evaluate(wi, wo, normal, EvaluateMode::Rgb) else {
         return Err("材质 RGB 求值必须返回 RGB BSDF".into());
     };
-    if f_r.iter().any(|value| !value.is_finite()) {
+    if f_r.iter().any(|value| !value.is_finite() || *value < 0.0) {
         return Err("环境采样的 BSDF 求值无效".into());
     }
     let li = environment.radiance(wi).ok_or("环境辐亮度无效")?;

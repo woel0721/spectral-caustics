@@ -1,4 +1,4 @@
-//! 有界玻璃/Lambertian 相机路径、MIS 环境照明与分量输出。
+//! 有界 RGB BSDF 相机路径、MIS 环境照明与分量输出。
 
 mod camera;
 mod diffuse;

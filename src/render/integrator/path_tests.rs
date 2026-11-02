@@ -536,3 +536,5 @@ fn diffuse_mirror_escape_uses_rgb_sample_weight_once_and_keeps_rng_streams() {
         (0, 2, 2)
     );
 }
+
+mod materials;

@@ -1,4 +1,4 @@
-//! Lambertian 单步采样、后续顶点直接光与 Russian Roulette；无生产路径循环。
+//! 通用 BSDF 单步采样、后续顶点直接光与 Russian Roulette；无生产路径循环。
 
 use super::{
     direct::surface_sun_lighting,
@@ -17,7 +17,7 @@ use nalgebra::Vector3;
 use rand::Rng;
 use std::error::Error;
 
-/// 第三次漫反射后的顶点已着色，且还有预算时，RR 只控制之后的贡献。
+/// 第三次连续散射后的顶点已着色，且还有预算时，RR 只控制之后的贡献。
 /// 使用真实路径 RGB 吞吐量（含玻璃前缀）；存活补偿不缩放已累计辐亮度。
 pub(super) fn russian_roulette(
     state: &mut CameraPathState,

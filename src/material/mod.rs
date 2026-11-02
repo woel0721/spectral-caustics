@@ -1,6 +1,8 @@
-//! 材质定义 BSDF；几何只负责求交，积分器负责光照、余弦项和采样权重。
+//! 材质定义 BSDF 与完整采样权重；几何负责求交，积分器负责计光和路径推进。
 
 pub mod dielectric;
+mod ggx;
+pub mod ggx_metal;
 pub mod lambertian;
 pub mod mirror;
 
@@ -135,6 +137,11 @@ pub fn from_config(config: &MaterialConfig) -> Result<Box<dyn Material>, String>
         MaterialConfig::Mirror { reflectance } => {
             Ok(Box::new(mirror::Mirror::new(Vector3::from(*reflectance))?))
         }
+        MaterialConfig::GgxMetal { eta, k, roughness } => Ok(Box::new(ggx_metal::GgxMetal::new(
+            Vector3::from(*eta),
+            Vector3::from(*k),
+            *roughness,
+        )?)),
     }
 }
 

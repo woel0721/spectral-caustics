@@ -1,9 +1,12 @@
 //! 解析太阳的照明约定、直接 BSDF 求值与二值阴影。
 
-use super::{ground::GroundLighting, offset_ray_origin};
+use super::{
+    ground::{GroundLighting, ground_irradiance, lambertian_radiance},
+    offset_ray_origin,
+};
 use crate::{
     geometry::{hit::Hit, ray::Ray},
-    material::{BsdfValue, EvaluateMode, Material},
+    material::{BsdfValue, EvaluateMode, Material, unit_vector},
     render::utils::xyz_to_linear_srgb,
     scene::Scene,
 };
@@ -121,4 +124,36 @@ pub(super) fn direct_lighting(
         return Ok(Vector3::zeros());
     }
     Ok(direct_rgb)
+}
+
+/// 首次表面可接收焦散；后续顶点仅使用 secondary_direct_lighting。
+pub(super) fn first_surface_lighting(
+    scene: &Scene,
+    hit: &Hit,
+    material: &dyn Material,
+    wo: Vector3<f64>,
+    environment: Vector3<f64>,
+    light: (Vector3<f64>, f64),
+    ground: Option<&GroundLighting<'_>>,
+) -> Result<super::types::CameraPathComponents, Box<dyn Error>> {
+    use super::types::CameraPathComponents;
+    if let Some(ground) = ground.filter(|g| hit.object_id == Some(g.object_id)) {
+        let normal = unit_vector(hit.normal).ok_or("地面法线无效")?;
+        if normal.dot(&wo) <= 0.0 {
+            return Ok(CameraPathComponents::default());
+        }
+        let e = ground_irradiance(scene, hit, ground)?;
+        let direct =
+            lambertian_radiance(e.direct_xyz, ground.rho).ok_or("地面直射辐亮度计算失败")?;
+        let caustics =
+            lambertian_radiance(e.caustics_xyz, ground.rho).ok_or("地面焦散辐亮度计算失败")?;
+        return Ok(CameraPathComponents {
+            direct: xyz_to_linear_srgb(direct).ok_or("地面 XYZ 辐亮度转换失败")? + environment,
+            caustics: xyz_to_linear_srgb(caustics).ok_or("地面焦散 XYZ 辐亮度转换失败")?,
+        });
+    }
+    Ok(CameraPathComponents {
+        direct: surface_sun_lighting(scene, hit, material, wo, light, ground)? + environment,
+        ..Default::default()
+    })
 }

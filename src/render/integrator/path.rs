@@ -1,17 +1,12 @@
 //! 通用 RGB 相机路径：按 BSDF 事件推进，局部 NEE 与 Delta 链逃逸分开计光。
 use super::{
     diffuse::{russian_roulette, sample_scatter_ray, secondary_direct_lighting},
-    direct::surface_sun_lighting,
+    direct::first_surface_lighting,
     environment::environment_lighting,
-    ground::{GroundLighting, ground_irradiance, lambertian_radiance},
+    ground::GroundLighting,
     types::{CameraPathRngs, CameraPathState},
 };
-use crate::{
-    geometry::hit::Hit,
-    material::{Material, unit_vector},
-    render::utils::xyz_to_linear_srgb,
-    scene::Scene,
-};
+use crate::{material::unit_vector, scene::Scene};
 use nalgebra::Vector3;
 use std::error::Error;
 
@@ -131,36 +126,4 @@ pub(super) fn trace_camera_path(
         return Err("路径颜色非法或计算溢出".into());
     }
     Ok(())
-}
-
-/// 首次表面可接收焦散；后续顶点仅使用 secondary_direct_lighting。
-fn first_surface_lighting(
-    scene: &Scene,
-    hit: &Hit,
-    material: &dyn Material,
-    wo: Vector3<f64>,
-    environment: Vector3<f64>,
-    light: (Vector3<f64>, f64),
-    ground: Option<&GroundLighting<'_>>,
-) -> Result<super::types::CameraPathComponents, Box<dyn Error>> {
-    use super::types::CameraPathComponents;
-    if let Some(ground) = ground.filter(|g| hit.object_id == Some(g.object_id)) {
-        let normal = unit_vector(hit.normal).ok_or("地面法线无效")?;
-        if normal.dot(&wo) <= 0.0 {
-            return Ok(CameraPathComponents::default());
-        }
-        let e = ground_irradiance(scene, hit, ground)?;
-        let direct =
-            lambertian_radiance(e.direct_xyz, ground.rho).ok_or("地面直射辐亮度计算失败")?;
-        let caustics =
-            lambertian_radiance(e.caustics_xyz, ground.rho).ok_or("地面焦散辐亮度计算失败")?;
-        return Ok(CameraPathComponents {
-            direct: xyz_to_linear_srgb(direct).ok_or("地面 XYZ 辐亮度转换失败")? + environment,
-            caustics: xyz_to_linear_srgb(caustics).ok_or("地面焦散 XYZ 辐亮度转换失败")?,
-        });
-    }
-    Ok(CameraPathComponents {
-        direct: surface_sun_lighting(scene, hit, material, wo, light, ground)? + environment,
-        ..Default::default()
-    })
 }
