@@ -59,7 +59,7 @@
 
 首次表面立即着色，不再等待漫反射链结束。深度 1 与更深路径共用 RGB 吞吐量乘法，错误也按当前顶点求值顺序返回；不保留历史加法分组或 RNG 消耗契约。光源总图统一为 `direct + caustics`，可能出现末位舍入差异。
 
-Direct 仍包含解析太阳、环境和有界漫反射贡献；Caustics 仍只来自首次地面顶点，不能在续追中读取焦散图或添加逃逸 HDRI。RR、Fresnel、MIS/PDF 和光谱能量的物理含义不变。
+Direct 包含解析太阳、环境和有界漫反射贡献；F2b 第二阶段也将漫反射后经玻璃逃逸的环境计入 Direct。Caustics 仍只来自首次地面顶点，不能在续追中重复读取焦散图。RR、Fresnel、MIS/PDF 和光谱能量的物理含义不变。
 
 仍保留的有用冗余：独立 RGB 单缓冲相机与光谱三图相机共用一份路径/像素循环，但有两种缓冲写入分支，避免 RGB 场景分配三张图；光源保留 sampled direct 用于守恒验证。单光子及独立逐波长发射测试参考用于数值验证，不是冻结生产算法。Render 门面与自由函数分别提供配置/线程池集成和直接调用。
 
@@ -126,3 +126,24 @@ PR #1 审查以 `e9542ca` 为起点。原始分支的全目标构建和严格 Cl
 实际运行 `camera_direct_caustics -- 8`（512×512）、`diffuse_indirect -- 16`（320×240，0/1/4 预算）和 `camera_parallel_benchmark -- 16 64`。PNG 尺寸/格式正确，检查相机合成图和四反弹示例未见明显异常；线程示例的光源与三个相机 XYZ 在 1/2/4/6 线程一致。低采样预览仍有蒙特卡洛噪声，本轮没有执行默认 256 SPP 的全尺寸渲染。
 
 此次修复不开放漫反射后的环境逃逸，不更改环境 MIS、Fresnel、RR、公开 API 或 JSON；透明 shadow ray、环境焦散、嵌套介质及通用无偏路径追踪仍未实现。
+
+## F2b 第二阶段 — 漫反射后经玻璃逃逸环境
+
+基于最新 main `3e6fdad`，清理前工作区干净，测试基线为 282 项单元测试 + 37 项集成测试全部通过。本节取代上面历史阶段中“经玻璃逃逸环境尚未计入”的限制。
+
+`trace_camera_path` 的 miss 保留两类判断：无漫反射历史仍查询相机背景；已有漫反射历史时，只有 `last_scatter == Delta` 且存在 `scene.environment` 才查询最终方向的环境辐亮度，并将 `throughput ⊙ radiance` 加入 Direct。最近散射为 Diffuse 的 miss 仍截断，无环境时不将 `background_color` 当作续追照明。
+
+局部 `environment_lighting` 的 BSDF/HDRI 两种策略都只查询直达环境，shadow ray 遇到玻璃即遮挡，因此无法生成 Diffuse → Delta+ → Environment；新增项与其路径支持不重叠，无需额外 MIS 权重。完整吞吐量已包含 Lambertian BSDF、余弦/PDF、Fresnel 离散事件权重和 RR 存活补偿，不再重复相乘或除概率。环境采样器、Balance/Power 配额与 PDF、状态结构、公开 API、JSON 及 RNG 流均不修改。
+
+新增 `path_tests/environment_escape.rs` 的 10 项测试：单界面透射和最终渐变方向/强度、反射单位权重、双界面折射率平方抵消、无环境时背景不参与续追、纯漫反射及玻璃前缀后的漫反射逃逸不重复计光、玻璃后再次漫反射的 NEE/逃逸分工、完整 RGB 与 RR 补偿、旋转 HDRI 和 1/3/8 样本的 Balance/Power 分工、八次玻璃上限、非法环境/贡献溢出。原有 319 项测试全部保留，包括首次地面焦散、分量相加、独立 RNG、深度/RR 和线程确定性；没有删除文件、函数或测试，也没有引入冻结算法或重复生产实现。
+
+最终实际通过 `cargo fmt`、`cargo fmt --check`、`cargo build --locked --all-targets`、`cargo test --locked`、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check`。现为 292 项单元测试 + 37 项集成测试，无失败或 ignored。
+
+修改前后实跑与对比：
+
+- `camera_direct_caustics -- 8`：512×512 三张 RGB8 PNG；Caustics 文件完全一致，Direct/Combined 随新增环境项变化，已检查合成预览。
+- `diffuse_indirect -- 16`：320×240、0/1/4 漫反射预算；三张 PNG 前后完全一致，已检查四反弹预览。
+- 临时公共 API 探针：48×32、16 SPP、seed 42，覆盖无环境/渐变/HDRI、0/1/4 预算、Balance/Power、环境样本 3。90 份原始 XYZ 缓冲中 74 份逐位一致；16 份变化均为有环境且预算大于零的 Direct/Combined。全部光源和相机 Caustics 缓冲逐位一致，无环境及深度 0 的全部缓冲逐位一致。探针和快照未纳入版本控制。
+- `camera_parallel_benchmark -- 16 64`：光源和三份相机 XYZ 在 1/2/4/6 线程逐位一致；`refract_ray` 成功输出双界面方向和地面落点。
+
+仍是有界估计器，未实现透明 shadow ray、太阳穿玻璃的直接照明、环境焦散图、嵌套介质或新材质。狭窄玻璃路径可能有较高方差；深度和八次玻璃上限仍会截断路径。本轮未执行默认 256 SPP 的全尺寸主程序渲染。

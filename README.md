@@ -100,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `take_photon_landing` 返回 `PhotonLanding { position, weight }`，用于单条双界面光子路径；批量追踪使用内部 `take_photon_from_hit` 复用首交点。权重不能在累积能量时丢弃。
 - `sample_ground_irradiance`、`lambertian_radiance` 是世界坐标查图与中性反射换算；`save_png_with_exposure` 显式指定输出曝光。
 
-`src/render/integrator.rs` 组织 camera、path、diffuse、environment、direct、ground、rng、types 子模块；`src/scene.rs` 保留主类型，构建、物体、光照、棋盘格和光子追踪分别实现。测试共用当前状态 helper，未保留生产代码依赖测试模块的适配入口。 `CameraPathState` 用 `LastScatter::{Camera, Diffuse, Delta}` 记录最近事件，并分别累计漫反射连接和玻璃事件。F2b 第一阶段允许 Diffuse → Glass → Diffuse 的混合传播；经玻璃逃逸环境的贡献仍待下一阶段处理。
+`src/render/integrator.rs` 组织 camera、path、diffuse、environment、direct、ground、rng、types 子模块；`src/scene.rs` 保留主类型，构建、物体、光照、棋盘格和光子追踪分别实现。测试共用当前状态 helper，未保留生产代码依赖测试模块的适配入口。 `CameraPathState` 用 `LastScatter::{Camera, Diffuse, Delta}` 记录最近事件，并分别累计漫反射连接和玻璃事件。F2b 支持 Diffuse → Glass → Diffuse 的混合传播，以及 Diffuse → Glass → Environment 的逃逸环境贡献。
 
 ## 计光与物理边界
 
@@ -110,15 +110,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 **相机端。** 相机路径在任何漫反射深度都可以采样玻璃 Fresnel 反射/折射；整条路径合计最多 8 个玻璃事件。反射权重为 1，透射权重为 `(η_i/η_t)²`，已抵消事件概率，不再额外乘 Fresnel、余弦或除概率。首先命中的可着色表面立即计光，随后最多续追 `max_diffuse_bounces` 次 Lambertian 连接，范围 0..1024；4 表示最多访问 5 个漫反射顶点。
 
-首个地面顶点将解析太阳和焦散图分别计入 Direct/Caustics，环境只加一次。后续 Lambertian 顶点仅累加太阳和环境直接光到 Direct，不读取焦散图；玻璃顶点可在漫反射之间继续反射/折射，不读取焦散图。未绑定/不支持的材质及背面终止；漫反射之后的 miss 暂不添加逃逸环境辐亮度，即使此前又经过玻璃（已知漏计，下一阶段处理）。背景归入 Direct，因此背景的 Caustics 为零。
+首个地面顶点将解析太阳和焦散图分别计入 Direct/Caustics，环境只加一次。后续 Lambertian 顶点仅累加太阳和环境直接光到 Direct，不读取焦散图；玻璃顶点可在漫反射之间继续反射/折射，不读取焦散图。未绑定/不支持的材质及背面终止。没有漫反射历史的 miss 查询相机背景；已有漫反射历史时，只有最近散射为 Delta 且存在 `scene.environment` 才将 `throughput ⊙ environment.radiance(最终方向)` 加入 Direct。完整吞吐量已含 BSDF、余弦/PDF、玻璃离散权重和 RR 存活补偿，不再重复加权。最近散射为 Diffuse 的 miss 仍截断；`environment=None` 时，`background_color` 仅用于相机背景，不照亮漫反射后的路径。逃逸环境不进入 Caustics。
 
 第三次漫反射连接后的顶点已着色且仍有预算时执行 RR：`p=clamp(max(RGB throughput),0.05,0.95)`，存活吞吐量除以 p；不会缩放已累计辐亮度。浅层与最后顶点不抽 RR。各顶点使用 `f_r cosθ/pdf` 更新 RGB 吞吐量；Lambertian 配套余弦 PDF 为 `cosθ/π`。
 
 **环境和太阳。** HDRI 按亮度×球面像素立体角建立 CDF，95% 重要性采样与 5% 全球均匀采样混合，使用完整 PDF。N≥2 时，BSDF 配额 floor(N/2)，HDRI 配额为剩余数；Balance 分母为 `n_b p_b+n_e p_e`，Power 使用 β=2 和真实样本数量。N=1 使用随机 50/50 混合；无贴图的渐变使用纯 BSDF 采样。零贡献、遮挡和背半球样本保留在原配额内。
 
-解析太阳和环境的 shadow ray 均是二值遮挡，玻璃也会遮光。光谱太阳使用水平发射窗口投影后的法向辐照度，使无遮挡水平地面得到 `Φ/A_horizontal`；独立 RGB 相机使用中性白光 `Φ/A_horizontal` 再乘表面余弦，两种强度约定有意区分。
+解析太阳和环境的 shadow ray 均是二值遮挡，玻璃也会遮光。环境 NEE/MIS 只估计本顶点直达环境的路径，遇到玻璃返回零；Diffuse → Delta+ → Environment 由续追单独估计，两者不重叠。Diffuse → Glass → Diffuse → Environment 的最后事件为 Diffuse，仍由最后顶点的 NEE/MIS 负责，不额外添加逃逸项。光谱太阳使用水平发射窗口投影后的法向辐照度，使无遮挡水平地面得到 `Φ/A_horizontal`；独立 RGB 相机使用中性白光 `Φ/A_horizontal` 再乘表面余弦，两种强度约定有意区分。
 
-这是有界 Lambertian/玻璃混合路径估计器。已支持漫反射后的玻璃继续传播，但尚未估计 Diffuse → Glass → Environment 的逃逸环境贡献。未实现透明 shadow ray、环境焦散、通用无偏 Path Tracer、通用 Photon Mapping、BVH/KD-Tree、体积、GUI 或 GPU。
+这是有界 Lambertian/玻璃混合路径估计器。玻璃后逃逸环境只增加相机 Direct 贡献，不构建环境焦散图。未实现透明 shadow ray、太阳穿过玻璃的直接照明、嵌套介质、通用无偏 Path Tracer、通用 Photon Mapping、BVH/KD-Tree、体积、GUI 或 GPU；深度上限仍会截断路径，狭窄玻璃路径的采样可能有较高方差。
 
 ## 数据与可复现性
 

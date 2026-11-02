@@ -24,7 +24,8 @@ pub(super) const MAX_GLASS_BOUNCES: usize = 8;
 /// 调用方为每条路径创建 CameraPathState；RNG 由像素采样循环持有，不能逐路径重设种子。
 /// wo = -ray.direction，保留朝外几何法线；玻璃只乘 sample.weight。
 /// 新起点沿采样方向所在侧的法线偏移 1e-5 米，第九个玻璃命中处截断。
-/// 尚未漫反射的 miss 查询背景；漫反射后的 miss 暂不累加逃逸环境（待后续 MIS 阶段）。
+/// 尚未漫反射的 miss 查询背景；漫反射后仅最近为 Delta 的 miss 累加环境。
+/// 最近为 Diffuse 的逃逸已由该顶点的环境 NEE/MIS 估计，不再累加。
 /// 首次地面命中使用解析直射和焦散图，环境单独计入一次。
 /// 首次 Lambertian 后迭代追踪有界漫反射链；后续仅累加太阳/环境直接光。
 /// 漫反射后也可继续经过玻璃；玻璃不消耗漫反射预算，不模拟透明 shadow ray。
@@ -43,13 +44,23 @@ pub(super) fn trace_camera_path(
             return Err("漫反射路径吞吐量计算溢出".into());
         }
         let Some(hit) = scene.intersect(&state.ray) else {
-            // 是否曾经过漫反射是路径历史，不能用最近一次事件来替代。
+            // 无漫反射历史时仍允许 background_color 作为相机背景。
             if state.diffuse_bounces == 0 {
                 state.radiance.direct += state.throughput.component_mul(
                     &scene
                         .background_radiance(state.ray.direction)
                         .ok_or("背景辐亮度无效")?,
                 );
+            } else if state.last_scatter == LastScatter::Delta
+                && let Some(environment) = &scene.environment
+            {
+                // 局部环境 NEE 的二值 shadow ray 遇到玻璃即遮挡，无法生成
+                // Diffuse -> Delta+ -> Environment；此处用完整吞吐量计入一次。
+                // BSDF、Fresnel 离散概率及 RR 补偿均已包含，不能再加权。
+                let radiance = environment
+                    .radiance(state.ray.direction)
+                    .ok_or("环境辐亮度无效")?;
+                state.radiance.direct += state.throughput.component_mul(&radiance);
             }
             break;
         };
@@ -60,7 +71,7 @@ pub(super) fn trace_camera_path(
         // 按当前命中的材质分派，两个分支共用事件更新与末尾的 Ray 写回。
         // 地面绑定已在 bind_spectral_ground_lighting 中排除 delta 材质。
         let next_ray = if material.is_delta() {
-            // F2b 第一步：无论此前是否经过漫反射，都允许采样玻璃。
+            // 无论此前是否经过漫反射，都允许采样玻璃。
             // 玻璃只计 glass_events；已发生的 diffuse_bounces 历史保持不变。
             if state.glass_events == MAX_GLASS_BOUNCES {
                 break;
