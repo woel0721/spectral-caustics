@@ -35,7 +35,7 @@
 
 **阶段 E1 已加入可选的单次 Lambertian 间接反弹。** `scene.max_diffuse_bounces` 缺省为 0，设为 1 时将第二个 Lambertian 表面的太阳/环境直接光照传回第一个表面，只计入 Direct；玻璃上限和 Caustics 保持原行为。独立验证场景见 `diffuse_indirect` 示例和下方 E1 说明。
 
-**E2 已支持有限深度 Lambertian 路径与 Russian Roulette。** `max_diffuse_bounces` 可设为 0–1024，每条路径最多照明 N+1 个漫反射顶点；0/1 保持旧版结果与 RNG 顺序，展示 JSON 仍为 1。后续顶点只返回太阳/环境直接光，不读取二次焦散或完整地面图；详细兼容、终止和验收见下方 E2。各旧阶段记录保留当时的范围与测量参数。
+**E2 已支持有限深度 Lambertian 路径与 Russian Roulette。** `max_diffuse_bounces` 可设为 0–1024，每条路径最多照明 N+1 个漫反射顶点；0/1 保持旧版结果与 RNG 顺序，当前展示 JSON 为 4。后续顶点只返回太阳/环境直接光，不读取二次焦散或完整地面图；详细兼容、终止和验收见下方 E2。各旧阶段记录保留当时的范围与测量参数。
 
 **V0.4 阶段 17 已加入地面棋盘格并调整构图。** 默认太阳传播方向改为 `[0.45, 0, -1]`，相机位置 `[2.5, -4.5, 2.6]`、目标 `[0, 0, 0.4]`、垂直 FOV `35°`。棋盘格按地面世界 x/y 坐标生成，每格 0.5 米，只在相机着色时调制反射率。
 
@@ -772,7 +772,7 @@ cargo test --release --locked compare_power_sampling -- --ignored --nocapture
 
 ### 阶段 E1：单次漫反射间接光照（0/1 兼容语义）
 
-在 `scene` 中加入 `"max_diffuse_bounces": 1` 可启用；省略时为 0。E1 阶段只接受 0/1，E2 扩展到 0–1024，并保留下列 0/1 语义。当前展示 JSON 已显式设置 `max_diffuse_bounces=1`、`environment_samples=8`、`environment_mis_heuristic="power"`；`Scene::new` 和旧 JSON 缺省时仍关闭漫反射反弹。SPP、HDRI 分布、MIS 算法、曝光和颜色转换保持原设置。此开关作用于共用 `trace_camera_path()` 的玻璃相机入口，`render_camera_lit` 仍是单次直接光照调试器。
+在 `scene` 中加入 `"max_diffuse_bounces": 1` 可启用；省略时为 0。E1 阶段只接受 0/1，E2 扩展到 0–1024，并保留下列 0/1 语义。当前展示 JSON 已显式设置 `max_diffuse_bounces=4`、`environment_samples=8`、`environment_mis_heuristic="power"`；`Scene::new` 和旧 JSON 缺省时仍关闭漫反射反弹。SPP、HDRI 分布、MIS 算法、曝光和颜色转换保持原设置。此开关作用于共用 `trace_camera_path()` 的玻璃相机入口，`render_camera_lit` 仍是单次直接光照调试器。
 
 第一处 Lambertian A 仍保留原太阳、环境和绑定地面光照。E1 通过 `material.sample(wo, normal, rng)` 生成一条连续方向，沿 A 法线偏移 `1e-5 m` 后求最近交点 B。`sample_diffuse_ray()` 计算线性 RGB 吞吐量，`sample_one_diffuse_indirect()` 只计算 B 的现有直接光照，不再续追漫反射或玻璃：
 
@@ -815,11 +815,13 @@ E1 当时只包含 A→B→直接光源，E2 的多次漫反射与 Russian Roule
 
 ### E2：可配置的有限深度 Lambertian 路径
 
-`scene.max_diffuse_bounces=N` 控制额外的漫反射连接数：0 只照明 A，1 照明 A/B，2 照明 A/B/C，依此类推。Rust 内置值及旧 JSON 缺省仍为 0；`configs/default.json` 继续使用 **8 个环境样本、Power MIS、1 次漫反射、256 SPP**。启用更深路径时可在自己的配置副本中设置：
+`scene.max_diffuse_bounces=N` 控制额外的漫反射连接数：0 只照明 A，1 照明 A/B，2 照明 A/B/C，依此类推。Rust 内置值及旧 JSON 缺省仍为 0；`configs/default.json` 当前使用 **8 个环境样本、Power MIS、4 次漫反射、256 SPP**。启用更深路径时可在自己的配置副本中设置：
 
 ```json
 "max_diffuse_bounces": 5
 ```
+
+2026-11-02 将展示深度改为 4 后，使用 512×512、256 SPP、seed=42、8 个环境样本、Power MIS 和曝光 1，实际渲染深度 1/4 对照。Direct、Caustics、Combined 各 262144 个像素的 XYZ 均逐位相同，最大差值为 0；Combined 的平均线性 Y 均为 0.579466156061661。三张当前展示图已重新生成。默认场景只有一个水平 Lambertian 地面和玻璃棱镜，地面 BSDF 射线随后 miss 或命中玻璃终止，因此没有额外漫反射顶点可供更深预算照明；这组画面不能展示多表面的颜色传递。
 
 只接受 0–1024，拒绝更大值。对深度 >=2，配置和运行时相机入口用 checked multiplication 检查 `width*height*spp*environment_samples*(N+1)` 的最坏样本工作量，溢出时在分配/追踪前返回错误；0/1 保留旧工作量校验语义。路径状态为 O(1)，没有递归调用或按深度分配的历史栈。深度上限仍会影响最坏运行时间，RR 不替代有限预算。
 

@@ -587,7 +587,7 @@ fn empty_and_configured_scenes_preserve_distinct_defaults_and_shared_fields() {
             preset.environment_mis_heuristic,
             preset.max_diffuse_bounces
         ),
-        (8, Power, 1)
+        (8, Power, 4)
     );
     assert!(!empty.environment.as_ref().unwrap().has_map());
     assert!(preset.environment.as_ref().unwrap().has_map());

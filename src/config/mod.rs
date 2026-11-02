@@ -93,7 +93,7 @@ mod tests {
         expected.render.camera_spp = 256;
         expected.scene.environment_samples = 8;
         expected.scene.environment_mis_heuristic = sceneconfig::EnvironmentMisHeuristic::Power;
-        expected.scene.max_diffuse_bounces = 1;
+        expected.scene.max_diffuse_bounces = 4;
         expected.scene.environment.as_mut().unwrap().map_path =
             Some(PathBuf::from("assets/HDRI/autoshop_01_4k.hdr"));
         assert_eq!(config, expected);

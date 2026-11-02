@@ -31,7 +31,7 @@
     },
     "environment_samples": 8,
     "environment_mis_heuristic": "power",
-    "max_diffuse_bounces": 1,
+    "max_diffuse_bounces": 4,
     "ground_checkerboard": {
       "cell_size_m": 0.5,
       "even_scale": 1.0,
