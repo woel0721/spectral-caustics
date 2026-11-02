@@ -3,15 +3,6 @@
 use crate::{geometry::ray::Ray, render::framebuffer::Framebuffer};
 use nalgebra::Vector3;
 
-/// 调试分量；Direct 包含太阳、环境、漫反射间接光与背景，Caustics 只显示焦散。
-/// 三种模式复用相同相机 RNG/玻璃路径，Combined 为两者在线性空间中的和。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GroundLightingComponent {
-    Direct,
-    Caustics,
-    Combined,
-}
-
 /// 同一批相机路径的三个结果，均为未曝光的线性 XYZ 辐亮度。
 pub struct CameraLightingImages {
     pub direct: Framebuffer,
@@ -38,16 +29,6 @@ pub(super) struct DiffuseRay {
     pub(super) throughput: Vector3<f64>,
 }
 
-impl CameraPathComponents {
-    pub(super) fn select(&self, component: GroundLightingComponent) -> Vector3<f64> {
-        match component {
-            GroundLightingComponent::Direct => self.direct,
-            GroundLightingComponent::Caustics => self.caustics,
-            GroundLightingComponent::Combined => self.direct + self.caustics,
-        }
-    }
-}
-
 /// 一条有界相机路径；throughput 为线性 RGB，两个事件计数彼此独立。
 pub(super) struct CameraPathState {
     pub(super) ray: Ray,
@@ -56,8 +37,6 @@ pub(super) struct CameraPathState {
     pub(super) diffuse_bounces: usize,
     pub(super) glass_events: usize,
     pub(super) max_diffuse_bounces: usize,
-    /// 仅深度 1 使用，保留 E1 的 (T_diffuse ⊙ L_next) ⊙ T_glass 浮点分组。
-    pub(super) e1_diffuse_weights: Option<(Vector3<f64>, Vector3<f64>)>,
 }
 
 impl CameraPathState {
@@ -69,7 +48,6 @@ impl CameraPathState {
             diffuse_bounces: 0,
             glass_events: 0,
             max_diffuse_bounces,
-            e1_diffuse_weights: None,
         }
     }
 }

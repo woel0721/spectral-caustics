@@ -13,9 +13,8 @@ use spectral_caustics::{
     },
     optics::{iormode::IorMode, spectrum::rgb_reflectance},
     render::{
-        GroundLightingComponent, Render, caustics::ground_to_pixel, framebuffer::Framebuffer,
-        render_camera_glass, render_camera_glass_components, render_camera_glass_with_ground,
-        render_camera_glass_with_lighting, render_camera_lit, utils::linear_srgb_to_xyz,
+        Render, caustics::ground_to_pixel, framebuffer::Framebuffer, render_camera_glass,
+        render_camera_glass_components, utils::linear_srgb_to_xyz,
     },
     scene::Scene,
 };
@@ -136,20 +135,11 @@ fn sky_from_json_is_added_once_in_all_camera_entries_without_changing_sun_or_pho
     assert_eq!(sky_lighting.sun_irradiance_xyz, lighting.sun_irradiance_xyz);
     assert_eq!(sky_lighting.caustics.pixels, lighting.caustics.pixels);
     let render_entries = |scene: &Scene| {
+        let images = render_camera_glass_components(scene, &lighting, 3, 2, 8, 42).unwrap();
         [
-            render_camera_lit(scene, 3, 2).unwrap(),
             render_camera_glass(scene, 3, 2, 8, 42).unwrap(),
-            render_camera_glass_with_ground(scene, &photons, 3, 2, 8, 42).unwrap(),
-            render_camera_glass_with_lighting(
-                scene,
-                &lighting,
-                3,
-                2,
-                8,
-                42,
-                GroundLightingComponent::Combined,
-            )
-            .unwrap(),
+            images.direct,
+            images.combined,
         ]
     };
     let expected_sky =
@@ -167,53 +157,9 @@ fn sky_from_json_is_added_once_in_all_camera_entries_without_changing_sun_or_pho
     let expected_combined =
         lighting.sun_irradiance_xyz * lighting.light_wi.z * (0.8 / std::f64::consts::PI)
             + expected_sky;
-    for xyz in &with_sky[3].pixels {
+    for xyz in &with_sky[2].pixels {
         assert!((xyz - expected_combined).norm() < 1e-12);
     }
-}
-
-#[test]
-fn spectral_irradiance_flows_through_gray_ground_camera_paths_and_png_output() {
-    let config = small_config();
-    let scene = Scene::from_config(&config.scene).unwrap();
-    let renderer = Render::new(config.render.clone()).unwrap();
-    // 第一遍是未曝光的 XYZ 辐照度图；相机分辨率独立于这张图。
-    let ground = renderer.render(&scene).unwrap();
-    let camera = |map: &Framebuffer| {
-        render_camera_glass_with_ground(&scene, map, 18, 10, 8, config.render.seed).unwrap()
-    };
-    let image = camera(&ground);
-    assert_eq!((image.width, image.height), (18, 10));
-    assert_eq!(image.pixels, camera(&ground).pixels);
-    let zero = Framebuffer::new(ground.width, ground.height);
-    let no_ground = camera(&zero);
-    assert!(
-        image
-            .pixels
-            .iter()
-            .zip(&no_ground.pixels)
-            .any(|(full, black)| full.y > black.y + 1e-9)
-    );
-    let half = Framebuffer {
-        width: ground.width,
-        height: ground.height,
-        pixels: ground.pixels.iter().map(|p| p * 0.5).collect(),
-    };
-    let half_image = camera(&half);
-    for ((full, half), background) in image
-        .pixels
-        .iter()
-        .zip(&half_image.pixels)
-        .zip(&no_ground.pixels)
-    {
-        assert!((half - (background + (full - background) * 0.5)).norm() < 1e-12);
-    }
-    let directory = TemporaryDirectory::new();
-    let path = directory.0.join("camera_glass_with_ground.png");
-    renderer.save(&image, &path).unwrap();
-    let saved = image::open(path).unwrap();
-    assert_eq!((saved.width(), saved.height()), (18, 10));
-    assert_eq!(saved.color(), image::ColorType::Rgb8);
 }
 
 #[test]
@@ -224,45 +170,28 @@ fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
     let scene = Scene::from_config(&config.scene).unwrap();
     let renderer = Render::new(config.render.clone()).unwrap();
     let lighting = renderer.render_lighting(&scene).unwrap();
-    let legacy = renderer.render(&scene).unwrap();
+    let photon_total = renderer.render(&scene).unwrap();
     for (actual, expected) in lighting
         .combined()
         .unwrap()
         .pixels
         .iter()
-        .zip(&legacy.pixels)
+        .zip(&photon_total.pixels)
     {
         assert!((actual - expected).norm() < 1e-12);
     }
-    let camera = |component| {
-        render_camera_glass_with_lighting(
-            &scene,
-            &lighting,
-            24,
-            16,
-            16,
-            config.render.seed,
-            component,
-        )
-        .unwrap()
-    };
-    let direct = camera(GroundLightingComponent::Direct);
-    let caustics = camera(GroundLightingComponent::Caustics);
-    let combined = camera(GroundLightingComponent::Combined);
     let images =
         render_camera_glass_components(&scene, &lighting, 24, 16, 16, config.render.seed).unwrap();
     let repeated =
         render_camera_glass_components(&scene, &lighting, 24, 16, 16, config.render.seed).unwrap();
-    for (actual, reference, repeated) in [
-        (&images.direct, &direct, &repeated.direct),
-        (&images.caustics, &caustics, &repeated.caustics),
-        (&images.combined, &combined, &repeated.combined),
+    for (actual, repeated) in [
+        (&images.direct, &repeated.direct),
+        (&images.caustics, &repeated.caustics),
+        (&images.combined, &repeated.combined),
     ] {
         assert_eq!(actual.pixels, repeated.pixels);
-        for (actual, reference) in actual.pixels.iter().zip(&reference.pixels) {
-            assert!((actual - reference).norm() < 1e-12);
-        }
     }
+    let (direct, caustics, combined) = (&images.direct, &images.caustics, &images.combined);
     for ((direct, caustics), combined) in images
         .direct
         .pixels
@@ -277,28 +206,18 @@ fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
     assert_eq!(lighting.direct.pixels, after.direct.pixels);
     assert_eq!(lighting.caustics.pixels, after.caustics.pixels);
     assert_eq!(lighting.sun_irradiance_xyz, after.sun_irradiance_xyz);
-    assert_eq!(renderer.render(&scene).unwrap().pixels, legacy.pixels);
+    assert_eq!(renderer.render(&scene).unwrap().pixels, photon_total.pixels);
     let mut solar_scene = Scene::from_config(&config.scene).unwrap();
     solar_scene.environment = None;
     solar_scene.environment_samples = 7;
     assert_eq!(
         caustics.pixels,
-        render_camera_glass_with_lighting(
-            &solar_scene,
-            &lighting,
-            24,
-            16,
-            16,
-            config.render.seed,
-            GroundLightingComponent::Caustics,
-        )
-        .unwrap()
-        .pixels
+        render_camera_glass_components(&solar_scene, &lighting, 24, 16, 16, config.render.seed)
+            .map(|images| images.caustics)
+            .unwrap()
+            .pixels
     );
-    assert_eq!(
-        combined.pixels,
-        camera(GroundLightingComponent::Combined).pixels
-    );
+    assert_eq!(combined.pixels, repeated.combined.pixels);
     assert!(caustics.pixels.iter().any(|p| p.y > 1e-6));
     for ((d, c), sum) in direct
         .pixels
@@ -344,44 +263,7 @@ fn checkerboard_modulates_all_camera_lighting_once_without_changing_irradiance()
     lighting.caustics.pixels.fill(ground_map.pixels[0]);
     let entries = |scene: &Scene| {
         let images = render_camera_glass_components(scene, &lighting, 2, 2, 8, 42).unwrap();
-        [
-            render_camera_lit(scene, 2, 2).unwrap(),
-            render_camera_glass(scene, 2, 2, 8, 42).unwrap(),
-            render_camera_glass_with_ground(scene, &ground_map, 2, 2, 8, 42).unwrap(),
-            render_camera_glass_with_lighting(
-                scene,
-                &lighting,
-                2,
-                2,
-                8,
-                42,
-                GroundLightingComponent::Direct,
-            )
-            .unwrap(),
-            render_camera_glass_with_lighting(
-                scene,
-                &lighting,
-                2,
-                2,
-                8,
-                42,
-                GroundLightingComponent::Caustics,
-            )
-            .unwrap(),
-            render_camera_glass_with_lighting(
-                scene,
-                &lighting,
-                2,
-                2,
-                8,
-                42,
-                GroundLightingComponent::Combined,
-            )
-            .unwrap(),
-            images.direct,
-            images.caustics,
-            images.combined,
-        ]
+        [images.direct, images.caustics, images.combined]
     };
     for (x, y, scale) in [
         (0.25, 0.25, 1.0),
@@ -406,11 +288,11 @@ fn checkerboard_modulates_all_camera_lighting_once_without_changing_irradiance()
                 );
             }
         }
-        for ((direct, caustics), combined) in after[3]
+        for ((direct, caustics), combined) in after[0]
             .pixels
             .iter()
-            .zip(&after[4].pixels)
-            .zip(&after[5].pixels)
+            .zip(&after[1].pixels)
+            .zip(&after[2].pixels)
         {
             assert!((combined - direct - caustics).norm() < 1e-12);
         }
@@ -458,30 +340,13 @@ fn finite_ground_keeps_lighting_beyond_receiver_and_shows_sky_beyond_its_edge() 
         let scene = Scene::from_config(&loaded.scene).unwrap();
         let ray = scene.camera.ray_for_pixel(0, 0, 1, 1).unwrap();
         assert_eq!(scene.intersect(&ray).is_some(), x < 2.5);
-        for (component, expected) in [
-            (GroundLightingComponent::Direct, expected_direct),
-            (GroundLightingComponent::Caustics, expected_caustics),
-            (
-                GroundLightingComponent::Combined,
-                expected_direct + expected_caustics,
-            ),
+        let images = render_camera_glass_components(&scene, &lighting, 1, 1, 8, 42).unwrap();
+        for (image, expected) in [
+            (&images.direct, expected_direct),
+            (&images.caustics, expected_caustics),
+            (&images.combined, expected_direct + expected_caustics),
         ] {
-            let image =
-                render_camera_glass_with_lighting(&scene, &lighting, 1, 1, 8, 42, component)
-                    .unwrap();
-            assert!(
-                (image.pixels[0] - expected).norm() < 1e-12,
-                "x={x}, {component:?}"
-            );
-        }
-        if x > 2.5 {
-            for image in [
-                render_camera_lit(&scene, 1, 1).unwrap(),
-                render_camera_glass(&scene, 1, 1, 8, 42).unwrap(),
-                render_camera_glass_with_ground(&scene, &lighting.caustics, 1, 1, 8, 42).unwrap(),
-            ] {
-                assert!((image.pixels[0] - background).norm() < 1e-12);
-            }
+            assert!((image.pixels[0] - expected).norm() < 1e-12, "x={x}");
         }
     }
 }
@@ -557,12 +422,8 @@ fn traced_prism_caustics_light_the_geometric_glass_shadow_independently() {
         },
     )
     .unwrap();
-    let camera = |component| {
-        render_camera_glass_with_lighting(&scene, &lighting, 1, 1, 8, 42, component).unwrap()
-    };
-    let direct = camera(GroundLightingComponent::Direct);
-    let caustics = camera(GroundLightingComponent::Caustics);
-    let combined = camera(GroundLightingComponent::Combined);
+    let images = render_camera_glass_components(&scene, &lighting, 1, 1, 8, 42).unwrap();
+    let (direct, caustics, combined) = (images.direct, images.caustics, images.combined);
     assert_eq!(direct.pixels[0], Vector3::zeros());
     assert!(caustics.pixels[0].y > 1e-6);
     assert_eq!(combined.pixels, caustics.pixels);
@@ -969,36 +830,13 @@ fn camera_pixels_are_reproducible_across_configured_thread_counts() {
             let images = renderer
                 .render_camera_glass_components(&scene, &lighting, 8, config.render.seed)
                 .unwrap();
-            for (actual, expected, component) in [
-                (
-                    &images.direct,
-                    &reference.direct,
-                    GroundLightingComponent::Direct,
-                ),
-                (
-                    &images.caustics,
-                    &reference.caustics,
-                    GroundLightingComponent::Caustics,
-                ),
-                (
-                    &images.combined,
-                    &reference.combined,
-                    GroundLightingComponent::Combined,
-                ),
+            for (actual, expected) in [
+                (&images.direct, &reference.direct),
+                (&images.caustics, &reference.caustics),
+                (&images.combined, &reference.combined),
             ] {
                 assert_eq!((actual.width, actual.height), (24, 16));
                 assert_eq!(actual.pixels, expected.pixels);
-                let single = render_camera_glass_with_lighting(
-                    &scene,
-                    &lighting,
-                    24,
-                    16,
-                    8,
-                    config.render.seed,
-                    component,
-                )
-                .unwrap();
-                assert_eq!(actual.pixels, single.pixels);
             }
             for ((direct, caustics), combined) in images
                 .direct
@@ -1134,11 +972,12 @@ fn configured_exposure_scales_linear_color_before_srgb_encoding() {
 }
 
 #[test]
-fn executable_reads_json_from_argument_and_respects_output_size_mode_exposure_and_path() {
+fn executable_reads_json_and_generates_current_outputs_reproducibly() {
     let directory = TemporaryDirectory::new();
     let mut config = small_config();
     config.render.width = 12;
     config.render.height = 8;
+    config.render.camera_spp = 8;
     config.render.mode = IorMode::Constant;
     config.render.wavelength_min_nm = 390.0;
     config.render.wavelength_max_nm = 760.0;
@@ -1147,49 +986,52 @@ fn executable_reads_json_from_argument_and_respects_output_size_mode_exposure_an
     let path = directory.0.join("config.json");
     config.save(&path).unwrap();
     let run = || {
-        Command::new(env!("CARGO_BIN_EXE_spectral-caustics"))
+        let output = Command::new(env!("CARGO_BIN_EXE_spectral-caustics"))
             .arg(&path)
             .current_dir(&directory.0)
             .output()
-            .unwrap()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     };
-    let output = run();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Constant 主图"));
+    run();
     let names = [
         "custom.png",
         "dispersion.png",
-        "refracted_hits.png",
-        "wavelength_450nm.png",
-        "wavelength_550nm.png",
-        "wavelength_650nm.png",
-        "no_prism.png",
-        "camera_debug.png",
-        "camera_lit.png",
+        "camera_direct.png",
+        "camera_caustics.png",
+        "camera_combined.png",
     ];
-    for name in names {
+    let original: Vec<_> = names
+        .iter()
+        .map(|name| {
+            let path = directory.0.join("nested").join(name);
+            let image = image::open(&path).unwrap();
+            assert_eq!((image.width(), image.height()), (12, 8));
+            assert_eq!(image.color(), image::ColorType::Rgb8);
+            fs::read(path).unwrap()
+        })
+        .collect();
+    run();
+    for (name, bytes) in names.iter().zip(original) {
         assert_eq!(
-            image::open(directory.0.join("nested").join(name))
-                .unwrap()
-                .into_rgb8()
-                .dimensions(),
-            (12, 8)
+            fs::read(directory.0.join("nested").join(name)).unwrap(),
+            bytes
         );
     }
     config.render.exposure = 0.0;
-    config.render.output_path = PathBuf::from("nested/no_prism.png");
+    config.render.output_path = PathBuf::from("nested/camera_combined.png");
     config.save(&path).unwrap();
-    let output = run();
-    assert!(output.status.success(), "{:?}", output);
+    run();
     for name in [
-        "no_prism.png",
-        "debug_no_prism.png",
+        "camera_combined.png",
+        "aux_camera_combined.png",
         "dispersion.png",
-        "camera_lit.png",
+        "camera_direct.png",
+        "camera_caustics.png",
     ] {
         assert!(
             image::open(directory.0.join("nested").join(name))
@@ -1199,82 +1041,12 @@ fn executable_reads_json_from_argument_and_respects_output_size_mode_exposure_an
                 .all(|p| p.0 == [0; 3])
         );
     }
-    // 地面 +z 法线的显示颜色不随物理渲染曝光变黑。
-    let debug = image::open(directory.0.join("nested/camera_debug.png"))
-        .unwrap()
-        .into_rgb8();
-    assert!(debug.pixels().any(|p| p.0 == [128, 128, 255]));
-
-    // 主图占用调试图文件名时，调试输出加前缀；向上看的相机应只看见背景。
-    config.render.output_path = PathBuf::from("nested/camera_debug.png");
-    config.scene.camera.position = [0.0, 0.0, 3.0];
-    config.scene.camera.target = [0.0, 0.0, 4.0];
-    config.scene.camera.up = [0.0, 1.0, 0.0];
-    config.save(&path).unwrap();
-    let output = run();
-    assert!(output.status.success(), "{:?}", output);
-    let primary = image::open(directory.0.join("nested/camera_debug.png"))
-        .unwrap()
-        .into_rgb8();
-    assert!(primary.pixels().all(|p| p.0 == [0; 3]));
-    let debug = image::open(directory.0.join("nested/debug_camera_debug.png"))
-        .unwrap()
-        .into_rgb8();
-    assert_eq!(debug.dimensions(), (12, 8));
-    assert!(debug.pixels().all(|p| p.0 == [25, 30, 45]));
-
-    // 同名主图不能被相机光照图覆盖；背景按线性颜色和配置曝光输出。
-    config.render.output_path = PathBuf::from("nested/camera_lit.png");
-    config.render.exposure = 1.0;
-    config.scene.background_linear_rgb = [0.0, 0.5, 0.0];
-    config.save(&path).unwrap();
-    let output = run();
-    assert!(output.status.success(), "{:?}", output);
-    let lit = image::open(directory.0.join("nested/debug_camera_lit.png"))
-        .unwrap()
-        .into_rgb8();
-    assert_eq!(lit.dimensions(), (12, 8));
-    assert!(lit.pixels().all(|p| p.0 == [0, 188, 0]));
-    let primary = image::open(directory.0.join("nested/camera_lit.png"))
-        .unwrap()
-        .into_rgb8();
-    assert!(primary.pixels().any(|p| p.0 != [0, 188, 0]));
-
-    // 看向地面，用已知 albedo/光强/曝光验证完整 RGB→XYZ→sRGB PNG 链路。
-    config.render.output_path = PathBuf::from("nested/custom.png");
-    config.render.exposure = std::f64::consts::PI / 2.0;
-    config.scene.camera.position = [1.5, 0.0, 2.0];
-    config.scene.camera.target = [1.5, 0.0, 0.0];
-    config.scene.camera.fov_y_degrees = 5.0;
-    config.scene.light.total_flux = 16.0; // L_light = 16 / 16 = 1。
-    if let ObjectConfig::Ground { material, .. } = &mut config.scene.objects[1] {
-        *material = MaterialConfig::Lambertian {
-            albedo: [1.0, 0.0, 0.0],
-        };
-    }
-    config.save(&path).unwrap();
-    let output = run();
-    assert!(output.status.success(), "{:?}", output);
-    let lit = image::open(directory.0.join("nested/camera_lit.png"))
-        .unwrap()
-        .into_rgb8();
-    // (1/π) × 1 × cos(0) × (π/2) = 0.5，sRGB 编码为 188。
-    assert!(lit.pixels().all(|p| p.0 == [188, 0, 0]));
-
-    // 从 3 cm 间隙内看红色地面：主光线不经过玻璃，shadow ray 被玻璃挡住。
-    config.scene.camera.position = [1.5, 0.0, 0.02];
-    config.scene.camera.target = [0.25, 0.0, 0.0];
-    config.scene.camera.fov_y_degrees = 0.01;
-    config.save(&path).unwrap();
-    let output = run();
-    assert!(output.status.success(), "{:?}", output);
-    let lit = image::open(directory.0.join("nested/camera_lit.png"))
-        .unwrap()
-        .into_rgb8();
-    assert!(lit.pixels().all(|p| p.0 == [0; 3]));
-
     fs::write(&path, "{").unwrap();
-    let output = run();
+    let output = Command::new(env!("CARGO_BIN_EXE_spectral-caustics"))
+        .arg(&path)
+        .current_dir(&directory.0)
+        .output()
+        .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("读取配置"));
 }

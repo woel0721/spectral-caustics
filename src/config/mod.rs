@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn checked_in_json_enables_the_hdri_preset_and_roundtrips() {
         let config = Config::from_json(include_str!("../../configs/default.json")).unwrap();
-        // 展示配置显式启用本地 HDR，Rust/旧 JSON 的缺省值仍不依赖图片文件。
+        // 展示配置显式启用本地 HDR，Rust/省略字段的 JSON 的缺省值仍不依赖图片文件。
         let mut expected = Config::default();
         expected.render.camera_spp = 256;
         expected.scene.environment_samples = 8;
@@ -237,11 +237,11 @@ mod tests {
         let mut json: serde_json::Value =
             serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
         json["scene"].as_object_mut().unwrap().remove("environment");
-        let legacy = Config::from_json(&json.to_string()).unwrap();
-        assert!(legacy.scene.environment.is_none());
+        let defaulted = Config::from_json(&json.to_string()).unwrap();
+        assert!(defaulted.scene.environment.is_none());
         assert_eq!(
-            Config::from_json(&legacy.to_json().unwrap()).unwrap(),
-            legacy
+            Config::from_json(&defaulted.to_json().unwrap()).unwrap(),
+            defaulted
         );
         json["scene"]["environment"] = serde_json::json!({
             "horizon_linear_rgb": [0.2, 0.3, 2.0],
@@ -274,17 +274,17 @@ mod tests {
     }
 
     #[test]
-    fn environment_map_fields_default_for_legacy_json_and_roundtrip() {
+    fn environment_map_fields_default_when_omitted_and_roundtrip() {
         let mut json = serde_json::to_value(Config::default()).unwrap();
         let environment = json["scene"]["environment"].as_object_mut().unwrap();
         for field in ["map_path", "rotation_degrees", "intensity"] {
             environment.remove(field);
         }
-        let legacy = Config::from_json(&json.to_string()).unwrap();
-        assert_eq!(legacy, Config::default());
+        let defaulted = Config::from_json(&json.to_string()).unwrap();
+        assert_eq!(defaulted, Config::default());
         assert_eq!(
-            Config::from_json(&legacy.to_json().unwrap()).unwrap(),
-            legacy
+            Config::from_json(&defaulted.to_json().unwrap()).unwrap(),
+            defaulted
         );
 
         // 配置读写不加载 HDR，也不根据配置文件目录改写相对路径。
@@ -374,11 +374,11 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("ground_checkerboard");
-        let legacy = Config::from_json(&json.to_string()).unwrap();
-        assert!(legacy.scene.ground_checkerboard.is_none());
+        let defaulted = Config::from_json(&json.to_string()).unwrap();
+        assert!(defaulted.scene.ground_checkerboard.is_none());
         assert_eq!(
-            Config::from_json(&legacy.to_json().unwrap()).unwrap(),
-            legacy
+            Config::from_json(&defaulted.to_json().unwrap()).unwrap(),
+            defaulted
         );
         let mut config = Config::default();
         let checkerboard = config.scene.ground_checkerboard.as_mut().unwrap();

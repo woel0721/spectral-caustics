@@ -13,10 +13,10 @@ pub use checkerboard::Checkerboard;
 pub use lighting::{Environment, GroundReceiver, ParallelLight};
 pub use objects::SceneObject;
 pub(crate) use photon::take_photon_from_hit;
-pub use photon::{PhotonLanding, refractive_index, take_photon, take_photon_landing};
+pub use photon::{PhotonLanding, refractive_index, take_photon_landing};
 
 pub struct Scene {
-    /// 相机法线调试与直接光照使用的主光线相机；地面焦散仍从光源发射光线。
+    /// 玻璃与漫反射路径使用的主光线相机；地面焦散仍从光源发射光线。
     pub camera: Camera,
     /// 关闭天空时使用的线性 RGB 常量背景色，写入 Framebuffer 前转换为 XYZ。
     pub background_color: Vector3<f64>,

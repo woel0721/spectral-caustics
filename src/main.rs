@@ -1,23 +1,17 @@
-//! 读取 JSON，构建运行时 Scene/Render，输出主图及同配置的对照、调试图。
-
-use spectral_caustics::{
-    config::{Config, sceneconfig::ObjectConfig},
-    optics::iormode::IorMode,
-    render::{Render, caustics::DEBUG_WAVELENGTHS_NM, render_camera_debug, render_camera_lit},
-    scene::Scene,
-};
+//! JSON 场景：光谱地面预览、折射率对照及共享路径的三张相机图。
+use spectral_caustics::{config::Config, optics::iormode::IorMode, render::Render, scene::Scene};
 use std::{
     error::Error,
     path::{Path, PathBuf},
     time::Instant,
 };
 
-// 避免用户把主图命名为某张调试图时，后续输出覆盖主图。
+// 主图占用辅助图名称时，避免覆盖用户指定的输出。
 fn auxiliary_path(primary: &Path, name: &str) -> PathBuf {
     let directory = primary.parent().unwrap_or(Path::new("."));
     let path = directory.join(name);
     if path == primary {
-        directory.join(format!("debug_{name}"))
+        directory.join(format!("aux_{name}"))
     } else {
         path
     }
@@ -46,62 +40,36 @@ fn main() -> Result<(), Box<dyn Error>> {
         renderer.thread_count()
     );
 
-    let framebuffer = renderer.render(&scene)?;
-    renderer.save(&framebuffer, &config.render.output_path)?;
+    let lighting = renderer.render_lighting(&scene)?;
+    renderer.save(&lighting.combined()?, &config.render.output_path)?;
     println!(
         "已输出 {:?} 主图：{}",
         config.render.mode,
         config.render.output_path.display()
     );
-    drop(framebuffer);
-
-    let path = auxiliary_path(&config.render.output_path, "camera_debug.png");
-    render_camera_debug(&scene, config.render.width, config.render.height)?.save(&path)?;
-    println!("已输出相机调试图：{}", path.display());
-
-    let framebuffer = render_camera_lit(&scene, config.render.width, config.render.height)?;
-    let path = auxiliary_path(&config.render.output_path, "camera_lit.png");
-    renderer.save(&framebuffer, &path)?;
-    println!("已输出相机直接光照图：{}", path.display());
-    drop(framebuffer);
-
-    let (comparison_mode, filename) = match config.render.mode {
+    let images = renderer.render_camera_glass_components(
+        &scene,
+        &lighting,
+        config.render.camera_spp,
+        config.render.seed,
+    )?;
+    for (image, name) in [
+        (&images.direct, "camera_direct.png"),
+        (&images.caustics, "camera_caustics.png"),
+        (&images.combined, "camera_combined.png"),
+    ] {
+        let path = auxiliary_path(&config.render.output_path, name);
+        renderer.save(image, &path)?;
+        println!("相机：{}，SPP={}", path.display(), config.render.camera_spp);
+    }
+    let (mode, filename) = match config.render.mode {
         IorMode::Dispersion => (IorMode::Constant, "constant_ior.png"),
         IorMode::Constant => (IorMode::Dispersion, "dispersion.png"),
     };
-    let framebuffer = renderer.render_mode(&scene, comparison_mode)?;
-    let path = auxiliary_path(&config.render.output_path, filename);
-    renderer.save(&framebuffer, &path)?;
-    println!("已输出 {:?} 对照：{}", comparison_mode, path.display());
-    drop(framebuffer);
-
-    let [framebuffer] = renderer.refracted_hits(&scene, [None], IorMode::Constant)?;
     renderer.save(
-        &framebuffer,
-        auxiliary_path(&config.render.output_path, "refracted_hits.png"),
+        &renderer.render_mode(&scene, mode)?,
+        auxiliary_path(&config.render.output_path, filename),
     )?;
-    drop(framebuffer);
-    let wavelength_images =
-        renderer.refracted_hits(&scene, DEBUG_WAVELENGTHS_NM.map(Some), IorMode::Dispersion)?;
-    for (wavelength_nm, framebuffer) in DEBUG_WAVELENGTHS_NM.into_iter().zip(wavelength_images) {
-        let name = format!("wavelength_{wavelength_nm:.0}nm.png");
-        renderer.save(
-            &framebuffer,
-            auxiliary_path(&config.render.output_path, &name),
-        )?;
-    }
-
-    let mut reference_config = config.scene.clone();
-    reference_config
-        .objects
-        .retain(|object| matches!(object, ObjectConfig::Ground { .. }));
-    let reference_scene = Scene::from_config(&reference_config)?;
-    let reference = renderer.ground_hits(&reference_scene)?;
-    renderer.save(
-        &reference,
-        auxiliary_path(&config.render.output_path, "no_prism.png"),
-    )?;
-    println!("对照和调试图已保存到主图目录");
     println!("总耗时：{:.3} 秒", start.elapsed().as_secs_f64());
     Ok(())
 }

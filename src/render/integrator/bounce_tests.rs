@@ -4,7 +4,7 @@ use super::{
     diffuse::russian_roulette,
     diffuse_tests::{SequenceRng, bits, close, first_hit, sun, two_planes, uniform_hdri},
     ground::GroundLighting,
-    test_support::evaluate_path as trace_camera_path,
+    test_support::evaluate_path,
     types::{CameraPathComponents, CameraPathRngs, CameraPathState},
 };
 use crate::{
@@ -57,7 +57,7 @@ fn chain_words(depth: usize) -> Vec<f64> {
 
 fn trace_chain(scene: &Scene, rng: &mut dyn RngCore) -> CameraPathComponents {
     let (wi, light) = sun();
-    trace_camera_path(
+    evaluate_path(
         scene,
         Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(),
         &mut CameraPathRngs {
@@ -169,7 +169,7 @@ fn deep_render_repeats_across_threads_mis_and_components_and_preserves_photons()
     .unwrap();
     let photons = renderer.render_lighting(&scene).unwrap();
     let baseline = render_camera_glass_components(&scene, &photons, 11, 9, 16, 42).unwrap();
-    for depth in [2, 3, 5] {
+    for depth in [0, 1, 2, 3, 5] {
         scene.max_diffuse_bounces = depth;
         let light = renderer.render_lighting(&scene).unwrap();
         assert_eq!(light.direct.pixels, photons.direct.pixels);
@@ -214,18 +214,6 @@ fn deep_render_repeats_across_threads_mis_and_components_and_preserves_photons()
                         close(d + c, *combined);
                     }
                 }
-            }
-            for (component, want) in [
-                (GroundLightingComponent::Direct, &reference.direct),
-                (GroundLightingComponent::Caustics, &reference.caustics),
-                (GroundLightingComponent::Combined, &reference.combined),
-            ] {
-                assert_eq!(
-                    render_camera_glass_with_lighting(&scene, &photons, 11, 9, 16, 42, component)
-                        .unwrap()
-                        .pixels,
-                    want.pixels
-                );
             }
         }
     }
@@ -478,8 +466,7 @@ fn deep_escape_does_not_add_hdri_again_or_consume_new_environment_samples() {
 }
 
 #[test]
-fn deep_ground_hits_never_read_caustics_or_complete_maps() {
-    use super::ground::SunGroundLighting;
+fn deep_ground_hits_never_read_caustics() {
     use crate::render::framebuffer::Framebuffer;
     let mut scene = two_planes(Vector3::repeat(0.8), Vector3::repeat(0.7));
     scene.ground_id = Some(0);
@@ -493,21 +480,12 @@ fn deep_ground_hits_never_read_caustics_or_complete_maps() {
         receiver: &scene.receiver,
         object_id: 0,
         rho: 0.8,
-        sun: Some(SunGroundLighting {
-            wi: sun().0,
-            irradiance_xyz: linear_srgb_to_xyz(Vector3::repeat(2.0)).unwrap(),
-            component: GroundLightingComponent::Combined,
-        }),
+        light_wi: sun().0,
+        sun_irradiance_xyz: linear_srgb_to_xyz(Vector3::repeat(2.0)).unwrap(),
     };
     let hit = first_hit(&scene);
     let material = scene.material(hit.material_id.unwrap()).unwrap();
-    for bound in [
-        &ground,
-        &GroundLighting {
-            sun: None,
-            ..ground
-        },
-    ] {
+    {
         let mut state =
             CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 3);
         super::test_support::trace_continuation(
@@ -515,7 +493,7 @@ fn deep_ground_hits_never_read_caustics_or_complete_maps() {
             &hit,
             material,
             sun(),
-            Some(bound),
+            Some(&ground),
             &mut SequenceRng::new(&chain_words(3)),
             &mut state,
         )

@@ -53,7 +53,7 @@ fn power_contributions_use_the_source_pdf_and_actual_odd_counts() {
 }
 
 #[test]
-fn power_preserves_d2_single_sample_gradient_and_direction_rng() {
+fn single_sample_and_gradient_share_direction_sampling_between_heuristics() {
     let hdr = TemporaryHdr::high_contrast();
     let mut scene = hdr.scene(37.0);
     let material = Lambertian::new(Vector3::new(0.2, 0.5, 0.8)).unwrap();

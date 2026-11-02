@@ -3,8 +3,8 @@ use super::*;
 use super::{
     direct::camera_lighting_setup,
     environment::environment_lighting,
-    rng::{CAMERA_STREAM, DIFFUSE_STREAM, ENVIRONMENT_SEED_OFFSET, ENVIRONMENT_STREAM, pixel_seed},
-    test_support::evaluate_path as trace_camera_path,
+    rng::{CAMERA_STREAM, DIFFUSE_STREAM, ENVIRONMENT_STREAM, pixel_seed},
+    test_support::evaluate_path,
     types::CameraPathRngs,
 };
 use crate::{
@@ -237,18 +237,16 @@ fn opaque_visibility_blocks_sky_below_a_glass_plane() {
         Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.25, 0.5)))),
     );
     let lighting = split_ground_map(&scene);
-    let render = |component| {
-        render_camera_glass_with_lighting(&scene, &lighting, 3, 2, 8, 42, component).unwrap()
-    };
-    let direct = render(GroundLightingComponent::Direct);
-    let combined = render(GroundLightingComponent::Combined);
+    let images = render_camera_glass_components(&scene, &lighting, 3, 2, 8, 42).unwrap();
+    let (direct, combined) = (images.direct, images.combined);
     assert_eq!(direct.pixels, combined.pixels);
     let expected = Vector3::zeros(); // 向上的环境射线全部被无限玻璃面遮挡。
     for xyz in direct.pixels {
         assert!((xyz_to_linear_srgb(xyz).unwrap() - expected).norm() < 1e-12);
     }
     assert!(
-        render(GroundLightingComponent::Caustics)
+        images
+            .caustics
             .pixels
             .iter()
             .all(|p| *p == Vector3::zeros())
@@ -298,18 +296,6 @@ fn checkerboard_is_applied_once_after_glass_with_sky_and_caustics() {
     assert!((images.direct.pixels[0] - expected_sky).norm() < 1e-12);
     assert!((images.caustics.pixels[0] - expected_caustics).norm() < 1e-12);
     assert!((images.combined.pixels[0] - expected_sky - expected_caustics).norm() < 1e-12);
-    for (component, expected) in [
-        (GroundLightingComponent::Direct, expected_sky),
-        (GroundLightingComponent::Caustics, expected_caustics),
-        (
-            GroundLightingComponent::Combined,
-            expected_sky + expected_caustics,
-        ),
-    ] {
-        let image =
-            render_camera_glass_with_lighting(&scene, &lighting, 1, 1, 8, 42, component).unwrap();
-        assert!((image.pixels[0] - expected).norm() < 1e-12);
-    }
 }
 
 #[test]
@@ -317,7 +303,7 @@ fn camera_rejects_invalid_runtime_sky_parameters() {
     let mut scene = ground_scene();
     for samples in [0, usize::MAX] {
         scene.environment_samples = samples;
-        assert!(render_camera_lit(&scene, 2, 1).is_err());
+        assert!(render_camera_glass(&scene, 2, 1, 1, 42).is_err());
         assert!(render_camera_glass(&scene, 1, 1, 2, 42).is_err());
     }
     scene.environment_samples = 1;
@@ -329,7 +315,6 @@ fn camera_rejects_invalid_runtime_sky_parameters() {
                 0 => sky.horizon_color.x = value,
                 _ => sky.zenith_color.x = value,
             }
-            assert!(render_camera_lit(&scene, 1, 1).is_err());
             assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
         }
     }
@@ -338,7 +323,7 @@ fn camera_rejects_invalid_runtime_sky_parameters() {
     scene.environment.as_mut().unwrap().horizon_color = Vector3::repeat(f64::MAX);
     scene.environment.as_mut().unwrap().zenith_color = Vector3::repeat(f64::MAX);
     // 有限 HDR 参数也可能在颜色空间变换中溢出，必须返回错误。
-    assert!(render_camera_lit(&scene, 1, 1).is_err());
+    assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
 }
 
 fn split_ground_map(scene: &Scene) -> SpectralLighting {
@@ -419,24 +404,10 @@ fn check_camera_components_rng() {
     let mut lighting = split_ground_map(&scene);
     lighting.caustics.pixels.fill(Vector3::new(0.1, 0.2, 0.4));
     let (width, height, spp, seed) = (4, 3, 32, 42);
-    let mut reference_events = None;
-    for component in [
-        GroundLightingComponent::Direct,
-        GroundLightingComponent::Caustics,
-        GroundLightingComponent::Combined,
-    ] {
-        events.lock().unwrap().clear();
-        render_camera_glass_with_lighting(&scene, &lighting, width, height, spp, seed, component)
-            .unwrap();
-        let actual = events.lock().unwrap().clone();
-        assert_eq!(actual.len(), width * height * spp);
-        if let Some(reference) = &reference_events {
-            assert_eq!(&actual, reference);
-        } else {
-            reference_events = Some(actual);
-        }
-    }
-    let reference_events = reference_events.unwrap();
+    let images =
+        render_camera_glass_components(&scene, &lighting, width, height, spp, seed).unwrap();
+    let reference_events = events.lock().unwrap().clone();
+    assert_eq!(reference_events.len(), width * height * spp);
     assert!(
         reference_events
             .iter()
@@ -447,11 +418,6 @@ fn check_camera_components_rng() {
             .iter()
             .any(|e| e.2 == GlassEvent::Transmission)
     );
-    events.lock().unwrap().clear();
-    let images =
-        render_camera_glass_components(&scene, &lighting, width, height, spp, seed).unwrap();
-    // 三张图共计只产生 N 次玻璃采样，而三个旧调用共计 3N 次。
-    assert_eq!(*events.lock().unwrap(), reference_events);
     for environment_samples in [1, 7] {
         scene.environment_samples = environment_samples;
         events.lock().unwrap().clear();
@@ -539,29 +505,8 @@ fn analytic_direct_is_continuous_across_receiver_and_window_without_double_count
         })
         .unwrap();
         for spp in [1, 8] {
-            let direct = render_camera_glass_with_lighting(
-                &scene,
-                &lighting,
-                3,
-                2,
-                spp,
-                42,
-                GroundLightingComponent::Direct,
-            )
-            .unwrap();
-            let combined = render_camera_glass_with_lighting(
-                &scene,
-                &lighting,
-                3,
-                2,
-                spp,
-                42,
-                GroundLightingComponent::Combined,
-            )
-            .unwrap();
             let images = render_camera_glass_components(&scene, &lighting, 3, 2, spp, 42).unwrap();
-            assert_eq!(images.direct.pixels, direct.pixels);
-            assert_eq!(images.combined.pixels, direct.pixels);
+            assert_eq!(images.combined.pixels, images.direct.pixels);
             assert!(
                 images
                     .caustics
@@ -569,8 +514,7 @@ fn analytic_direct_is_continuous_across_receiver_and_window_without_double_count
                     .iter()
                     .all(|p| *p == Vector3::zeros())
             );
-            assert_eq!(direct.pixels, combined.pixels);
-            for xyz in direct.pixels {
+            for xyz in images.direct.pixels {
                 assert!((xyz - expected).norm() < 1e-12, "x={x}: {xyz:?}");
             }
         }
@@ -585,16 +529,9 @@ fn changing_receiver_does_not_change_analytic_sun_at_the_same_world_positions() 
         scene.receiver.min_m = Vector2::repeat(min);
         scene.receiver.max_m = Vector2::repeat(max);
         let lighting = split_ground_map(&scene);
-        let image = render_camera_glass_with_lighting(
-            &scene,
-            &lighting,
-            5,
-            3,
-            8,
-            42,
-            GroundLightingComponent::Combined,
-        )
-        .unwrap();
+        let image = render_camera_glass_components(&scene, &lighting, 5, 3, 8, 42)
+            .map(|images| images.combined)
+            .unwrap();
         if let Some(pixels) = &reference {
             assert_eq!(&image.pixels, pixels);
         } else {
@@ -614,36 +551,8 @@ fn glass_shadows_only_direct_and_camera_throughput_still_weights_caustics() {
     // 给地面一个已知的焦散 E；无限玻璃面会遮挡每一条向上的 shadow ray。
     let e = Vector3::new(0.1, 0.2, 1.0);
     lighting.caustics.pixels.fill(e);
-    let direct = render_camera_glass_with_lighting(
-        &scene,
-        &lighting,
-        3,
-        2,
-        8,
-        42,
-        GroundLightingComponent::Direct,
-    )
-    .unwrap();
-    let caustics = render_camera_glass_with_lighting(
-        &scene,
-        &lighting,
-        3,
-        2,
-        8,
-        42,
-        GroundLightingComponent::Caustics,
-    )
-    .unwrap();
-    let combined = render_camera_glass_with_lighting(
-        &scene,
-        &lighting,
-        3,
-        2,
-        8,
-        42,
-        GroundLightingComponent::Combined,
-    )
-    .unwrap();
+    let images = render_camera_glass_components(&scene, &lighting, 3, 2, 8, 42).unwrap();
+    let (direct, caustics, combined) = (images.direct, images.caustics, images.combined);
     assert!(direct.pixels.iter().all(|p| p.norm() == 0.0));
     assert_eq!(combined.pixels, caustics.pixels);
     for xyz in caustics.pixels {
@@ -656,8 +565,7 @@ fn split_camera_rejects_invalid_metadata_maps_and_non_gray_ground() {
     let scene = neutral_ground_scene(0.8);
     let mut lighting = split_ground_map(&scene);
     let render = |s: &Scene, l: &SpectralLighting| {
-        assert!(render_camera_glass_components(s, l, 1, 1, 1, 42).is_err());
-        render_camera_glass_with_lighting(s, l, 1, 1, 1, 42, GroundLightingComponent::Combined)
+        render_camera_glass_components(s, l, 1, 1, 1, 42).map(|images| images.combined)
     };
     assert!(render(&ground_scene(), &lighting).is_err());
     lighting.sun_irradiance_xyz.x = f64::NAN;
@@ -776,107 +684,6 @@ fn neutral_lambertian_converts_irradiance_to_radiance_without_changing_chromatic
     }
 }
 
-#[test]
-fn ground_map_supplies_complete_radiance_and_keeps_glass_path_weights() {
-    let mut scene = neutral_ground_scene(0.8);
-    // 此 XYZ 超出 sRGB 色域，计算过程也必须保留，不能提前裁剪成 RGB。
-    let e = Vector3::new(0.1, 0.2, 1.0);
-    let map = uniform_ground_map(e);
-    let expected = e * (0.8 / PI);
-    for spp in [1, 8] {
-        let image = render_camera_glass_with_ground(&scene, &map, 3, 2, spp, 42).unwrap();
-        for xyz in image.pixels {
-            assert!((xyz - expected).norm() < 1e-12);
-        }
-    }
-    let black = uniform_ground_map(Vector3::zeros());
-    assert!(
-        render_camera_glass_with_ground(&scene, &black, 3, 2, 4, 42)
-            .unwrap()
-            .pixels
-            .iter()
-            .all(|p| p.norm() == 0.0)
-    );
-    // 无限玻璃面会挡住原来的 shadow ray；已积分的 E 不应再次被该阴影清零。
-    scene.add_with_material(
-        Box::new(Ground::new(1.0).unwrap()),
-        Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.25, 0.5)))),
-    );
-    let image = render_camera_glass_with_ground(&scene, &map, 3, 2, 8, 42).unwrap();
-    for xyz in image.pixels {
-        assert!((xyz - expected * 0.5).norm() < 1e-12);
-    }
-}
-
-#[test]
-fn ground_map_only_shades_bound_ground_front_side_and_returns_zero_outside_receiver() {
-    let mut scene = neutral_ground_scene(0.8);
-    let map = uniform_ground_map(Vector3::repeat(1.0));
-    scene.add_with_material(
-        Box::new(Ground::new(1.0).unwrap()),
-        Box::new(Lambertian::new(Vector3::new(0.1, 0.2, 0.3)).unwrap()),
-    );
-    assert_eq!(
-        render_camera_glass_with_ground(&scene, &map, 3, 2, 4, 42)
-            .unwrap()
-            .pixels,
-        render_camera_glass(&scene, 3, 2, 4, 42).unwrap().pixels
-    );
-    let mut scene = neutral_ground_scene(0.8);
-    for (position, target) in [
-        ([0.0, 0.0, -2.0], [0.0; 3]),
-        ([2.25, 0.0, 2.0], [2.25, 0.0, 0.0]), // receiver 外、有限地面内。
-    ] {
-        scene.camera = Camera::from_config(&CameraConfig {
-            position,
-            target,
-            up: [0.0, 1.0, 0.0],
-            fov_y_degrees: 10.0,
-        })
-        .unwrap();
-        assert!(
-            render_camera_glass_with_ground(&scene, &map, 1, 1, 8, 42)
-                .unwrap()
-                .pixels
-                .iter()
-                .all(|p| p.norm() == 0.0)
-        );
-    }
-}
-
-#[test]
-fn ground_renderer_rejects_invalid_maps_bindings_and_colored_ground() {
-    let map = uniform_ground_map(Vector3::repeat(1.0));
-    assert!(render_camera_glass_with_ground(&ground_scene(), &map, 1, 1, 1, 42).is_err());
-    let mut scene = neutral_ground_scene(0.8);
-    for id in [None, Some(usize::MAX)] {
-        scene.ground_id = id;
-        assert!(render_camera_glass_with_ground(&scene, &map, 1, 1, 1, 42).is_err());
-    }
-    let scene = neutral_ground_scene(0.8);
-    for value in [-1.0, f64::NAN, f64::INFINITY] {
-        let mut invalid = uniform_ground_map(Vector3::zeros());
-        invalid.pixels[0].x = value;
-        assert!(render_camera_glass_with_ground(&scene, &invalid, 1, 1, 1, 42).is_err());
-    }
-    let invalid = Framebuffer {
-        width: 2,
-        height: 1,
-        pixels: vec![Vector3::zeros()],
-    };
-    assert!(render_camera_glass_with_ground(&scene, &invalid, 1, 1, 1, 42).is_err());
-    assert!(render_camera_glass_with_ground(&scene, &map, 1, 1, 0, 42).is_err());
-    let mut scene = Scene::new();
-    scene.ground_id = Some(scene.add(Box::new(Ground::new(0.0).unwrap())));
-    assert!(render_camera_glass_with_ground(&scene, &map, 1, 1, 1, 42).is_err());
-    let mut scene = Scene::new();
-    scene.ground_id = Some(scene.add_with_material(
-        Box::new(Ground::new(0.0).unwrap()),
-        Box::new(Dielectric::new(1.5).unwrap()),
-    ));
-    assert!(render_camera_glass_with_ground(&scene, &map, 1, 1, 1, 42).is_err());
-}
-
 fn glass_background_scene() -> Scene {
     let mut scene = Scene::new();
     scene.environment = None;
@@ -930,12 +737,12 @@ fn transmission(wi: Vector3<f64>, probability: f64, weight: f64) -> MaterialSamp
 fn trace_center_pixel(scene: &Scene, seed: u64) -> Vector3<f64> {
     let (light_wi, light) = camera_lighting_setup(scene, 1, 1).unwrap();
     let ray = scene.camera.ray_for_pixel(0, 0, 1, 1).unwrap();
-    trace_camera_path(
+    evaluate_path(
         scene,
         ray,
         &mut CameraPathRngs {
             camera: &mut StdRng::seed_from_u64(seed),
-            environment: &mut StdRng::seed_from_u64(seed ^ ENVIRONMENT_SEED_OFFSET),
+            environment: &mut StdRng::seed_from_u64(pixel_seed(seed, 0, ENVIRONMENT_STREAM)),
             diffuse: &mut StdRng::seed_from_u64(seed ^ DIFFUSE_STREAM),
         },
         light_wi,
@@ -943,7 +750,7 @@ fn trace_center_pixel(scene: &Scene, seed: u64) -> Vector3<f64> {
         None,
     )
     .unwrap()
-    .select(GroundLightingComponent::Combined)
+    .direct
 }
 
 #[test]
@@ -1037,10 +844,10 @@ fn jittered_camera_filters_half_pixel_coverage_in_linear_light() {
 #[test]
 fn camera_spp_preserves_deterministic_brightness_and_rejects_invalid_counts() {
     let scene = ground_scene();
-    let reference = render_camera_lit(&scene, 3, 2).unwrap();
+    let expected = linear_srgb_to_xyz(Vector3::new(0.2, 0.5, 0.8) * (0.5 / PI)).unwrap();
     for spp in [1, 3, 64] {
         let image = render_camera_glass(&scene, 3, 2, spp, 42).unwrap();
-        for (actual, expected) in image.pixels.iter().zip(&reference.pixels) {
+        for actual in &image.pixels {
             assert!((actual - expected).norm() < 1e-12);
         }
     }
@@ -1085,28 +892,6 @@ fn camera_spp_reduces_error_against_analytic_fresnel_expectation() {
     assert!(
         multiple < single / 8.0,
         "1 SPP MSE={single}, 64 SPP MSE={multiple}"
-    );
-}
-
-#[test]
-fn glass_renderer_matches_direct_lighting_without_glass_and_respects_unbound_hits() {
-    let mut scene = ground_scene();
-    for seed in [0, 42] {
-        assert_eq!(
-            render_camera_glass(&scene, 3, 2, 1, seed).unwrap().pixels,
-            render_camera_lit(&scene, 3, 2).unwrap().pixels
-        );
-    }
-    scene.add(Box::new(Ground::new(1.0).unwrap()));
-    assert_eq!(
-        render_camera_glass(&scene, 1, 1, 1, 42).unwrap().pixels,
-        vec![Vector3::zeros()]
-    );
-    scene.objects.clear();
-    scene.background_color = Vector3::new(0.1, 0.3, 0.7);
-    assert_eq!(
-        render_camera_glass(&scene, 3, 2, 1, 42).unwrap().pixels,
-        render_camera_lit(&scene, 3, 2).unwrap().pixels
     );
 }
 
@@ -1307,7 +1092,7 @@ fn direct_lambertian_matches_albedo_light_and_one_cosine_without_clipping() {
         scene.light.direction = direction;
         for flux in [0.0, 8.0, 64.0] {
             scene.light.total_flux = flux;
-            let image = render_camera_lit(&scene, 3, 2).unwrap();
+            let image = render_camera_glass(&scene, 3, 2, 1, 42).unwrap();
             assert_eq!((image.width, image.height), (3, 2));
             // 孔径为 4×4 米，Lambertian 为 albedo/π；只乘一次 cosθ。
             let expected = Vector3::new(0.2, 0.5, 0.8) * (flux / 16.0 * cosine / PI);
@@ -1320,7 +1105,7 @@ fn direct_lambertian_matches_albedo_light_and_one_cosine_without_clipping() {
     scene.light.direction = -Vector3::z();
     scene.light.total_flux = 8.0;
     scene.light.aperture_max_m.x = 0.0;
-    let image = render_camera_lit(&scene, 1, 1).unwrap();
+    let image = render_camera_glass(&scene, 1, 1, 1, 42).unwrap();
     let rgb = xyz_to_linear_srgb(*image.get(0, 0).unwrap()).unwrap();
     assert!((rgb - Vector3::new(0.2, 0.5, 0.8) / PI).norm() < 1e-12);
 }
@@ -1351,15 +1136,14 @@ fn shadow_ray_blocks_light_through_glass_without_hiding_the_ground_from_camera()
         assert_eq!(hit.object_id, scene.ground_id);
         assert!((hit.coords - Vector3::new(0.25, 0.0, 0.0)).norm() < 1e-12);
         assert_eq!(
-            render_camera_lit(&scene, 1, 1).unwrap().pixels,
+            vec![linear_srgb_to_xyz(trace_center_pixel(&scene, 42)).unwrap()],
             vec![Vector3::zeros()]
         );
     }
     // 同样的受光地面移出玻璃投影，恢复原有直接光照。
     config.camera.target = [1.5, 0.0, 0.0];
     let scene = Scene::from_config(&config).unwrap();
-    let image = render_camera_lit(&scene, 1, 1).unwrap();
-    let rgb = xyz_to_linear_srgb(*image.get(0, 0).unwrap()).unwrap();
+    let rgb = trace_center_pixel(&scene, 42);
     assert!((rgb - Vector3::repeat(0.4 / PI)).norm() < 1e-12);
 }
 
@@ -1373,13 +1157,10 @@ fn shadow_ray_ignores_surfaces_behind_it_and_checks_directional_light_to_infinit
         fov_y_degrees: 45.0,
     })
     .unwrap();
-    let reference = render_camera_lit(&scene, 1, 1).unwrap();
-    assert!(reference.pixels[0].norm() > 0.0);
+    let reference = trace_center_pixel(&scene, 42);
+    assert!(reference.norm() > 0.0);
     scene.add(Box::new(Ground::new(-1.0).unwrap()));
-    assert_eq!(
-        render_camera_lit(&scene, 1, 1).unwrap().pixels,
-        reference.pixels
-    );
+    assert_eq!(trace_center_pixel(&scene, 42), reference);
 
     // 遮挡物在配置的发射高度以上，方向光仍需检测它；无材质也会遮光。
     let mut vertices = SceneConfig::default()
@@ -1397,46 +1178,17 @@ fn shadow_ray_ignores_surfaces_behind_it_and_checks_directional_light_to_infinit
         vertex.z += 3.0;
     }
     scene.add(Box::new(Prism::from_vertices(vertices).unwrap()));
-    assert_eq!(
-        render_camera_lit(&scene, 1, 1).unwrap().pixels,
-        vec![Vector3::zeros()]
-    );
+    assert_eq!(trace_center_pixel(&scene, 42), Vector3::zeros());
 }
 
 #[test]
-fn camera_lighting_uses_nearest_material_and_linear_background() {
-    let mut config = SceneConfig {
-        environment: None,
-        ground_checkerboard: None,
-        light: ParallelLightConfig {
-            direction: [0.0, 0.0, -1.0],
-            ..Default::default()
-        },
-        ..SceneConfig::default()
-    };
-    config.camera.position = [0.0, -4.0, 2.0];
-    config.camera.target = [0.0, 0.0, 1.0];
-    config.camera.fov_y_degrees = 90.0;
-    config.background_linear_rgb = [0.1, 0.2, 0.3];
-    let scene = Scene::from_config(&config).unwrap();
-    let image = render_camera_lit(&scene, 5, 3).unwrap();
-    let rgb_at = |x, y| xyz_to_linear_srgb(*image.get(x, y).unwrap()).unwrap();
-    assert!((rgb_at(2, 0) - Vector3::new(0.1, 0.2, 0.3)).norm() < 1e-12);
-    assert_eq!(rgb_at(2, 1), Vector3::zeros()); // 最近命中理想玻璃，不能显示后方地面。
-    assert!((rgb_at(2, 2) - Vector3::repeat(0.4 / PI)).norm() < 1e-12);
-    config.objects.reverse();
-    let scene = Scene::from_config(&config).unwrap();
-    assert_eq!(
-        render_camera_lit(&scene, 5, 3).unwrap().pixels,
-        image.pixels
-    );
-
+fn unbound_and_back_facing_surfaces_are_black() {
     let mut scene = ground_scene();
     scene.background_color = Vector3::repeat(1.0);
     // 未绑定材质的最近表面保留黑色，而不是背景或后方材质。
     scene.add(Box::new(Ground::new(1.0).unwrap()));
     assert_eq!(
-        render_camera_lit(&scene, 1, 1).unwrap().pixels,
+        render_camera_glass(&scene, 1, 1, 1, 42).unwrap().pixels,
         vec![Vector3::zeros()]
     );
 
@@ -1449,7 +1201,7 @@ fn camera_lighting_uses_nearest_material_and_linear_background() {
     })
     .unwrap();
     assert_eq!(
-        render_camera_lit(&scene, 1, 1).unwrap().pixels,
+        render_camera_glass(&scene, 1, 1, 1, 42).unwrap().pixels,
         vec![Vector3::zeros()]
     );
 }
@@ -1463,7 +1215,7 @@ fn camera_lighting_rejects_invalid_dimensions_and_light() {
         (usize::MAX, 1),
         (u32::MAX as usize, u32::MAX as usize),
     ] {
-        assert!(render_camera_lit(&scene, width, height).is_err());
+        assert!(render_camera_glass(&scene, width, height, 1, 42).is_err());
     }
     for direction in [
         Vector3::zeros(),
@@ -1472,20 +1224,20 @@ fn camera_lighting_rejects_invalid_dimensions_and_light() {
         Vector3::repeat(f64::MAX),
     ] {
         scene.light.direction = direction;
-        assert!(render_camera_lit(&scene, 1, 1).is_err());
+        assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
     }
     scene.light.direction = -Vector3::z();
     for flux in [-1.0, f64::NAN, f64::INFINITY] {
         scene.light.total_flux = flux;
-        assert!(render_camera_lit(&scene, 1, 1).is_err());
+        assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
     }
     scene.light.total_flux = 8.0;
     scene.light.aperture_max_m = scene.light.aperture_min_m;
-    assert!(render_camera_lit(&scene, 1, 1).is_err());
+    assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
     scene.light.aperture_min_m.fill(0.0);
     scene.light.aperture_max_m.fill(1e-150);
     scene.light.total_flux = f64::MAX;
-    assert!(render_camera_lit(&scene, 1, 1).is_err());
+    assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
 }
 
 #[test]
@@ -1510,7 +1262,7 @@ fn camera_lighting_rejects_invalid_normals_and_bsdf_results() {
             Box::new(TestSurface(normal)),
             Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()),
         );
-        assert!(render_camera_lit(&scene, 1, 1).is_err());
+        assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
     }
     struct TestMaterial(BsdfValue);
     impl Material for TestMaterial {
@@ -1533,6 +1285,6 @@ fn camera_lighting_rejects_invalid_normals_and_bsdf_results() {
             Box::new(TestSurface(Vector3::z() * 3.0)),
             Box::new(TestMaterial(value)),
         );
-        assert!(render_camera_lit(&scene, 1, 1).is_err());
+        assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
     }
 }

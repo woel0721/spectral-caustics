@@ -1,6 +1,6 @@
 //! 解析太阳的照明约定、直接 BSDF 求值与二值阴影。
 
-use super::{ground::GroundLighting, offset_ray_origin, types::GroundLightingComponent};
+use super::{ground::GroundLighting, offset_ray_origin};
 use crate::{
     geometry::{hit::Hit, ray::Ray},
     material::{BsdfValue, EvaluateMode, Material},
@@ -10,7 +10,7 @@ use crate::{
 use nalgebra::Vector3;
 use std::{error::Error, mem::size_of};
 
-/// 复用现有太阳约定；光谱绑定使用 D65 RGB，其他入口保持旧白光强度。
+/// 光谱绑定使用 D65 RGB；不绑定光源图的独立相机使用中性白光。
 pub(super) fn surface_sun_lighting(
     scene: &Scene,
     hit: &Hit,
@@ -19,10 +19,12 @@ pub(super) fn surface_sun_lighting(
     (light_wi, light): (Vector3<f64>, f64),
     ground: Option<&GroundLighting<'_>>,
 ) -> Result<Vector3<f64>, Box<dyn Error>> {
-    match ground.and_then(|g| g.sun.as_ref()) {
-        Some(sun) if sun.component == GroundLightingComponent::Caustics => Ok(Vector3::zeros()),
-        Some(sun) => Ok(direct_lighting(scene, hit, material, wo, sun.wi, 1.0)?
-            .component_mul(&xyz_to_linear_srgb(sun.irradiance_xyz).ok_or("太阳 XYZ 转换失败")?)),
+    match ground {
+        Some(sun) => Ok(
+            direct_lighting(scene, hit, material, wo, sun.light_wi, 1.0)?.component_mul(
+                &xyz_to_linear_srgb(sun.sun_irradiance_xyz).ok_or("太阳 XYZ 转换失败")?,
+            ),
+        ),
         None => direct_lighting(scene, hit, material, wo, light_wi, light),
     }
 }
@@ -38,7 +40,7 @@ pub(super) fn visible_to_light(
     Ok(scene.intersect(&shadow_ray).is_none())
 }
 
-/// 旧 RGB 相机入口的兼容设置；阶段 14 地面入口使用 SpectralLighting 中的太阳光谱。
+/// 校验相机工作量、环境与光源，返回中性白光方向和相对强度。
 pub(super) fn camera_lighting_setup(
     scene: &Scene,
     width: usize,

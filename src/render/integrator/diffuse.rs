@@ -54,14 +54,11 @@ pub(super) fn secondary_direct_lighting(
     ground: Option<&GroundLighting<'_>>,
     rng: &mut dyn rand::RngCore,
 ) -> Result<Vector3<f64>, Box<dyn Error>> {
-    let direct = if let Some(g) = ground.filter(|g| hit.object_id == Some(g.object_id))
-        && let Some(sun) = &g.sun
-    {
-        let e = direct_ground_irradiance(scene, hit, sun.wi, sun.irradiance_xyz)?;
+    let direct = if let Some(g) = ground.filter(|g| hit.object_id == Some(g.object_id)) {
+        let e = direct_ground_irradiance(scene, hit, g.light_wi, g.sun_irradiance_xyz)?;
         xyz_to_linear_srgb(lambertian_radiance(e, g.rho).ok_or("第二表面地面直射计算失败")?)
             .ok_or("第二表面地面 XYZ 转换失败")?
     } else {
-        // 旧完整地面图无法分离焦散，后续顶点不读取它，改用现有解析 RGB 太阳。
         surface_sun_lighting(scene, hit, material, wo, light, ground)?
     };
     let environment = environment_lighting(scene, hit, material, wo, rng)?;

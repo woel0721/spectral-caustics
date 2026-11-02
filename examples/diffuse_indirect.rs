@@ -1,4 +1,4 @@
-//! E1: a colored diffuse wall illuminates a neutral floor through one diffuse bounce.
+//! A colored diffuse wall and neutral floor at zero, one and four diffuse bounces.
 use nalgebra::{Vector2, Vector3};
 use spectral_caustics::{
     camera::Camera,
@@ -51,10 +51,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         ..Default::default()
     })?;
     let lighting = renderer.render_lighting(&scene)?;
-    for bounces in [0, 1] {
+    for bounces in [0, 1, 4] {
         scene.max_diffuse_bounces = bounces;
         let images = renderer.render_camera_glass_components(&scene, &lighting, spp, 42)?;
-        let path = format!("output/e1_diffuse_{bounces}.png");
+        let path = format!("output/diffuse_{bounces}.png");
         renderer.save(&images.combined, &path)?;
         println!("{path}: SPP={spp}, max_diffuse_bounces={bounces}");
     }

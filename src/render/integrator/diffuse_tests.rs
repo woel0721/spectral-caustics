@@ -4,7 +4,7 @@ use super::{
     diffuse::sample_diffuse_ray,
     environment::environment_lighting,
     ground::{GroundLighting, bind_spectral_ground_lighting},
-    test_support::evaluate_path as trace_camera_path,
+    test_support::evaluate_path,
     types::{CameraPathRngs, DiffuseRay},
 };
 use crate::{
@@ -28,14 +28,11 @@ use std::{error::Error, f64::consts::PI};
 use crate::{
     camera::Camera,
     config::{
-        Config,
         cameraconfig::CameraConfig,
-        rendersetting::RenderSetting,
         sceneconfig::{CheckerboardConfig, EnvironmentConfig},
     },
     geometry::{ground::Ground, object::Hittable},
     material::{GlassEvent, GlassSample, dielectric::Dielectric, lambertian::Lambertian},
-    render::Render,
     scene::{Checkerboard, Environment},
 };
 use rand::RngCore;
@@ -242,7 +239,7 @@ fn two_plane_colored_indirect_matches_analytic_half_hemisphere_integral() {
     // The trace itself returns A's existing direct plus exactly one transported B term.
     let ray = Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap();
     let (wi, light) = sun();
-    let path = trace_camera_path(
+    let path = evaluate_path(
         &scene,
         ray,
         &mut CameraPathRngs {
@@ -533,9 +530,7 @@ fn secondary_bound_ground_uses_sun_once_checker_once_and_no_caustics() {
         light_wi: Vector3::new(-1.0, 0.0, 1.0).normalize(),
         sun_irradiance_xyz: linear_srgb_to_xyz(sun_rgb).unwrap(),
     };
-    let ground =
-        bind_spectral_ground_lighting(&scene, &lighting, GroundLightingComponent::Combined)
-            .unwrap();
+    let ground = bind_spectral_ground_lighting(&scene, &lighting).unwrap();
     let result = continuation_radiance(
         &scene,
         &hit,
@@ -577,25 +572,6 @@ fn secondary_bound_ground_uses_sun_once_checker_once_and_no_caustics() {
         )
         .unwrap(),
         result,
-    );
-    // Legacy complete map also cannot serve as an indirect emitter; use analytical RGB sun.
-    let legacy = GroundLighting {
-        sun: None,
-        ..poisoned
-    };
-    let old = continuation_radiance(
-        &scene,
-        &hit,
-        material,
-        -Vector3::z(),
-        sun(),
-        Some(&legacy),
-        &mut SequenceRng::new(&[0.25, 0.0]),
-    )
-    .unwrap();
-    close(
-        old,
-        Vector3::new(0.2, 0.5, 0.8) * (0.6 * sun().1 * sun().0.z / PI * 0.3),
     );
 }
 
@@ -722,86 +698,6 @@ fn secondary_hdri_balance_and_power_converge_to_independent_two_plane_reference(
 }
 
 #[test]
-fn e1_replays_in_1_2_4_threads_preserves_caustics_and_single_component_views() {
-    let mut scene = Scene::from_config(&Config::default().scene).unwrap();
-    scene.environment = Some(uniform_hdri());
-    // A second diffuse object allows genuine indirect transport in this glass scene.
-    scene.add_with_material(
-        Box::new(Plane {
-            point: Vector3::x() * -1.5,
-            normal: Vector3::x(),
-        }),
-        Box::new(Lambertian::new(Vector3::new(0.8, 0.2, 0.1)).unwrap()),
-    );
-    let renderer = Render::new(RenderSetting {
-        width: 11,
-        height: 9,
-        samples_per_pixel_axis: 2,
-        ..Default::default()
-    })
-    .unwrap();
-    let lighting = renderer.render_lighting(&scene).unwrap();
-    for heuristic in [
-        EnvironmentMisHeuristic::Balance,
-        EnvironmentMisHeuristic::Power,
-    ] {
-        scene.environment_mis_heuristic = heuristic;
-        for samples in [1, 3] {
-            scene.environment_samples = samples;
-            scene.max_diffuse_bounces = 0;
-            let old = render_camera_glass_components(&scene, &lighting, 11, 9, 16, 42).unwrap();
-            scene.max_diffuse_bounces = 1;
-            let reference =
-                render_camera_glass_components(&scene, &lighting, 11, 9, 16, 42).unwrap();
-            assert_eq!(reference.caustics.pixels, old.caustics.pixels);
-            assert_ne!(reference.direct.pixels, old.direct.pixels);
-            for threads in [1, 2, 4] {
-                let pool = rayon::ThreadPoolBuilder::new()
-                    .num_threads(threads)
-                    .build()
-                    .unwrap();
-                for _ in 0..2 {
-                    let actual = pool
-                        .install(|| {
-                            render_camera_glass_components(&scene, &lighting, 11, 9, 16, 42)
-                                .map_err(|e| e.to_string())
-                        })
-                        .unwrap();
-                    for (got, want) in [
-                        (&actual.direct, &reference.direct),
-                        (&actual.caustics, &reference.caustics),
-                        (&actual.combined, &reference.combined),
-                    ] {
-                        for (g, w) in got.pixels.iter().zip(&want.pixels) {
-                            assert_eq!(bits(*g), bits(*w));
-                        }
-                    }
-                    for ((d, c), combined) in actual
-                        .direct
-                        .pixels
-                        .iter()
-                        .zip(&actual.caustics.pixels)
-                        .zip(&actual.combined.pixels)
-                    {
-                        close(d + c, *combined);
-                    }
-                }
-            }
-            for (component, want) in [
-                (GroundLightingComponent::Direct, &reference.direct),
-                (GroundLightingComponent::Caustics, &reference.caustics),
-                (GroundLightingComponent::Combined, &reference.combined),
-            ] {
-                let single =
-                    render_camera_glass_with_lighting(&scene, &lighting, 11, 9, 16, 42, component)
-                        .unwrap();
-                assert_eq!(single.pixels, want.pixels);
-            }
-        }
-    }
-}
-
-#[test]
 fn actual_glass_before_a_multiplies_both_direct_and_rgb_indirect_once() {
     let mut scene = two_planes(Vector3::new(0.2, 0.5, 0.8), Vector3::new(0.9, 0.4, 0.1));
     // A real dielectric interface exercises Fresnel reflection and transmission.
@@ -822,7 +718,7 @@ fn actual_glass_before_a_multiplies_both_direct_and_rgb_indirect_once() {
     // The small glass triangle misses both A→B and the sun shadow rays.
     let ray_down = Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap();
     for (ray, word, weight) in [(ray_down, 0.9, 4.0 / 9.0), (ray, 0.0, 1.0)] {
-        let result = trace_camera_path(
+        let result = evaluate_path(
             &scene,
             ray,
             &mut CameraPathRngs {

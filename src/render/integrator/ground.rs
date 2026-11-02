@@ -1,6 +1,6 @@
 //! 地面辐照度采样、材质/光源图绑定及 Direct/Caustics 查询。
 
-use super::{direct::visible_to_light, types::GroundLightingComponent};
+use super::direct::visible_to_light;
 use crate::{
     geometry::{hit::Hit, ray::PARALLEL_EPSILON},
     material::{BsdfValue, EvaluateMode},
@@ -20,20 +20,14 @@ pub(super) struct GroundIrradianceComponents {
     pub(super) caustics_xyz: Vector3<f64>,
 }
 
-pub(super) struct SunGroundLighting {
-    pub(super) wi: Vector3<f64>,
-    pub(super) irradiance_xyz: Vector3<f64>,
-    pub(super) component: GroundLightingComponent,
-}
-
 /// 一次相机渲染中只读的地面绑定；反射率由现有材质 evaluate 接口读取一次。
 pub(super) struct GroundLighting<'a> {
     pub(super) irradiance: &'a Framebuffer,
     pub(super) receiver: &'a GroundReceiver,
     pub(super) object_id: usize,
     pub(super) rho: f64,
-    // None 保留阶段 13 的完整贴图替换行为；Some 使用解析直射 + 焦散专用图。
-    pub(super) sun: Option<SunGroundLighting>,
+    pub(super) light_wi: Vector3<f64>,
+    pub(super) sun_irradiance_xyz: Vector3<f64>,
 }
 
 /// 从未曝光的地面 XYZ 辐照度图读取世界交点的 E，使用像素中心约定和双线性插值。
@@ -105,7 +99,6 @@ fn valid_ground_map_layout(irradiance: &Framebuffer, receiver: &GroundReceiver) 
 pub(super) fn bind_spectral_ground_lighting<'a>(
     scene: &Scene,
     lighting: &'a SpectralLighting,
-    component: GroundLightingComponent,
 ) -> Result<GroundLighting<'a>, Box<dyn Error>> {
     if lighting.light_wi.iter().any(|v| !v.is_finite())
         || (lighting.light_wi.norm() - 1.0).abs() > 1e-12
@@ -117,20 +110,8 @@ pub(super) fn bind_spectral_ground_lighting<'a>(
     {
         return Err("解析太阳的方向或 XYZ 辐照度无效".into());
     }
-    let mut ground = bind_ground_lighting(scene, &lighting.caustics, &lighting.receiver)?;
-    ground.sun = Some(SunGroundLighting {
-        wi: lighting.light_wi,
-        irradiance_xyz: lighting.sun_irradiance_xyz,
-        component,
-    });
-    Ok(ground)
-}
-
-pub(super) fn bind_ground_lighting<'a>(
-    scene: &Scene,
-    irradiance: &'a Framebuffer,
-    receiver: &'a GroundReceiver,
-) -> Result<GroundLighting<'a>, Box<dyn Error>> {
+    let irradiance = &lighting.caustics;
+    let receiver = &lighting.receiver;
     if !valid_ground_map_layout(irradiance, receiver)
         || irradiance
             .pixels
@@ -170,7 +151,8 @@ pub(super) fn bind_ground_lighting<'a>(
         receiver,
         object_id,
         rho: (bsdf.x * PI).clamp(0.0, 1.0),
-        sun: None,
+        light_wi: lighting.light_wi,
+        sun_irradiance_xyz: lighting.sun_irradiance_xyz,
     })
 }
 
@@ -179,24 +161,17 @@ pub(super) fn ground_irradiance(
     hit: &Hit,
     ground: &GroundLighting<'_>,
 ) -> Result<GroundIrradianceComponents, Box<dyn Error>> {
-    let Some(sun) = &ground.sun else {
-        // 旧完整地面图入口无法分解直射/焦散，保留其整图照明行为。
-        return Ok(GroundIrradianceComponents {
-            direct_xyz: sample_ground_irradiance(ground.irradiance, ground.receiver, hit.coords)
-                .ok_or("地面辐照度采样失败")?,
-            ..Default::default()
-        });
-    };
-    let mut e = GroundIrradianceComponents::default();
-    if sun.component != GroundLightingComponent::Caustics {
-        e.direct_xyz = direct_ground_irradiance(scene, hit, sun.wi, sun.irradiance_xyz)?;
-    }
-    if sun.component != GroundLightingComponent::Direct {
-        // 已包含折射路径的可见性和入射几何；不能再用直射方向的阴影清零。
-        e.caustics_xyz = sample_ground_irradiance(ground.irradiance, ground.receiver, hit.coords)
-            .ok_or("焦散辐照度采样失败")?;
-    }
-    Ok(e)
+    Ok(GroundIrradianceComponents {
+        direct_xyz: direct_ground_irradiance(
+            scene,
+            hit,
+            ground.light_wi,
+            ground.sun_irradiance_xyz,
+        )?,
+        // 焦散已包含折射路径可见性，不能用太阳 shadow ray 再次清零。
+        caustics_xyz: sample_ground_irradiance(ground.irradiance, ground.receiver, hit.coords)
+            .ok_or("焦散辐照度采样失败")?,
+    })
 }
 
 /// 只计算解析太阳的地面入射辐照度；不读取地面图，也不选择输出分量。

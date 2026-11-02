@@ -28,7 +28,7 @@ struct EnvironmentMisWeights {
     power_source: Option<EnvironmentStrategy>,
 }
 
-/// HDRI 多样本用固定配额 Balance/Power MIS；单样本保留 D2 随机 50/50。
+/// HDRI 多样本用固定配额 Balance/Power MIS；单样本使用随机 50/50。
 /// 渐变天空仍用纯 BSDF 采样；零贡献样本不补采，也不重新分配配额。
 /// 仅查询环境，不包含太阳或地面光子图；玻璃也按二值环境遮挡处理。
 pub(super) fn environment_lighting(
@@ -66,7 +66,7 @@ pub(super) fn environment_lighting(
         let use_bsdf = if stratified {
             index < bsdf_samples
         } else {
-            // N=1 保留 D2 的策略选择；渐变不消耗额外随机数。
+            // N=1 随机选择策略；渐变不消耗额外随机数。
             !has_map || rng.random::<f64>() < ENVIRONMENT_BSDF_FRACTION
         };
         let wi = if use_bsdf {
@@ -102,7 +102,7 @@ pub(super) fn environment_lighting(
 }
 
 /// 共用环境贡献：Balance 为 f/(n_b*p_b+n_e*p_e)，Power 为 f*w_i/(n_i*p_i)。
-/// N=1 使用原 50/50 混合，None 保留渐变天空的纯 BSDF PDF。
+/// N=1 使用 50/50 混合，None 保留渐变天空的纯 BSDF PDF。
 fn environment_direction_contribution(
     scene: &Scene,
     hit: &Hit,

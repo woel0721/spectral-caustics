@@ -37,17 +37,6 @@ pub struct PhotonLanding {
     pub weight: f64,
 }
 
-/// 兼容的几何落点接口；能量累积应使用 take_photon_landing 获取透射权重。
-pub fn take_photon(
-    scene: &Scene,
-    ray: Ray,
-    prism_id: usize,
-    ground_id: usize,
-    glass_ior: impl FnOnce() -> Option<f64>,
-) -> Option<Vector3<f64>> {
-    take_photon_landing(scene, ray, prism_id, ground_id, glass_ior).map(|landing| landing.position)
-}
-
 /// 追踪从空气出发的单条光线，返回地面落点及确定双透射路径的通量权重。
 /// glass_ior 是无参数闭包，例如 || refractive_index(Some(450.0), IorMode::Dispersion)。
 /// 闭包只调用一次，返回的正有限折射率用于两个界面；也可传入 || Some(1.52)。

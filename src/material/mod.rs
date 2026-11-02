@@ -109,7 +109,7 @@ pub trait Material: Send + Sync {
         false
     }
 
-    /// E1 只连接两个单面 Lambertian 表面；其他连续材质默认不参与。
+    /// 有限深度路径只续追单面 Lambertian 表面；其他连续材质默认不参与。
     fn is_lambertian(&self) -> bool {
         false
     }

@@ -1,5 +1,5 @@
 //! 分层随机发射平行光，将地面落点累积为线性 XYZ。
-//! 支持灰度落点调试，以及按 CIE/D65 光谱积分合成的彩色焦散。
+//! CIE/D65 光谱积分与 Fresnel 加权的直射/焦散分量。
 
 use super::{framebuffer::Framebuffer, utils::bilinear_weights};
 use crate::{
@@ -9,19 +9,16 @@ use crate::{
         iormode::IorMode,
         spectrum::{d65_normalization, d65_spd, wavelength_to_xyz},
     },
-    scene::{GroundReceiver, PhotonLanding, Scene, refractive_index, take_photon_from_hit},
+    scene::{GroundReceiver, Scene, refractive_index, take_photon_from_hit},
 };
 use nalgebra::Vector3;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha12Rng;
 use rayon::prelude::*;
 use std::{error::Error, ops::Range};
 
-/// 三张落点调试图对应的波长，单位为 nm；每个波长分配 1/3 总通量。
-pub const DEBUG_WAVELENGTHS_NM: [f64; 3] = [450.0, 550.0, 650.0];
-
 /// 同一批光源样本的两种落地贡献，均为未曝光的 XYZ 辐照度。
-/// direct 仅用于采样调试/恢复旧图；相机直射使用无限远太阳，不读取 direct 图。
+/// direct 用于光源通量检查；相机直射使用无限远太阳，不读取 direct 图。
 pub struct SpectralLighting {
     pub direct: Framebuffer,
     pub caustics: Framebuffer,
@@ -34,7 +31,7 @@ pub struct SpectralLighting {
 }
 
 impl SpectralLighting {
-    /// 恢复同设置的单缓冲地面图；不同浮点求和顺序可能造成舍入误差。
+    /// 地面总辐照度预览，在线性 XYZ 中相加。
     /// 此图不能再与解析直射叠加。
     pub fn combined(&self) -> Result<Framebuffer, Box<dyn Error>> {
         let a = &self.direct;
@@ -63,23 +60,23 @@ impl SpectralLighting {
     }
 }
 
-// 旧入口只分配一张图、按原顺序累积；新入口分配两张图，不增加光线求交次数。
+// 按首次落地/双界面透射分别累积，合并入口直接相加。
 struct SpectralBuffers {
     direct: Framebuffer,
-    caustics: Option<Framebuffer>,
+    caustics: Framebuffer,
 }
 
 impl SpectralBuffers {
-    fn new(width: usize, height: usize, split: bool) -> Self {
+    fn new(width: usize, height: usize) -> Self {
         Self {
             direct: Framebuffer::new(width, height),
-            caustics: split.then(|| Framebuffer::new(width, height)),
+            caustics: Framebuffer::new(width, height),
         }
     }
 
     fn target(&mut self, caustic: bool) -> &mut Framebuffer {
         if caustic {
-            self.caustics.as_mut().unwrap_or(&mut self.direct)
+            &mut self.caustics
         } else {
             &mut self.direct
         }
@@ -108,18 +105,6 @@ pub fn ground_to_pixel(
     Some((u * width as f64 - 0.5, (1.0 - v) * height as f64 - 0.5))
 }
 
-/// Day 2 的直接命中灰度图；未先命中地面的光线被遮挡，不继续追踪。
-pub fn render_ground_hits(
-    scene: &Scene,
-    ground_id: usize,
-    settings: &RenderSetting,
-) -> Result<Framebuffer, Box<dyn Error>> {
-    render_landing_points(scene, ground_id, settings, |ray| {
-        let hit = scene.intersect(&ray)?;
-        (hit.object_id == Some(ground_id)).then_some(hit.coords)
-    })
-}
-
 /// 按渲染设置的波长节点追踪，落地后直接累积到同一张线性 XYZ 图。
 /// 独立完成分层随机发射、空间通量归一化和双线性 splat，不生成逐波长灰度图。
 /// D65 使用同一个 k；梯形积分两个端点取半宽度，丢失通量不重新分配。
@@ -132,11 +117,7 @@ pub fn render_spectral_caustics(
     ground_id: usize,
     settings: &RenderSetting,
 ) -> Result<Framebuffer, Box<dyn Error>> {
-    Ok(
-        render_spectral_buffers(scene, prism_id, ground_id, settings, false)?
-            .0
-            .direct,
-    )
+    render_spectral_lighting(scene, prism_id, ground_id, settings)?.combined()
 }
 
 /// 一次追踪拆分 Direct（首次命中地面）与 Caustics（经棱镜双界面后落地）。
@@ -164,14 +145,14 @@ pub fn render_spectral_lighting(
     {
         return Err("焦散接收范围无效".into());
     }
-    let (buffers, white_xyz) = render_spectral_buffers(scene, prism_id, ground_id, settings, true)?;
+    let (buffers, white_xyz) = render_spectral_buffers(scene, prism_id, ground_id, settings)?;
     let sun_irradiance_xyz = white_xyz * strength;
     if sun_irradiance_xyz.iter().any(|v| !v.is_finite()) {
         return Err("太阳光 XYZ 强度溢出".into());
     }
     Ok(SpectralLighting {
         direct: buffers.direct,
-        caustics: buffers.caustics.ok_or("缺少焦散分量")?,
+        caustics: buffers.caustics,
         receiver,
         light_wi,
         sun_irradiance_xyz,
@@ -183,7 +164,6 @@ fn render_spectral_buffers(
     prism_id: Option<usize>,
     ground_id: usize,
     settings: &RenderSetting,
-    split: bool,
 ) -> Result<(SpectralBuffers, Vector3<f64>), Box<dyn Error>> {
     settings.validate()?;
     let mode = settings.mode;
@@ -258,7 +238,7 @@ fn render_spectral_buffers(
     )
     .into_par_iter()
     .map(|(rows, mut rng)| {
-        let mut buffers = SpectralBuffers::new(settings.width, settings.height, split);
+        let mut buffers = SpectralBuffers::new(settings.width, settings.height);
         for sample_y in rows {
             for sample_x in 0..samples_x {
                 // 同一空间光线的所有波长共享发射位置，每次仅消耗两个随机数。
@@ -327,13 +307,11 @@ fn render_spectral_buffers(
     .collect();
 
     // Vec 按输入块的顺序收集。所有任务完成后再依次合并，不按线程完成顺序归约。
-    let mut buffers = SpectralBuffers::new(settings.width, settings.height, split);
+    let mut buffers = SpectralBuffers::new(settings.width, settings.height);
     for partial in partials {
         let partial = partial?;
         merge_spectral_buffer(&mut buffers.direct, partial.direct)?;
-        if let (Some(target), Some(source)) = (buffers.caustics.as_mut(), partial.caustics) {
-            merge_spectral_buffer(target, source)?;
-        }
+        merge_spectral_buffer(&mut buffers.caustics, partial.caustics)?;
     }
     Ok((buffers, white_xyz))
 }
@@ -380,6 +358,9 @@ fn splat_spectral_xyz(
     xyz: Vector3<f64>,
     receiver: &GroundReceiver,
 ) -> Result<(), &'static str> {
+    if xyz.iter().any(|v| !v.is_finite() || *v < 0.0) {
+        return Err("光谱 XYZ 能量必须有限且非负");
+    }
     let Some((x, y)) = ground_to_pixel(position, framebuffer.width, framebuffer.height, receiver)
     else {
         return Ok(());
@@ -394,190 +375,8 @@ fn splat_spectral_xyz(
     Ok(())
 }
 
-/// 统一追踪固定折射率或 Cauchy 色散，按波长数组顺序返回 N 张灰度落点图。
-/// 固定模式传 [None] 可生成一张图；色散模式要求每项均为 Some(有效波长 nm)。
-/// 同一条空间光线复用于全部波长，每张图分配 1/N 通量；灰色不代表真实光谱颜色。
-/// Constant 只追踪一次路径，再把同一落点及 Fresnel 通量权重交给 N 张图。
-pub fn render_refracted_ground_hits<const N: usize>(
-    scene: &Scene,
-    prism_id: Option<usize>,
-    ground_id: usize,
-    settings: &RenderSetting,
-    wavelengths_nm: [Option<f64>; N],
-    mode: IorMode,
-) -> Result<[Framebuffer; N], Box<dyn Error>> {
-    if prism_id.is_some_and(|id| id == ground_id || id >= scene.objects.len()) {
-        return Err("三棱镜编号无效或与地面编号相同".into());
-    }
-    let constant_ior = match mode {
-        IorMode::Constant => Some(refractive_index(None, mode).ok_or("折射率计算失败")?),
-        IorMode::Dispersion => None,
-    };
-    if mode == IorMode::Dispersion
-        && wavelengths_nm
-            .iter()
-            .any(|&wavelength_nm| refractive_index(wavelength_nm, mode).is_none())
-    {
-        return Err("色散模式要求每项波长均为正有限值，且折射率计算不能溢出".into());
-    }
-    render_photon_landing_sets(scene, ground_id, settings, |ray| {
-        let Some(first_hit) = scene.intersect(&ray) else {
-            return [None; N];
-        };
-        // N 张调试图复用直射落点，各自仍保留 1/N 通量。
-        if first_hit.object_id == Some(ground_id) {
-            return [Some(PhotonLanding {
-                position: first_hit.coords,
-                weight: 1.0,
-            }); N];
-        }
-        if first_hit.object_id != prism_id {
-            return [None; N];
-        }
-        let Some(prism_id) = prism_id else {
-            return [None; N];
-        };
-        if let Some(glass_ior) = constant_ior {
-            let landing =
-                take_photon_from_hit(scene, ray, first_hit, prism_id, ground_id, glass_ior);
-            return [landing; N];
-        }
-        wavelengths_nm.map(|wavelength_nm| {
-            let glass_ior = refractive_index(wavelength_nm, mode)?;
-            take_photon_from_hit(scene, ray, first_hit, prism_id, ground_id, glass_ior)
-        })
-    })
-}
-
-/// 单落点光路复用批量发射和累积，N = 1 时保持原有通量尺度。
-fn render_landing_points(
-    scene: &Scene,
-    ground_id: usize,
-    settings: &RenderSetting,
-    landing_point: impl Fn(Ray) -> Option<Vector3<f64>>,
-) -> Result<Framebuffer, Box<dyn Error>> {
-    let [framebuffer] =
-        render_landing_point_sets(scene, ground_id, settings, |ray| [landing_point(ray)])?;
-    Ok(framebuffer)
-}
-
-/// 每条空间光线返回 N 个独立落点，每个落点组使用一张图及 1/N 通量。
-/// 每个发射小格按每轴 samples_per_pixel_axis 份细分，每层独立随机取一点。
-/// 固定种子保证可复现；每条光线都先消耗两个随机数，再进行命中查询。
-fn render_landing_point_sets<const N: usize>(
-    scene: &Scene,
-    ground_id: usize,
-    settings: &RenderSetting,
-    landing_points: impl Fn(Ray) -> [Option<Vector3<f64>>; N],
-) -> Result<[Framebuffer; N], Box<dyn Error>> {
-    render_photon_landing_sets(scene, ground_id, settings, |ray| {
-        landing_points(ray).map(|position| {
-            position.map(|position| PhotonLanding {
-                position,
-                weight: 1.0,
-            })
-        })
-    })
-}
-
-/// 每条光线的离散光谱分量各占 1/N 发射通量，再乘各自路径的透射比例。
-fn render_photon_landing_sets<const N: usize>(
-    scene: &Scene,
-    ground_id: usize,
-    settings: &RenderSetting,
-    landings: impl Fn(Ray) -> [Option<PhotonLanding>; N],
-) -> Result<[Framebuffer; N], Box<dyn Error>> {
-    settings.validate()?;
-    let samples_per_pixel_axis = settings.samples_per_pixel_axis;
-    if N == 0 || settings.width == 0 || settings.height == 0 || samples_per_pixel_axis == 0 {
-        return Err("图像尺寸、每轴采样数和落点组数必须大于零".into());
-    }
-    if ground_id >= scene.objects.len() {
-        return Err("地面编号不在场景中".into());
-    }
-
-    let pixel_count = settings
-        .width
-        .checked_mul(settings.height)
-        .ok_or("像素数量溢出")?;
-    let samples_x = settings
-        .width
-        .checked_mul(samples_per_pixel_axis)
-        .ok_or("横向采样数溢出")?;
-    let samples_y = settings
-        .height
-        .checked_mul(samples_per_pixel_axis)
-        .ok_or("纵向采样数溢出")?;
-    let ray_count = samples_x.checked_mul(samples_y).ok_or("光线数量溢出")?;
-
-    let span = scene.light.aperture_max_m - scene.light.aperture_min_m;
-    let area = scene.receiver.area();
-    // 总通量由光源配置决定，按全图发射数和接收像素面积归一化。
-    let total_flux = scene.light.total_flux;
-    let flux_per_ray = total_flux / ray_count as f64;
-    let pixel_area = area / pixel_count as f64;
-    // 沿用 render.rs 中的 D65 参考白，仅生成已知灰色，不代表已实现光谱积分。
-    let white_xyz = Vector3::new(0.3127 / 0.3290, 1.0, (1.0 - 0.3127 - 0.3290) / 0.3290);
-    // 调试光源只含这 N 个等权离散分量，权重和为 1；尚不做连续光谱积分。
-    let wavelength_weight = 1.0 / N as f64;
-    let contribution = white_xyz * (flux_per_ray / pixel_area * wavelength_weight);
-    let mut framebuffers =
-        std::array::from_fn(|_| Framebuffer::new(settings.width, settings.height));
-    let mut rng = StdRng::seed_from_u64(settings.seed);
-
-    for sample_y in 0..samples_y {
-        for sample_x in 0..samples_x {
-            // 分层不变，只把固定的 0.5 偏移改为每轴独立的 [0, 1) 随机偏移。
-            let origin_x = scene.light.aperture_min_m.x
-                + (sample_x as f64 + rng.random::<f64>()) / samples_x as f64 * span.x;
-            let origin_y = scene.light.aperture_min_m.y
-                + (sample_y as f64 + rng.random::<f64>()) / samples_y as f64 * span.y;
-            let ray = Ray::new(
-                Vector3::new(origin_x, origin_y, scene.light.height_m),
-                scene.light.direction,
-            )
-            .ok_or("平行光线构造失败")?;
-
-            for (framebuffer, landing) in framebuffers.iter_mut().zip(landings(ray)) {
-                // 某个波长未落地时只丢弃它的通量，其余波长继续累积，权重不重新归一化。
-                let Some(landing) = landing else {
-                    continue;
-                };
-                if !landing.weight.is_finite() || !(0.0..=1.0).contains(&landing.weight) {
-                    return Err("光子透射通量权重无效".into());
-                }
-                if let Some((x, y)) = ground_to_pixel(
-                    landing.position,
-                    settings.width,
-                    settings.height,
-                    &scene.receiver,
-                ) {
-                    let neighbors = bilinear_weights(x, y, settings.width, settings.height)
-                        .ok_or("双线性权重计算失败")?;
-                    // 同一条光子的 XYZ 分成四份，权重和为 1；在 sRGB 编码之前累积。
-                    for (pixel_x, pixel_y, weight) in neighbors {
-                        if weight > 0.0
-                            && !framebuffer.accumulate(
-                                pixel_x,
-                                pixel_y,
-                                contribution * landing.weight * weight,
-                            )
-                        {
-                            return Err("地面像素累积失败".into());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(framebuffers)
-}
-
 #[cfg(test)]
 mod tests {
-    const GROUND_MIN: f64 = -2.0;
-    const GROUND_MAX: f64 = 2.0;
-    const LIGHT_HEIGHT: f64 = 3.0;
     const SAMPLING_SEED: u64 = 42;
     const MAX_SPECTRAL_BLOCKS: usize = 16;
 
@@ -607,9 +406,10 @@ mod tests {
     use super::*;
     use crate::{
         geometry::{ground::Ground, prism::Prism},
-        render::save_png,
-        scene::{take_photon, take_photon_landing},
+        render::save_png_with_exposure,
+        scene::{PhotonLanding, take_photon_landing},
     };
+    use rand::rngs::StdRng;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -617,11 +417,37 @@ mod tests {
 
     fn render_weighted_landing_points(
         scene: &Scene,
-        ground_id: usize,
+        _ground_id: usize,
         settings: &RenderSetting,
         landing: impl Fn(Ray) -> Option<PhotonLanding>,
     ) -> Result<Framebuffer, Box<dyn Error>> {
-        let [image] = render_photon_landing_sets(scene, ground_id, settings, |ray| [landing(ray)])?;
+        let nx = settings.width * settings.samples_per_pixel_axis;
+        let ny = settings.height * settings.samples_per_pixel_axis;
+        let weight = scene.light.total_flux / (nx * ny) as f64
+            * (settings.width * settings.height) as f64
+            / scene.receiver.area();
+        let span = scene.light.aperture_max_m - scene.light.aperture_min_m;
+        let mut rng = StdRng::seed_from_u64(settings.seed);
+        let mut image = Framebuffer::new(settings.width, settings.height);
+        for y in 0..ny {
+            for x in 0..nx {
+                let origin = Vector3::new(
+                    scene.light.aperture_min_m.x
+                        + (x as f64 + rng.random::<f64>()) / nx as f64 * span.x,
+                    scene.light.aperture_min_m.y
+                        + (y as f64 + rng.random::<f64>()) / ny as f64 * span.y,
+                    scene.light.height_m,
+                );
+                if let Some(p) = landing(Ray::new(origin, scene.light.direction).unwrap()) {
+                    splat_spectral_xyz(
+                        &mut image,
+                        p.position,
+                        Vector3::repeat(weight * p.weight),
+                        &scene.receiver,
+                    )?;
+                }
+            }
+        }
         Ok(image)
     }
 
@@ -638,58 +464,25 @@ mod tests {
     }
 
     #[test]
-    fn split_lighting_recombines_legacy_and_traces_each_photon_only_once() {
-        for with_prism in [false, true] {
-            let calls = Arc::new(AtomicUsize::new(0));
-            let mut scene = vertical_light_scene();
-            let prism_id = with_prism.then(|| scene.add(Box::new(Prism::new().unwrap())));
-            let ground_id = scene.add(Box::new(CountedGround {
-                ground: Ground::new(0.0).unwrap(),
-                calls: Arc::clone(&calls),
-            }));
-            for mode in [IorMode::Constant, IorMode::Dispersion] {
-                let settings = sample_settings(&settings_for_size(20, 16), 2, mode);
-                calls.store(0, Ordering::Relaxed);
-                let legacy =
-                    render_spectral_caustics(&scene, prism_id, ground_id, &settings).unwrap();
-                let legacy_calls = calls.swap(0, Ordering::Relaxed);
-                let split =
-                    render_spectral_lighting(&scene, prism_id, ground_id, &settings).unwrap();
-                assert_eq!(calls.load(Ordering::Relaxed), legacy_calls);
-                if !with_prism {
-                    assert_eq!(legacy_calls, 20 * 16 * 4);
-                    assert!(split.caustics.pixels.iter().all(|p| *p == Vector3::zeros()));
-                    assert_eq!(split.direct.pixels, legacy.pixels);
-                } else {
-                    assert!(split.caustics.pixels.iter().any(|p| p.y > 0.0));
-                    assert!(split.direct.pixels.iter().any(|p| p.y > 0.0));
-                }
-                for (actual, expected) in
-                    split.combined().unwrap().pixels.iter().zip(&legacy.pixels)
-                {
-                    assert!((actual - expected).norm() < 1e-12 * (1.0 + expected.norm()));
-                }
-                let repeated =
-                    render_spectral_lighting(&scene, prism_id, ground_id, &settings).unwrap();
-                assert_eq!(split.direct.pixels, repeated.direct.pixels);
-                assert_eq!(split.caustics.pixels, repeated.caustics.pixels);
-                assert!((split.sun_irradiance_xyz.y - 0.5).abs() < 1e-12);
-            }
-        }
-    }
-
-    #[test]
     fn fresnel_reduces_only_refracted_flux_without_renormalizing_survivors() {
         let settings = sample_settings(&settings_for_size(32, 24), 2, IorMode::Constant);
         let mut scene = Scene::new();
         let prism = scene.add(Box::new(Prism::new().unwrap()));
         let ground = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        // 旧坐标接口刻意只保留落点，作为不施加 Fresnel 的通量参考。
-        let unweighted = render_landing_points(&scene, ground, &settings, |ray| {
-            take_photon(&scene, ray, prism, ground, || Some(1.52))
+        // 独立发射参考将每条透射路径设为权重 1，用于检验 Fresnel 能量损失。
+        let unweighted = render_weighted_landing_points(&scene, ground, &settings, |ray| {
+            take_photon_landing(&scene, ray, prism, ground, || Some(1.52))
+                .map(|p| PhotonLanding { weight: 1.0, ..p })
         })
         .unwrap();
-        let direct = render_ground_hits(&scene, ground, &settings).unwrap();
+        let direct = render_weighted_landing_points(&scene, ground, &settings, |ray| {
+            let hit = scene.intersect(&ray)?;
+            (hit.object_id == Some(ground)).then_some(PhotonLanding {
+                position: hit.coords,
+                weight: 1.0,
+            })
+        })
+        .unwrap();
         let lighting = render_spectral_lighting(&scene, Some(prism), ground, &settings).unwrap();
         let mut before = 0.0;
         let mut after = 0.0;
@@ -847,27 +640,12 @@ mod tests {
                 .unwrap();
                 assert_eq!(calls.load(Ordering::Relaxed), spatial_ray_count);
                 assert_eq!(image.pixels.iter().any(|xyz| xyz.y > 0.0), case == 0);
-
-                calls.store(0, Ordering::Relaxed);
-                let images = render_refracted_ground_hits(
-                    &scene,
-                    Some(prism_id),
-                    ground_id,
-                    &sample_settings(&settings, samples_per_pixel_axis, mode),
-                    DEBUG_WAVELENGTHS_NM.map(Some),
-                    mode,
-                )
-                .unwrap();
-                assert_eq!(calls.load(Ordering::Relaxed), spatial_ray_count);
-                for image in images {
-                    assert_eq!(image.pixels.iter().any(|xyz| xyz.y > 0.0), case == 0);
-                }
             }
         }
     }
 
     #[test]
-    fn constant_spectral_and_debug_renders_trace_one_path_per_spatial_sample() {
+    fn constant_spectral_render_traces_one_path_per_spatial_sample() {
         let settings = settings_for_size(24, 12);
         let mut scene = Scene::new();
         let prism_id = scene.add(Box::new(Prism::new().unwrap()));
@@ -910,20 +688,6 @@ mod tests {
         assert_eq!(image.pixels, repeated.pixels);
 
         calls.store(0, Ordering::Relaxed);
-        let images = render_refracted_ground_hits(
-            &scene,
-            Some(prism_id),
-            ground_id,
-            &sample_settings(&settings, 2, IorMode::Constant),
-            [None, Some(450.0), Some(f64::NAN)],
-            IorMode::Constant,
-        )
-        .unwrap();
-        assert_eq!(calls.load(Ordering::Relaxed), single_path_calls);
-        assert_eq!(images[0].pixels, images[1].pixels);
-        assert_eq!(images[1].pixels, images[2].pixels);
-
-        calls.store(0, Ordering::Relaxed);
         render_spectral_caustics(
             &scene,
             Some(prism_id),
@@ -936,40 +700,19 @@ mod tests {
 
     #[test]
     fn spectral_unblocked_white_preserves_xyz_flux_across_spatial_sample_counts() {
-        // 独立用官方 CSV 的 10 nm 梯形求和得到的参考白，Y = 1。
         let white_xyz = Vector3::new(0.9501416822353593, 1.0, 1.087976622255359);
         for (width, height) in [(1, 1), (1, 4), (4, 1), (12, 8)] {
-            let settings = settings_for_size(width, height);
             let mut scene = vertical_light_scene();
-            let prism_id = scene.add(Box::new(Prism::new().unwrap()));
-            // 测试地面在三棱镜上方、光源下方，所有光线直接落地。
-            let ground_id = scene.add(Box::new(Ground::new(2.0).unwrap()));
+            let ground = scene.add(Box::new(Ground::new(0.0).unwrap()));
             for samples in [1, 3] {
-                let gray = render_ground_hits(
-                    &scene,
-                    ground_id,
-                    &sample_settings(&settings, samples, IorMode::Constant),
-                )
-                .unwrap();
                 for mode in [IorMode::Constant, IorMode::Dispersion] {
-                    let image = render_spectral_caustics(
-                        &scene,
-                        Some(prism_id),
-                        ground_id,
-                        &sample_settings(&settings, samples, mode),
-                    )
-                    .unwrap();
-                    assert_eq!((image.width, image.height), (width, height));
-                    // 每个像素的空间分布应与同种子的灰度双线性累积完全对应。
-                    for (pixel, gray_pixel) in image.pixels.iter().zip(&gray.pixels) {
-                        assert!((pixel - white_xyz * gray_pixel.y).norm() < 1e-12);
-                    }
-                    let total = image
-                        .pixels
-                        .iter()
-                        .fold(Vector3::zeros(), |sum, pixel| sum + pixel);
-                    let expected = white_xyz * (0.5 * (width * height) as f64);
-                    assert!((total - expected).norm() < 1e-10);
+                    let settings =
+                        sample_settings(&settings_for_size(width, height), samples, mode);
+                    let image = render_spectral_caustics(&scene, None, ground, &settings).unwrap();
+                    let flux: Vector3<f64> = image.pixels.iter().copied().sum::<Vector3<f64>>()
+                        * scene.receiver.area()
+                        / (width * height) as f64;
+                    assert!((flux - white_xyz * scene.light.total_flux).norm() < 2e-12);
                 }
             }
         }
@@ -1006,7 +749,7 @@ mod tests {
             let mut expected = vec![Vector3::zeros(); settings.width * settings.height];
             let mut lost_flux = false;
             for &(nm, width_nm) in &samples {
-                // 保留逐波长独立追踪的旧路径，检查合并直射和固定光路后 XYZ 仍一致。
+                // 独立逐波长发射参考验证光谱积分及丢失通量；不复制生产路径循环。
                 let single = render_weighted_landing_points(
                     &scene,
                     ground_id,
@@ -1113,7 +856,7 @@ mod tests {
                 &sample_settings(&settings, 2, mode),
             )?;
             let path = directory.join(filename);
-            save_png(&image, path.to_str().ok_or("临时路径必须是 UTF-8")?)?;
+            save_png_with_exposure(&image, &path, 1.0)?;
             let decoded = image::open(&path)?;
             assert_eq!(decoded.color(), image::ColorType::Rgb8);
             let rgb = decoded.into_rgb8();
@@ -1229,617 +972,46 @@ mod tests {
             None
         );
     }
-
     #[test]
-    fn unblocked_ground_preserves_total_energy_and_more_samples_reduce_noise() {
-        let settings = settings_for_size(32, 16);
-        let mut scene = vertical_light_scene();
-        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        let coarse = render_ground_hits(
-            &scene,
-            ground_id,
-            &sample_settings(&settings, 1, IorMode::Constant),
-        )
-        .unwrap();
-        let fine = render_ground_hits(
-            &scene,
-            ground_id,
-            &sample_settings(&settings, 3, IorMode::Constant),
-        )
-        .unwrap();
-        let expected_total = 0.5 * (settings.width * settings.height) as f64;
-        for image in [&coarse, &fine] {
-            let total: f64 = image.pixels.iter().map(|pixel| pixel.y).sum();
-            assert!((total - expected_total).abs() < 1e-10);
-        }
-        let coarse_error: f64 = coarse
-            .pixels
-            .iter()
-            .map(|pixel| (pixel.y - 0.5).powi(2))
-            .sum();
-        let fine_error: f64 = fine
-            .pixels
-            .iter()
-            .map(|pixel| (pixel.y - 0.5).powi(2))
-            .sum();
-        assert!(coarse_error > 0.0 && fine_error < coarse_error);
-    }
-
-    #[test]
-    fn jittered_sampling_covers_each_stratum_once_and_repeats_with_fixed_seed() {
-        use std::cell::RefCell;
-
-        let settings = settings_for_size(4, 3);
-        let mut scene = Scene::new();
-        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        let record = || {
-            let origins = RefCell::new(Vec::new());
-            let image = render_landing_points(
-                &scene,
-                ground_id,
-                &sample_settings(&settings, 2, IorMode::Constant),
-                |ray| {
-                    origins.borrow_mut().push(ray.origin);
-                    Some(Vector3::new(ray.origin.x, ray.origin.y, 0.0))
-                },
-            )
-            .unwrap();
-            (origins.into_inner(), image)
-        };
-        let (origins, first_image) = record();
-        let (repeated_origins, repeated_image) = record();
-        assert_eq!(origins, repeated_origins);
-        assert_eq!(first_image.pixels, repeated_image.pixels);
-
-        let (samples_x, samples_y) = (8, 6);
-        assert_eq!(origins.len(), samples_x * samples_y);
-        let span = GROUND_MAX - GROUND_MIN;
-        let mut off_center = false;
-        let mut different_axis_offsets = false;
-        for (index, origin) in origins.iter().enumerate() {
-            let (sample_x, sample_y) = (index % samples_x, index / samples_x);
-            let x = (origin.x - GROUND_MIN) / span * samples_x as f64;
-            let y = (origin.y - GROUND_MIN) / span * samples_y as f64;
-            assert!((sample_x as f64..(sample_x + 1) as f64).contains(&x));
-            assert!((sample_y as f64..(sample_y + 1) as f64).contains(&y));
-            assert_eq!(origin.z, LIGHT_HEIGHT);
-            let (jitter_x, jitter_y) = (x - sample_x as f64, y - sample_y as f64);
-            off_center |= (jitter_x - 0.5).abs() > 1e-12;
-            different_axis_offsets |= (jitter_x - jitter_y).abs() > 1e-12;
-        }
-        assert!(off_center && different_axis_offsets);
-    }
-
-    #[test]
-    fn prism_shadow_has_bilinear_edges_and_preserves_flux_in_either_object_order() {
-        let settings = settings_for_size(16, 8);
-        let mut reference_scene = vertical_light_scene();
-        let reference_ground_id = reference_scene.add(Box::new(Ground::new(0.0).unwrap()));
-        let reference = render_ground_hits(
-            &reference_scene,
-            reference_ground_id,
-            &sample_settings(&settings, 2, IorMode::Constant),
-        )
-        .unwrap();
-        let mut previous_image = None;
-        for ground_first in [false, true] {
-            let mut scene = vertical_light_scene();
-            if !ground_first {
-                scene.add(Box::new(Prism::new().unwrap()));
-            }
-            let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-            if ground_first {
-                scene.add(Box::new(Prism::new().unwrap()));
-            }
-            let framebuffer = render_ground_hits(
-                &scene,
-                ground_id,
-                &sample_settings(&settings, 2, IorMode::Constant),
-            )
-            .unwrap();
-            // 相同种子的有/无遮挡场景共享发射位置；增加遮挡不能增加任何像素的能量。
-            for (shadowed, unblocked) in framebuffer.pixels.iter().zip(&reference.pixels) {
-                assert!(shadowed.y <= unblocked.y + 1e-12);
-            }
-            assert_eq!(framebuffer.get(7, 3).unwrap().y, 0.0);
-            assert_eq!(framebuffer.get(0, 0), reference.get(0, 0));
-            // 边缘仍有双线性贡献，但比无遮挡时暗；随机位置使具体数值有波动。
-            assert!(framebuffer.get(6, 3).unwrap().y > 0.0);
-            assert!(framebuffer.get(5, 3).unwrap().y > 0.0);
-            assert!(framebuffer.get(5, 3).unwrap().y < reference.get(5, 3).unwrap().y);
-            let total_y: f64 = framebuffer.pixels.iter().map(|pixel| pixel.y).sum();
-            // 128 个像素中，几何投影遮挡等效的 16 个像素；过滤不改变总量。
-            assert!((total_y - 56.0).abs() < 1e-12);
-            if let Some(previous) = &previous_image {
-                assert_eq!(&framebuffer.pixels, previous);
-            }
-            previous_image = Some(framebuffer.pixels);
-        }
-    }
-
-    #[test]
-    fn bilinear_landing_distributes_expected_xyz_and_preserves_total_energy() {
-        let settings = settings_for_size(4, 3);
-        let mut scene = Scene::new();
-        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        // 此世界位置映射到连续像素 (1.25, 0.75)，让所有样本都落在这里。
-        let position = Vector3::new(-0.25, 1.0 / 3.0, 0.0);
-        let framebuffer = render_landing_points(
-            &scene,
-            ground_id,
-            &sample_settings(&settings, 1, IorMode::Constant),
-            |_| Some(position),
-        )
-        .unwrap();
-        for (x, y, expected_y) in [(1, 0, 1.125), (2, 0, 0.375), (1, 1, 3.375), (2, 1, 1.125)] {
-            assert!((framebuffer.get(x, y).unwrap().y - expected_y).abs() < 1e-12);
-        }
-        let white_xyz = Vector3::new(0.3127 / 0.3290, 1.0, (1.0 - 0.3127 - 0.3290) / 0.3290);
-        let total = framebuffer
-            .pixels
-            .iter()
-            .fold(Vector3::zeros(), |sum, pixel| sum + pixel);
-        assert!((total - white_xyz * 6.0).norm() < 1e-12);
-    }
-
-    #[test]
-    fn bilinear_landing_keeps_all_energy_at_receiver_edges_and_for_one_pixel_images() {
-        for (width, height) in [(4, 3), (1, 4), (4, 1), (1, 1)] {
-            let settings = settings_for_size(width, height);
-            let mut scene = Scene::new();
-            let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-            let framebuffer = render_landing_points(
-                &scene,
-                ground_id,
-                &sample_settings(&settings, 2, IorMode::Constant),
-                |_| Some(Vector3::new(-2.0, -2.0, 0.0)),
-            )
-            .unwrap();
-            let total_y: f64 = framebuffer.pixels.iter().map(|pixel| pixel.y).sum();
-            let expected = 0.5 * (width * height) as f64;
-            assert!((total_y - expected).abs() < 1e-12);
-            assert!((framebuffer.get(0, height - 1).unwrap().y - expected).abs() < 1e-12);
-        }
-    }
-
-    #[test]
-    fn three_landing_sets_share_spatial_samples_and_preserve_total_xyz() {
-        use std::cell::Cell;
-
-        let settings = settings_for_size(16, 8);
-        let mut scene = vertical_light_scene();
-        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        let white_xyz = Vector3::new(0.3127 / 0.3290, 1.0, (1.0 - 0.3127 - 0.3290) / 0.3290);
-        let expected = white_xyz * (0.5 * (settings.width * settings.height) as f64);
-        for samples in [1, 3] {
-            let calls = Cell::new(0);
-            let images = render_landing_point_sets(
-                &scene,
-                ground_id,
-                &sample_settings(&settings, samples, IorMode::Constant),
-                |ray| {
-                    calls.set(calls.get() + 1);
-                    [Some(Vector3::new(ray.origin.x, ray.origin.y, 0.0)); 3]
-                },
-            )
-            .unwrap();
-            assert_eq!(
-                calls.get(),
-                settings.width * settings.height * samples * samples
-            );
-            let reference = render_ground_hits(
-                &scene,
-                ground_id,
-                &sample_settings(&settings, samples, IorMode::Constant),
-            )
-            .unwrap();
-            let mut total = Vector3::zeros();
-            for image in &images {
-                for (pixel, unblocked) in image.pixels.iter().zip(&reference.pixels) {
-                    assert!((pixel * 3.0 - unblocked).norm() < 1e-12);
-                    total += pixel;
-                }
-            }
-            assert!((total - expected).norm() < 1e-10);
-        }
-    }
-
-    #[test]
-    fn lost_wavelengths_do_not_stop_others_or_redistribute_their_flux() {
-        let settings = settings_for_size(4, 3);
-        let mut scene = Scene::new();
-        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        for samples in [1, 4] {
-            let images = render_landing_point_sets(
-                &scene,
-                ground_id,
-                &sample_settings(&settings, samples, IorMode::Constant),
-                |_| {
-                    [
-                        None,
-                        Some(Vector3::new(0.0, 0.0, 0.0)),
-                        Some(Vector3::new(3.0, 0.0, 0.0)),
-                    ]
-                },
-            )
-            .unwrap();
-            let totals = images.map(|image| image.pixels.iter().map(|pixel| pixel.y).sum::<f64>());
-            assert_eq!(totals[0], 0.0);
-            assert!((totals[1] - 2.0).abs() < 1e-12);
-            assert_eq!(totals[2], 0.0);
-        }
-    }
-
-    #[test]
-    fn wavelength_images_match_single_wavelength_paths_and_repeat() {
-        let settings = settings_for_size(64, 32);
-        let mut scene = Scene::new();
-        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
-        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        let images = render_refracted_ground_hits(
-            &scene,
-            Some(prism_id),
-            ground_id,
-            &sample_settings(&settings, 2, IorMode::Dispersion),
-            DEBUG_WAVELENGTHS_NM.map(Some),
-            IorMode::Dispersion,
-        )
-        .unwrap();
-        let repeated = render_refracted_ground_hits(
-            &scene,
-            Some(prism_id),
-            ground_id,
-            &sample_settings(&settings, 2, IorMode::Dispersion),
-            DEBUG_WAVELENGTHS_NM.map(Some),
-            IorMode::Dispersion,
-        )
-        .unwrap();
-        assert_ne!(images[0].pixels, images[1].pixels);
-        assert_ne!(images[1].pixels, images[2].pixels);
-        for ((wavelength_nm, image), repeated_image) in
-            DEBUG_WAVELENGTHS_NM.into_iter().zip(&images).zip(repeated)
-        {
-            assert_eq!(image.pixels, repeated_image.pixels);
-            // 独立按单个波长重放相同的发射采样，检查顺序、落点与 1/3 权重。
-            let single = render_weighted_landing_points(
-                &scene,
-                ground_id,
-                &sample_settings(&settings, 2, IorMode::Constant),
-                |ray| {
-                    take_photon_landing(&scene, ray, prism_id, ground_id, || {
-                        refractive_index(Some(wavelength_nm), IorMode::Dispersion)
-                    })
-                },
-            )
-            .unwrap();
-            for (pixel, single_pixel) in image.pixels.iter().zip(single.pixels) {
-                assert!(pixel.iter().all(|value| value.is_finite() && *value >= 0.0));
-                assert!((pixel * 3.0 - single_pixel).norm() < 1e-12);
-            }
-        }
-        let coarse = render_refracted_ground_hits(
-            &scene,
-            Some(prism_id),
-            ground_id,
-            &sample_settings(&settings, 1, IorMode::Dispersion),
-            DEBUG_WAVELENGTHS_NM.map(Some),
-            IorMode::Dispersion,
-        )
-        .unwrap();
-        let sum_y = |images: &[Framebuffer; 3]| {
-            images
-                .iter()
-                .flat_map(|image| &image.pixels)
-                .map(|pixel| pixel.y)
-                .sum::<f64>()
-        };
-        let emitted_y = 0.5 * (settings.width * settings.height) as f64;
-        assert!(sum_y(&images) > 0.0 && sum_y(&images) <= emitted_y + 1e-10);
-        assert!((sum_y(&images) - sum_y(&coarse)).abs() < emitted_y * 0.02);
-    }
-
-    #[test]
-    fn unified_modes_share_sampling_and_constant_wavelengths_keep_total_flux() {
-        let settings = settings_for_size(64, 32);
-        let mut scene = Scene::new();
-        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
-        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        let [single] = render_refracted_ground_hits(
-            &scene,
-            Some(prism_id),
-            ground_id,
-            &sample_settings(&settings, 2, IorMode::Constant),
-            [None],
-            IorMode::Constant,
-        )
-        .unwrap();
-        let constant = render_refracted_ground_hits(
-            &scene,
-            Some(prism_id),
-            ground_id,
-            &sample_settings(&settings, 2, IorMode::Constant),
-            DEBUG_WAVELENGTHS_NM.map(Some),
-            IorMode::Constant,
-        )
-        .unwrap();
-        let dispersion = render_refracted_ground_hits(
-            &scene,
-            Some(prism_id),
-            ground_id,
-            &sample_settings(&settings, 2, IorMode::Dispersion),
-            DEBUG_WAVELENGTHS_NM.map(Some),
-            IorMode::Dispersion,
-        )
-        .unwrap();
-        assert_eq!(constant[0].pixels, constant[1].pixels);
-        assert_eq!(constant[1].pixels, constant[2].pixels);
-        for (constant_image, dispersion_image) in constant.iter().zip(&dispersion) {
-            // 远处直射区域相同，玻璃折射区域随模式改变。
-            assert_eq!(constant_image.get(0, 0), dispersion_image.get(0, 0));
-            assert_ne!(constant_image.pixels, dispersion_image.pixels);
-            for (pixel, single_pixel) in constant_image.pixels.iter().zip(&single.pixels) {
-                assert!((pixel * 3.0 - single_pixel).norm() < 1e-12);
-            }
-        }
-    }
-
-    #[test]
-    fn dispersion_render_rejects_missing_invalid_or_overflowing_wavelengths() {
-        let settings = settings_for_size(8, 4);
-        let mut scene = Scene::new();
-        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
-        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        for wavelength_nm in [
-            None,
-            Some(0.0),
-            Some(-450.0),
-            Some(f64::NAN),
-            Some(f64::INFINITY),
-            Some(f64::NEG_INFINITY),
-            Some(f64::MIN_POSITIVE),
-        ] {
-            assert!(
-                render_refracted_ground_hits(
-                    &scene,
-                    Some(prism_id),
-                    ground_id,
-                    &sample_settings(&settings, 1, IorMode::Dispersion),
-                    [Some(450.0), wavelength_nm],
-                    IorMode::Dispersion
-                )
-                .is_err()
-            );
-            // 固定模式不读取波长，仍可使用同一个入口。
-            assert!(
-                render_refracted_ground_hits(
-                    &scene,
-                    Some(prism_id),
-                    ground_id,
-                    &sample_settings(&settings, 1, IorMode::Constant),
-                    [wavelength_nm],
-                    IorMode::Constant
-                )
-                .is_ok()
-            );
-        }
-    }
-
-    #[test]
-    fn invalid_render_settings_return_errors() {
-        let mut settings = settings_for_size(8, 4);
-        let mut scene = Scene::new();
-        assert!(
-            render_ground_hits(&scene, 0, &sample_settings(&settings, 1, IorMode::Constant))
-                .is_err()
-        );
-        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        assert!(
-            render_ground_hits(
-                &scene,
-                ground_id,
-                &sample_settings(&settings, 0, IorMode::Constant)
-            )
-            .is_err()
-        );
-        assert!(
-            render_ground_hits(
-                &scene,
-                ground_id,
-                &sample_settings(&settings, usize::MAX, IorMode::Constant)
-            )
-            .is_err()
-        );
-        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
-        for (mode, wavelengths_nm) in [
-            (IorMode::Constant, [None]),
-            (IorMode::Dispersion, [Some(450.0)]),
-        ] {
-            for (prism_id, ground_id, samples) in [
-                (usize::MAX, ground_id, 1),
-                (ground_id, ground_id, 1),
-                (prism_id, usize::MAX, 1),
-                (prism_id, ground_id, 0),
-                (prism_id, ground_id, usize::MAX),
+    fn spectral_splat_preserves_xyz_at_interior_edges_and_single_pixel_receivers() {
+        let receiver = Scene::new().receiver;
+        let xyz = Vector3::new(0.2, 0.7, 1.3);
+        for (width, height) in [(4, 2), (1, 1), (1, 4), (4, 1)] {
+            for position in [
+                Vector3::zeros(),
+                Vector3::new(-2.0, -2.0, 0.0),
+                Vector3::new(2.0 - 1e-10, 2.0 - 1e-10, 0.0),
             ] {
-                assert!(
-                    render_refracted_ground_hits(
-                        &scene,
-                        Some(prism_id),
-                        ground_id,
-                        &sample_settings(&settings, samples, mode),
-                        wavelengths_nm,
-                        mode
-                    )
-                    .is_err()
-                );
+                let mut image = Framebuffer::new(width, height);
+                splat_spectral_xyz(&mut image, position, xyz, &receiver).unwrap();
+                assert!((image.pixels.iter().copied().sum::<Vector3<f64>>() - xyz).norm() < 1e-14);
             }
-            assert!(
-                render_refracted_ground_hits(
-                    &scene,
-                    Some(prism_id),
-                    ground_id,
-                    &sample_settings(&settings, 1, mode),
-                    [],
-                    mode
-                )
-                .is_err()
-            );
         }
-        assert!(
-            render_landing_point_sets(
-                &scene,
-                ground_id,
-                &sample_settings(&settings, 1, IorMode::Constant),
-                |_| []
-            )
-            .is_err()
-        );
-        settings.width = 0;
-        assert!(
-            render_ground_hits(
-                &scene,
-                ground_id,
-                &sample_settings(&settings, 1, IorMode::Constant)
-            )
-            .is_err()
-        );
-        assert!(
-            render_refracted_ground_hits(
-                &scene,
-                Some(prism_id),
-                ground_id,
-                &sample_settings(&settings, 1, IorMode::Constant),
-                [None],
-                IorMode::Constant
-            )
-            .is_err()
-        );
+        let mut image = Framebuffer::new(2, 2);
+        splat_spectral_xyz(&mut image, Vector3::zeros(), xyz, &receiver).unwrap();
+        for pixel in image.pixels {
+            assert!((pixel - xyz * 0.25).norm() < 1e-14);
+        }
     }
 
     #[test]
-    fn ground_hit_png_contains_gray_ground_and_black_shadow() -> Result<(), Box<dyn Error>> {
-        let settings = settings_for_size(32, 16);
-        let mut scene = vertical_light_scene();
-        scene.add(Box::new(Prism::new().unwrap()));
-        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        let framebuffer = render_ground_hits(
-            &scene,
-            ground_id,
-            &sample_settings(&settings, 2, IorMode::Constant),
-        )?;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos();
-        let directory =
-            std::env::temp_dir().join(format!("ground-hit-png-{}-{timestamp}", std::process::id()));
-        let path = directory.join("ground_hits.png");
-        save_png(&framebuffer, path.to_str().ok_or("临时路径必须是 UTF-8")?)?;
-        let decoded = image::open(&path)?;
-        assert_eq!(decoded.color(), image::ColorType::Rgb8);
-        let pixels = decoded.into_rgb8();
-        assert_eq!(pixels.dimensions(), (32, 16));
-        assert_eq!(pixels.get_pixel(16, 8).0, [0, 0, 0]);
-        assert!(pixels.get_pixel(0, 0)[0] > 0);
-        assert!(
-            pixels
-                .pixels()
-                .all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2])
-        );
-        std::fs::remove_dir_all(directory)?;
-        Ok(())
-    }
-
-    #[test]
-    fn refracted_render_redistributes_energy_without_creating_flux() {
-        let settings = settings_for_size(64, 32);
-        let mut scene = Scene::new();
-        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
-        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        let [refracted] = render_refracted_ground_hits(
-            &scene,
-            Some(prism_id),
-            ground_id,
-            &sample_settings(&settings, 2, IorMode::Constant),
-            [None],
-            IorMode::Constant,
+    fn spectral_splat_drops_outside_receiver_and_rejects_invalid_energy() {
+        let receiver = Scene::new().receiver;
+        let mut image = Framebuffer::new(2, 2);
+        splat_spectral_xyz(
+            &mut image,
+            Vector3::new(2.0, 0.0, 0.0),
+            Vector3::repeat(1.0),
+            &receiver,
         )
         .unwrap();
-        let mut reference_scene = Scene::new();
-        let reference_ground_id = reference_scene.add(Box::new(Ground::new(0.0).unwrap()));
-        let reference = render_ground_hits(
-            &reference_scene,
-            reference_ground_id,
-            &sample_settings(&settings, 2, IorMode::Constant),
-        )
-        .unwrap();
-        // 相同随机发射位置下，远处相同；部分折射落点与直射光叠加后更亮。
-        assert_eq!(refracted.get(0, 0), reference.get(0, 0));
-        assert!(
-            refracted
-                .pixels
-                .iter()
-                .zip(&reference.pixels)
-                .any(|(a, b)| a.y > b.y + 1e-12)
-        );
-        assert!(refracted.pixels.iter().any(|pixel| pixel.y == 0.0));
-        assert!(
-            refracted
-                .pixels
-                .iter()
-                .all(|pixel| pixel.iter().all(|v| v.is_finite() && *v >= 0.0))
-        );
-        let total_y: f64 = refracted.pixels.iter().map(|pixel| pixel.y).sum();
-        let emitted_y = 0.5 * (settings.width * settings.height) as f64;
-        assert!(total_y > 0.0 && total_y <= emitted_y + 1e-12);
-        let [coarse] = render_refracted_ground_hits(
-            &scene,
-            Some(prism_id),
-            ground_id,
-            &sample_settings(&settings, 1, IorMode::Constant),
-            [None],
-            IorMode::Constant,
-        )
-        .unwrap();
-        let coarse_y: f64 = coarse.pixels.iter().map(|pixel| pixel.y).sum();
-        // 边界采样可能改变少量全反射分类，但四倍光线数不能使总能量接近四倍。
-        assert!((total_y - coarse_y).abs() < emitted_y * 0.02);
-    }
-
-    #[test]
-    fn refracted_png_preserves_grayscale_and_contains_brighter_landing_regions()
-    -> Result<(), Box<dyn Error>> {
-        let settings = settings_for_size(64, 32);
-        let mut scene = vertical_light_scene();
-        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
-        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
-        let [framebuffer] = render_refracted_ground_hits(
-            &scene,
-            Some(prism_id),
-            ground_id,
-            &sample_settings(&settings, 2, IorMode::Constant),
-            [None],
-            IorMode::Constant,
-        )?;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos();
-        let directory =
-            std::env::temp_dir().join(format!("refracted-png-{}-{timestamp}", std::process::id()));
-        let path = directory.join("refracted_hits.png");
-        save_png(&framebuffer, path.to_str().ok_or("临时路径必须是 UTF-8")?)?;
-        let decoded = image::open(&path)?;
-        assert_eq!(decoded.color(), image::ColorType::Rgb8);
-        let pixels = decoded.into_rgb8();
-        assert_eq!(pixels.dimensions(), (64, 32));
-        assert!(pixels.get_pixel(0, 0)[0] > 0);
-        assert!(
-            pixels
-                .pixels()
-                .all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2])
-        );
-        assert!(pixels.pixels().any(|pixel| pixel[0] > 188));
-        assert!(pixels.pixels().any(|pixel| pixel[0] == 0));
-        std::fs::remove_dir_all(directory)?;
-        Ok(())
+        assert!(image.pixels.iter().all(|p| *p == Vector3::zeros()));
+        for xyz in [
+            Vector3::repeat(f64::NAN),
+            Vector3::repeat(-1.0),
+            Vector3::repeat(f64::INFINITY),
+        ] {
+            assert!(splat_spectral_xyz(&mut image, Vector3::zeros(), xyz, &receiver).is_err());
+        }
     }
 }

@@ -28,7 +28,7 @@ pub fn linear_srgb_to_xyz(linear_rgb: Vector3<f64>) -> Option<Vector3<f64>> {
 }
 
 /// 将 D65 白点约定下的 CIE XYZ 转为线性 sRGB，参考白的 Y = 1。
-/// 保留超出 [0, 1] 的结果；save_png 负责显示范围处理和后续编码。
+/// 保留超出 [0, 1] 的结果；save_png_with_exposure 负责显示范围处理和后续编码。
 /// 输入非有限值或计算溢出时返回 None。
 ///
 /// 矩阵来源：W3C CSS Color 4 的 XYZ_to_lin_sRGB：
@@ -89,7 +89,7 @@ pub fn linear_to_srgb_channel(linear: f64) -> Option<f64> {
 }
 
 /// 将三个 [0, 1] 内的线性通道编码并量化为 [R, G, B] 字节。
-/// 任一通道非有限或超出范围时返回 None；显示范围裁剪由 save_png 完成。
+/// 任一通道非有限或超出范围时返回 None；显示范围裁剪由 save_png_with_exposure 完成。
 pub fn linear_rgb_to_srgb8(linear_rgb: Vector3<f64>) -> Option<[u8; 3]> {
     let r = linear_to_srgb_channel(linear_rgb.x)?;
     let g = linear_to_srgb_channel(linear_rgb.y)?;
@@ -102,19 +102,6 @@ pub fn linear_rgb_to_srgb8(linear_rgb: Vector3<f64>) -> Option<[u8; 3]> {
         (g * 255.0).round().clamp(0.0, 255.0) as u8,
         (b * 255.0).round().clamp(0.0, 255.0) as u8,
     ])
-}
-
-/// 将法线归一化后，按 (n + 1) / 2 将世界 x/y/z 映射到 RGB8。
-/// 这是法线数据的直接可视化，不施加曝光或 sRGB 传递函数。
-/// 零向量、非有限法线或模长溢出时返回 None。
-pub fn normal_to_rgb8(normal: Vector3<f64>) -> Option<[u8; 3]> {
-    let length = normal.norm();
-    if !length.is_finite() || length == 0.0 {
-        return None;
-    }
-    let normal = normal / length;
-    let rgb = normal.map(|value| (((value + 1.0) * 0.5).clamp(0.0, 1.0) * 255.0).round() as u8);
-    Some([rgb.x, rgb.y, rgb.z])
 }
 
 /// 输入连续像素坐标，返回 (像素 x, 像素 y, 权重)，顺序为左上、右上、左下、右下。
@@ -160,35 +147,6 @@ pub fn bilinear_weights(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn normal_visualization_maps_signed_axes_and_normalizes_input() {
-        for (normal, expected) in [
-            (Vector3::x(), [255, 128, 128]),
-            (-Vector3::x(), [0, 128, 128]),
-            (Vector3::y(), [128, 255, 128]),
-            (-Vector3::y(), [128, 0, 128]),
-            (Vector3::z(), [128, 128, 255]),
-            (-Vector3::z(), [128, 128, 0]),
-            (Vector3::new(2.0, -3.0, 6.0), [164, 73, 237]),
-        ] {
-            assert_eq!(normal_to_rgb8(normal), Some(expected));
-            assert_eq!(normal_to_rgb8(normal * 3.0), Some(expected));
-        }
-    }
-
-    #[test]
-    fn normal_visualization_rejects_invalid_input() {
-        for normal in [
-            Vector3::zeros(),
-            Vector3::repeat(f64::NAN),
-            Vector3::repeat(f64::INFINITY),
-            Vector3::repeat(f64::NEG_INFINITY),
-            Vector3::repeat(f64::MAX),
-        ] {
-            assert_eq!(normal_to_rgb8(normal), None);
-        }
-    }
 
     // 浮点矩阵计算有舍入误差，使用向量差的长度（欧几里得范数）衡量接近程度。
     // 例如 0.9999999999999993 与 1.0 的差远小于这里使用的 1e-12 容差。

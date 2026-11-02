@@ -21,12 +21,25 @@ fn identical(actual: &Framebuffer, expected: &Framebuffer) -> bool {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut config = Config::load("configs/default.json")?;
-    config.render.width = 512;
-    config.render.height = 512;
-    let spp = 256;
+    let mut arguments = std::env::args().skip(1);
+    let spp = arguments
+        .next()
+        .map(|v| v.parse::<usize>())
+        .transpose()?
+        .unwrap_or(config.render.camera_spp);
+    let size = arguments
+        .next()
+        .map(|v| v.parse::<usize>())
+        .transpose()?
+        .unwrap_or(config.render.width);
+    if spp == 0 || size == 0 || arguments.next().is_some() {
+        return Err("用法：camera_parallel_benchmark [正整数 SPP] [正整数边长]".into());
+    }
+    config.render.width = size;
+    config.render.height = size;
     let scene = Scene::from_config(&config.scene)?;
     println!(
-        "512x512, spp={spp}, seed={}, environment_samples={}, HDRI={:?}",
+        "{size}x{size}, spp={spp}, seed={}, environment_samples={}, HDRI={:?}",
         config.render.seed,
         config.scene.environment_samples,
         config

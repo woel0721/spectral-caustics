@@ -63,7 +63,7 @@ impl GroundReceiver {
 }
 
 impl Scene {
-    /// 使用当前射线方向查询天空；关闭天空时回退到旧常量背景。
+    /// 使用当前射线方向查询天空；关闭天空时回退到常量背景。
     pub fn background_radiance(&self, direction: Vector3<f64>) -> Option<Vector3<f64>> {
         match &self.environment {
             Some(environment) => environment.radiance(direction),

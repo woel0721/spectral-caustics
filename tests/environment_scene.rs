@@ -11,9 +11,8 @@ use spectral_caustics::{
     environment::{Environment, EnvironmentMap},
     material::{GlassEvent, MaterialSample},
     render::{
-        GroundLightingComponent, Render, SpectralLighting, framebuffer::Framebuffer,
-        render_camera_glass, render_camera_glass_components, render_camera_glass_with_ground,
-        render_camera_glass_with_lighting, render_camera_lit, utils::linear_srgb_to_xyz,
+        Render, SpectralLighting, framebuffer::Framebuffer, render_camera_glass,
+        render_camera_glass_components, utils::linear_srgb_to_xyz,
     },
     scene::Scene,
 };
@@ -311,11 +310,6 @@ fn camera_misses_return_rotated_scaled_hdr_background() {
     .unwrap();
     scene.objects.clear();
     fs::remove_file(&hdr.0).unwrap();
-    let expected = map.radiance(-Vector3::z()).unwrap() * 2.0;
-    assert_rgb(
-        render_camera_lit(&scene, 1, 1).unwrap().pixels[0],
-        linear_srgb_to_xyz(expected).unwrap(),
-    );
     // pixel_seed(0, 0, CAMERA_STREAM=0) = 0，独立推导新逐像素流的首条路径。
     let mut rng = StdRng::seed_from_u64(0);
     let offset = Vector2::new(rng.random::<f64>(), rng.random::<f64>());
@@ -408,7 +402,6 @@ fn all_camera_entries_integrate_hdr_with_lambertian_without_changing_photon_ligh
     let mut scene = Scene::from_config(&config).unwrap();
     fs::remove_file(&hdr.0).unwrap();
     let lighting = renderer.render_lighting(&scene).unwrap();
-    let zero = Framebuffer::new(1, 1);
     let expected = linear_srgb_to_xyz(Vector3::new(8.0, 4.0, 2.0) * (0.8 * 0.25)).unwrap();
     // 混合采样即使在均匀 HDRI 下也有方差；按解析期望进行统计验收。
     for samples in [1024, 4096] {
@@ -422,19 +415,7 @@ fn all_camera_entries_integrate_hdr_with_lambertian_without_changing_photon_ligh
                 .all(|p| *p == Vector3::zeros())
         );
         let images = [
-            render_camera_lit(&scene, 3, 2).unwrap(),
             render_camera_glass(&scene, 3, 2, 8, 42).unwrap(),
-            render_camera_glass_with_ground(&scene, &zero, 3, 2, 8, 42).unwrap(),
-            render_camera_glass_with_lighting(
-                &scene,
-                &lighting,
-                3,
-                2,
-                8,
-                42,
-                GroundLightingComponent::Combined,
-            )
-            .unwrap(),
             components.direct,
             components.combined,
         ];
@@ -450,7 +431,7 @@ fn all_camera_entries_integrate_hdr_with_lambertian_without_changing_photon_ligh
 }
 
 #[test]
-fn hdr_camera_components_match_single_entries_for_background_diffuse_and_glass() {
+fn hdr_camera_components_add_up_for_background_diffuse_and_glass() {
     let hdr = TemporaryHdr::new(false);
     for view in 0..3 {
         let mut config = scene_config(EnvironmentConfig {
@@ -483,19 +464,6 @@ fn hdr_camera_components_match_single_entries_for_background_diffuse_and_glass()
         for (spp, seed) in [(1, 0), (16, 42), (7, 123)] {
             let images =
                 render_camera_glass_components(&scene, &lighting, 7, 5, spp, seed).unwrap();
-            for (component, actual) in [
-                (GroundLightingComponent::Direct, &images.direct),
-                (GroundLightingComponent::Caustics, &images.caustics),
-                (GroundLightingComponent::Combined, &images.combined),
-            ] {
-                let reference = render_camera_glass_with_lighting(
-                    &scene, &lighting, 7, 5, spp, seed, component,
-                )
-                .unwrap();
-                for (actual, expected) in actual.pixels.iter().zip(&reference.pixels) {
-                    assert_rgb(*actual, *expected);
-                }
-            }
             for ((direct, caustics), combined) in images
                 .direct
                 .pixels
@@ -614,7 +582,7 @@ fn gradient_direction_sampling_is_uniform_on_the_full_sphere() {
     }
     assert!((mean / 8192.0).norm() < 0.03);
     assert!((north_count as f64 / 8192.0 - 0.5).abs() < 0.02);
-    // 绕 Z 的旋转对渐变无影响，兼容采样序列也不变。
+    // 绕 Z 的旋转对渐变无影响，方向采样不受旋转影响。
     for environment in &environments {
         let mut rng = StdRng::seed_from_u64(42);
         let mut replay = StdRng::seed_from_u64(42);

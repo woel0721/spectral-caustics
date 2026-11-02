@@ -60,7 +60,7 @@ fn checkerboard_only_modulates_the_bound_ground() {
 }
 
 #[test]
-fn sky_gradient_uses_world_z_and_keeps_hdr_and_legacy_background() {
+fn sky_gradient_uses_world_z_hdr_and_constant_background() {
     let mut scene = Scene::new();
     let sky = scene.environment.as_mut().unwrap();
     sky.horizon_color = Vector3::new(1.0, 2.0, 3.0);
@@ -323,10 +323,6 @@ fn photon_landing_slab_matches_known_normal_oblique_and_grazing_transmission() {
         assert!((landing.weight - (1.0 - reflectance).powi(2)).abs() < 1e-13);
         assert!(landing.weight.is_finite() && (0.0..=1.0).contains(&landing.weight));
         assert!(landing.position.z.abs() < 1e-12);
-        assert_eq!(
-            Some(landing.position),
-            take_photon(&scene, ray, glass, ground, || Some(1.5))
-        );
     }
 }
 
@@ -379,11 +375,12 @@ fn photon_returns_direct_ground_hit_or_none_when_ray_misses() {
     let (scene, prism_id, ground_id) = photon_scene();
     let ray = Ray::new(Vector3::new(1.0, 0.2, 3.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
     assert_eq!(
-        take_photon(&scene, ray, prism_id, ground_id, || Some(1.52)),
+        take_photon_landing(&scene, ray, prism_id, ground_id, || Some(1.52))
+            .map(|landing| landing.position),
         Some(Vector3::new(1.0, 0.2, 0.0))
     );
     let ray = Ray::new(Vector3::new(1.0, 0.2, 3.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
-    assert!(take_photon(&scene, ray, prism_id, ground_id, || Some(1.52)).is_none());
+    assert!(take_photon_landing(&scene, ray, prism_id, ground_id, || Some(1.52)).is_none());
 }
 
 #[test]
@@ -398,9 +395,10 @@ fn photon_reaches_expected_refracted_landing_point_in_either_object_order() {
             (prism_id, scene.add(Box::new(Ground::new(0.0).unwrap())))
         };
         let ray = Ray::new(Vector3::new(0.25, 0.2, 3.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
-        let position = take_photon(&scene, ray, prism_id, ground_id, || {
+        let position = take_photon_landing(&scene, ray, prism_id, ground_id, || {
             refractive_index(None, IorMode::Constant)
         })
+        .map(|landing| landing.position)
         .unwrap();
         // 与独立单光线示例的已知落点比较；直接落地时 x 应为 0.25。
         assert!((position - Vector3::new(-0.719593104236608, 0.2, 0.0)).norm() < 1e-12);
@@ -415,20 +413,23 @@ fn photon_uses_wavelength_dependent_index_at_both_interfaces() {
     // 将斜面入射与水平底面出射分别代入 Snell 定律所得的参考落点，包含原点偏移。
     for (wavelength_nm, expected_x) in [(450.0, -0.7321163297863346), (650.0, -0.7069588738883907)]
     {
-        let position = take_photon(&scene, ray, prism_id, ground_id, || {
+        let position = take_photon_landing(&scene, ray, prism_id, ground_id, || {
             refractive_index(Some(wavelength_nm), IorMode::Dispersion)
         })
+        .map(|landing| landing.position)
         .unwrap();
         assert!((position - Vector3::new(expected_x, 0.2, 0.0)).norm() < 1e-12);
         assert_eq!(
-            take_photon(&scene, ray, prism_id, ground_id, || {
+            take_photon_landing(&scene, ray, prism_id, ground_id, || {
                 refractive_index(Some(wavelength_nm), IorMode::Dispersion)
-            }),
+            })
+            .map(|landing| landing.position),
             Some(position)
         );
-        let constant_position = take_photon(&scene, ray, prism_id, ground_id, || {
+        let constant_position = take_photon_landing(&scene, ray, prism_id, ground_id, || {
             refractive_index(Some(wavelength_nm), IorMode::Constant)
         })
+        .map(|landing| landing.position)
         .unwrap();
         assert!((constant_position - Vector3::new(-0.719593104236608, 0.2, 0.0)).norm() < 1e-12);
         assert!((position - constant_position).norm() > 0.01);
@@ -456,7 +457,7 @@ fn photon_rejects_invalid_wavelengths_even_for_direct_ground_hits() {
             f64::MIN_POSITIVE,
         ] {
             assert!(
-                take_photon(&scene, ray, prism_id, ground_id, || {
+                take_photon_landing(&scene, ray, prism_id, ground_id, || {
                     refractive_index(Some(wavelength_nm), IorMode::Dispersion)
                 })
                 .is_none()
@@ -471,11 +472,12 @@ fn photon_evaluates_a_consuming_ior_closure_once_for_both_interfaces() {
     let ray = Ray::new(Vector3::new(0.25, 0.2, 3.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
     let calls = std::cell::Cell::new(0);
     let indices = vec![1.52];
-    let position = take_photon(&scene, ray, prism_id, ground_id, || {
+    let position = take_photon_landing(&scene, ray, prism_id, ground_id, || {
         calls.set(calls.get() + 1);
         // 消耗捕获的 Vec，使闭包只实现 FnOnce。
         indices.into_iter().next()
     })
+    .map(|landing| landing.position)
     .unwrap();
     assert_eq!(calls.get(), 1);
     assert!((position - Vector3::new(-0.719593104236608, 0.2, 0.0)).norm() < 1e-12);
@@ -498,7 +500,7 @@ fn photon_rejects_missing_or_invalid_ior_even_for_direct_ground_hits() {
             Some(f64::INFINITY),
             Some(f64::NEG_INFINITY),
         ] {
-            assert!(take_photon(&scene, ray, prism_id, ground_id, || glass_ior).is_none());
+            assert!(take_photon_landing(&scene, ray, prism_id, ground_id, || glass_ior).is_none());
         }
     }
 }
@@ -510,7 +512,7 @@ fn photon_stops_at_other_objects_before_inside_or_after_glass() {
         let (mut scene, prism_id, ground_id) = photon_scene();
         scene.add(Box::new(Ground::new(height).unwrap()));
         let ray = Ray::new(Vector3::new(0.25, 0.2, 3.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
-        assert!(take_photon(&scene, ray, prism_id, ground_id, || Some(1.52)).is_none());
+        assert!(take_photon_landing(&scene, ray, prism_id, ground_id, || Some(1.52)).is_none());
     }
 }
 
@@ -520,16 +522,16 @@ fn photon_terminates_on_total_internal_reflection_at_prism_bottom() {
     // 垂直于右斜面入射，进入后方向不变；与底面法线夹角约 58°，超过临界角。
     let ray = Ray::new(Vector3::new(1.05, 0.2, 1.9), Vector3::new(-1.6, 0.0, -1.0)).unwrap();
     assert_eq!(scene.intersect(&ray).unwrap().object_id, Some(prism_id));
-    assert!(take_photon(&scene, ray, prism_id, ground_id, || Some(1.52)).is_none());
+    assert!(take_photon_landing(&scene, ray, prism_id, ground_id, || Some(1.52)).is_none());
 }
 
 #[test]
 fn photon_rejects_invalid_or_identical_object_ids() {
     let (scene, prism_id, ground_id) = photon_scene();
     let ray = Ray::new(Vector3::new(1.0, 0.2, 3.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
-    assert!(take_photon(&scene, ray, usize::MAX, ground_id, || Some(1.52)).is_none());
-    assert!(take_photon(&scene, ray, prism_id, usize::MAX, || Some(1.52)).is_none());
-    assert!(take_photon(&scene, ray, ground_id, ground_id, || Some(1.52)).is_none());
+    assert!(take_photon_landing(&scene, ray, usize::MAX, ground_id, || Some(1.52)).is_none());
+    assert!(take_photon_landing(&scene, ray, prism_id, usize::MAX, || Some(1.52)).is_none());
+    assert!(take_photon_landing(&scene, ray, ground_id, ground_id, || Some(1.52)).is_none());
 }
 
 #[test]

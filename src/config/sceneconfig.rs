@@ -21,13 +21,13 @@ pub(crate) fn validate_diffuse_bounces(count: usize) -> Result<(), String> {
 pub struct SceneConfig {
     pub camera: CameraConfig,
     pub background_linear_rgb: [f64; 3],
-    /// 缺省/null 保留旧常量背景且关闭天空照明；显式配置时启用天空。
+    /// 缺省/null 使用常量背景且关闭天空照明；显式配置时启用天空。
     #[serde(default)]
     pub environment: Option<EnvironmentConfig>,
     /// 每条相机路径在漫反射终点采样的环境方向数，默认 1。
     #[serde(default = "default_environment_samples")]
     pub environment_samples: usize,
-    /// HDRI 多样本 MIS 权重；旧 JSON 缺省为 Balance。
+    /// HDRI 多样本 MIS 权重；省略字段时缺省为 Balance。
     #[serde(default)]
     pub environment_mis_heuristic: EnvironmentMisHeuristic,
     /// 相机额外 Lambertian 反弹数；缺省为 0，运行时上限见 MAX_DIFFUSE_BOUNCES。

@@ -1,18 +1,15 @@
 //! 图像输出链路：XYZ -> 线性 sRGB -> 显示范围裁剪 -> sRGB8 -> PNG。
 //! Render 使用配置中的曝光，颜色计算与存储使用 f64，导出时才进行 8 位量化。
 
-pub mod camera_debug;
 pub mod caustics;
 pub mod framebuffer;
 pub mod integrator;
 pub mod utils;
 
-pub use camera_debug::render_camera_debug;
 pub use caustics::SpectralLighting;
 pub use integrator::{
-    CameraLightingImages, GroundLightingComponent, lambertian_radiance, render_camera_glass,
-    render_camera_glass_components, render_camera_glass_with_ground,
-    render_camera_glass_with_lighting, render_camera_lit, sample_ground_irradiance,
+    CameraLightingImages, lambertian_radiance, render_camera_glass, render_camera_glass_components,
+    sample_ground_irradiance,
 };
 
 use self::{
@@ -38,10 +35,6 @@ impl Render {
             .map(|count| rayon::ThreadPoolBuilder::new().num_threads(count).build())
             .transpose()?;
         Ok(Self { settings, pool })
-    }
-
-    pub fn settings(&self) -> &RenderSetting {
-        &self.settings
     }
 
     pub fn thread_count(&self) -> usize {
@@ -114,30 +107,6 @@ impl Render {
         result.map_err(Into::into)
     }
 
-    pub fn ground_hits(&self, scene: &Scene) -> Result<Framebuffer, Box<dyn Error>> {
-        caustics::render_ground_hits(
-            scene,
-            scene.ground_id.ok_or("场景缺少接收地面")?,
-            &self.settings,
-        )
-    }
-
-    pub fn refracted_hits<const N: usize>(
-        &self,
-        scene: &Scene,
-        wavelengths_nm: [Option<f64>; N],
-        mode: IorMode,
-    ) -> Result<[Framebuffer; N], Box<dyn Error>> {
-        caustics::render_refracted_ground_hits(
-            scene,
-            scene.prism_id,
-            scene.ground_id.ok_or("场景缺少接收地面")?,
-            &self.settings,
-            wavelengths_nm,
-            mode,
-        )
-    }
-
     pub fn save(
         &self,
         framebuffer: &Framebuffer,
@@ -145,12 +114,6 @@ impl Render {
     ) -> Result<(), Box<dyn Error>> {
         save_png_with_exposure(framebuffer, path, self.settings.exposure)
     }
-}
-
-/// 将线性 XYZ 缓冲保存为 8 位 sRGB PNG。
-/// 固定曝光为 1.0，超出显示范围的线性 RGB 采用逐通道裁剪。
-pub fn save_png(framebuffer: &Framebuffer, path: &str) -> Result<(), Box<dyn Error>> {
-    save_png_with_exposure(framebuffer, path, 1.0)
 }
 
 /// 按配置在线性空间施加曝光，再裁剪、sRGB 编码和保存 PNG。
@@ -262,7 +225,7 @@ mod tests {
             assert!(framebuffer.set(x, y, xyz));
         }
 
-        save_png(&framebuffer, path.to_str().ok_or("临时路径必须是 UTF-8")?)?;
+        save_png_with_exposure(&framebuffer, &path, 1.0)?;
         let decoded = image::open(&path)?;
         // 先核对原始像素格式，避免格式转换掩盖错误的位深或通道数量。
         assert_eq!(decoded.color(), image::ColorType::Rgb8);
