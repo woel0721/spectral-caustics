@@ -115,4 +115,14 @@ F2a 验收：原有 314 项测试全部保留，新增 2 项事件状态测试�
 
 **尚未完成：** 当前 `diffuse_bounces > 0` 的 miss 仍不添加环境辐亮度，包括 Diffuse → Glass → Environment。为了不与局部环境 NEE/MIS 重复计光，本阶段刻意没有直接放开这个条件；下一阶段需为 delta 链后的逃逸环境建立正确估计规则，并验证玻璃遮挡、MIS、分量与采样统计。
 
-本阶段的代码需要在 Rust 工具链环境里执行 `cargo fmt --check`、`cargo build --locked --all-targets`、`cargo test --locked` 和 `cargo clippy --locked --all-targets -- -D warnings`；本次未在本地执行，不能将仓库之前的验收记录当成这一变更已通过的证明。
+PR #1 审查以 `e9542ca` 为起点。原始分支的全目标构建和严格 Clippy 通过，但格式检查有两处差异，单元测试有一项真实回归：`deep_render_repeats_across_threads_mis_and_components_and_preserves_photons` 的焦散不变性断言失败。
+
+根因是漫反射后的玻璃仍使用 camera RNG，消费了后续 SPP 抖动和玻璃前缀所需的随机数。现将这些玻璃事件移到已有 diffuse 续追流；首次漫反射前的玻璃仍使用 camera 流，environment 流不变。保留原有断言并扩展到深度 4；没有删除有效测试或放宽容差。
+
+受控路径测试同步验证新的流归属，且补充双界面的实际 Snell 出射坐标/方向、前缀与后缀合计八个玻璃事件，以及一次镜面反射的单位权重和漫反射后不计逃逸背景的范围限制。双界面透射的 RGB 吞吐量及 Direct 数值参考保持原标准。
+
+本轮实际通过 `cargo fmt --check`、`cargo build --locked --all-targets`、`cargo test --locked`、`cargo clippy --locked --all-targets -- -D warnings` 和 `git diff --check`。282 项单元测试 + 37 项集成测试全部通过，无 ignored。
+
+实际运行 `camera_direct_caustics -- 8`（512×512）、`diffuse_indirect -- 16`（320×240，0/1/4 预算）和 `camera_parallel_benchmark -- 16 64`。PNG 尺寸/格式正确，检查相机合成图和四反弹示例未见明显异常；线程示例的光源与三个相机 XYZ 在 1/2/4/6 线程一致。低采样预览仍有蒙特卡洛噪声，本轮没有执行默认 256 SPP 的全尺寸渲染。
+
+此次修复不开放漫反射后的环境逃逸，不更改环境 MIS、Fresnel、RR、公开 API 或 JSON；透明 shadow ray、环境焦散、嵌套介质及通用无偏路径追踪仍未实现。

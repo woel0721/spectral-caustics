@@ -5,7 +5,7 @@ pub(super) const CAMERA_STREAM: u64 = 0;
 
 pub(super) const ENVIRONMENT_STREAM: u64 = 0xd1b5_4a32_d192_ed03;
 
-// 漫反射续追、次表面环境采样和 RR 使用独立流。
+// 漫反射续追（含玻璃）、次表面环境采样和 RR 使用独立流。
 pub(super) const DIFFUSE_STREAM: u64 = 0xa076_1d64_78bd_642f;
 
 /// SplitMix64 风格混合；只依赖基础种子、行优先像素编号和随机流，与线程调度无关。

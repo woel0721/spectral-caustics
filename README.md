@@ -124,7 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 CIE 1931 2°/D65 原始 CSV、官方 metadata、DOI、许可和校验和，以及 PBRT/Smits RGB 反射基谱的来源与许可证，见 [assets/color/README.md](assets/color/README.md)。RGB 不能唯一确定真实反射光谱；该反射基谱是有来源的近似模型，不能称为实测光谱。相机当前以 RGB 追踪，不执行逐波长色散。
 
-几何/光学和 XYZ 使用 `f64`。光源固定采样块与顺序合并，相机按像素派生独立 camera/environment/diffuse RNG 流，像素内顺序累积；固定配置和种子在当前实现的 1/2/4 线程下结果一致。改变采样块划分可能改变末位浮点舍入；改变算法或依赖版本也不承诺历史逐位输出。
+几何/光学和 XYZ 使用 `f64`。光源固定采样块与顺序合并，相机按像素派生独立 camera/environment/diffuse RNG 流，像素内顺序累积；camera 只负责抖动和首次漫反射前的玻璃，漫反射后的玻璃与其余续追共享 diffuse 流，避免改变后续 SPP 的相机路径及 Caustics；固定配置和种子在当前实现的 1/2/4 线程下结果一致。改变采样块划分可能改变末位浮点舍入；改变算法或依赖版本也不承诺历史逐位输出。
 
 ## 验证
 

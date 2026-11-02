@@ -14,10 +14,7 @@ use crate::{
         sceneconfig::{EnvironmentMisHeuristic, MAX_DIFFUSE_BOUNCES},
     },
     geometry::{ray::Ray, triangle::Triangle},
-    material::{
-        BsdfValue, EvaluateMode, Material, MaterialSample,
-        lambertian::Lambertian,
-    },
+    material::{BsdfValue, EvaluateMode, Material, MaterialSample, lambertian::Lambertian},
     render::{Render, utils::linear_srgb_to_xyz},
     scene::Scene,
 };
@@ -169,7 +166,7 @@ fn deep_render_repeats_across_threads_mis_and_components_and_preserves_photons()
     .unwrap();
     let photons = renderer.render_lighting(&scene).unwrap();
     let baseline = render_camera_glass_components(&scene, &photons, 11, 9, 16, 42).unwrap();
-    for depth in [0, 1, 2, 3, 5] {
+    for depth in [0, 1, 2, 3, 4, 5] {
         scene.max_diffuse_bounces = depth;
         let light = renderer.render_lighting(&scene).unwrap();
         assert_eq!(light.direct.pixels, photons.direct.pixels);

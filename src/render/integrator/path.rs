@@ -70,7 +70,13 @@ pub(super) fn trace_camera_path(
                 return Err("命中法线无效，无法采样玻璃路径".into());
             }
             let normal = hit.normal / normal_length;
-            let Some(sample) = material.sample(wo, normal, rngs.camera) else {
+            // 漫反射后的玻璃属于续追，不能扰动下一条主路径的抖动/玻璃前缀。
+            let rng = if state.diffuse_bounces > 0 {
+                &mut *rngs.diffuse
+            } else {
+                &mut *rngs.camera
+            };
+            let Some(sample) = material.sample(wo, normal, rng) else {
                 break;
             };
             let MaterialSample::Glass(sample) = sample else {
