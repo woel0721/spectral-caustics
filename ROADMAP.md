@@ -84,3 +84,22 @@ Direct 仍包含解析太阳、环境和有界漫反射贡献；Caustics 仍只�
 | JSON 主程序 | 展示配置缩至 96×64，16 SPP、光源每轴 2、4 线程 | 主图、固定折射率对照与三个相机分量均输出成功 |
 
 这些是当前算法的实际执行和数值验收。未执行默认 512×512、256 SPP 的完整主程序渲染，也不以历史快照逐位对照作为验收。
+
+
+## F2a — 通用路径事件状态重构
+
+基于 main `7dfbe7b`，只整理内部状态和控制流，不开放混合玻璃传播。
+
+- `CameraPathState` 新增私有 `last_scatter: LastScatter`，取值为 `Camera`、`Diffuse`、`Delta`；初始状态为 Camera。两个事件计数器和漫反射预算仍各自独立。
+- `trace_camera_path` 先按当前材质的 `is_delta()` 分派。Delta 分支集中检查 Diffuse → Glass 禁止规则和八次玻璃上限；非 delta 分支按是否已发生漫反射选择首次表面/后续 Lambertian 计光。
+- `apply_scatter` 共用 RGB 吞吐量和事件计数更新；Ray 在循环末尾统一写回。玻璃采样事件即使为零权重也计一次，漫反射只统计继续追踪的非零连接；原有零吞吐量终止时机保留。
+- `last_scatter` 表示最近事件，不代替路径历史。miss 是否加入背景、地面是否可读取焦散，仍依据 `diffuse_bounces`，为未来中间插入 Delta 后保留正确的历史判断。
+- 保留现有测试，补充 Camera/Delta/Diffuse 状态与 0/1/2/4 预算，以及玻璃八事件与漫反射预算独立性的测试。测试共用现有状态 helper，没有增加冻结实现或生产测试适配入口。
+
+F2b 再处理 Camera → Diffuse → Glass → Diffuse 的传播和计光；当前遇到 Diffuse → Glass 仍在采样前终止，后续 miss 不添加逃逸 HDRI，后续 Lambertian 不查焦散图。Fresnel、MIS、RR、独立 RNG 流、公开 API 和 JSON 均不扩展。
+
+F2a 验收：原有 314 项测试全部保留，新增 2 项事件状态测试；279 项单元测试 + 37 项集成测试通过，无 ignored。`cargo fmt --check`、`cargo build --locked --all-targets`、`cargo test --locked`、`cargo clippy --locked --all-targets -- -D warnings` 及 `git diff --check` 通过。
+
+临时公共 API 探针比较重构前后 1,746 份 XYZ 缓冲，覆盖无环境/渐变/HDRI、Balance/Power、环境样本 1/3/8、漫反射预算 0/1/2/4、seed 42/123，以及 1/2/4 线程，结果一致；探针未纳入仓库，没有保留冻结算法或 hash 测试。受控 RNG 测试继续核对玻璃、环境、漫反射和 RR 的消费顺序。
+
+实际运行 `camera_direct_caustics -- 8`（512²）、`diffuse_indirect -- 16`（0/1/4 预算）和 `camera_parallel_benchmark -- 16 64`；三项均成功，后者确认当前光源和相机 XYZ 在 1/2/4/6 线程一致。没有执行 F2b 或默认 256 SPP 的全尺寸渲染。

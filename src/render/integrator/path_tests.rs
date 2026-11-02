@@ -2,7 +2,7 @@
 use super::{
     diffuse_tests::{SequenceRng, close, sun, two_planes},
     path::trace_camera_path,
-    types::{CameraPathRngs, CameraPathState},
+    types::{CameraPathRngs, CameraPathState, LastScatter},
 };
 use crate::{
     geometry::{ray::Ray, triangle::Triangle},
@@ -53,6 +53,7 @@ fn glass_prefix_and_deep_diffuse_keep_independent_counts_and_roulette_order() {
         .unwrap();
         assert_eq!(state.glass_events, 1);
         assert_eq!(state.diffuse_bounces, if survive { 5 } else { 3 });
+        assert_eq!(state.last_scatter, LastScatter::Diffuse);
         assert_eq!(camera.draws, 1);
         assert_eq!(environment.draws, 0);
         assert_eq!(diffuse.draws, if survive { 12 } else { 7 });
@@ -102,6 +103,7 @@ fn diffuse_to_glass_stops_without_sampling_a_glass_event() {
     .unwrap();
     assert_eq!(state.diffuse_bounces, 2);
     assert_eq!(state.glass_events, 0);
+    assert_eq!(state.last_scatter, LastScatter::Diffuse);
     assert_eq!(camera.draws, 0);
     assert_eq!(environment.draws, 0);
     assert_eq!(diffuse.draws, 4);
@@ -158,5 +160,113 @@ fn first_surface_is_shaded_before_continuation_sampling() {
     .unwrap_err();
     assert!(error.to_string().contains("BSDF"));
     assert_eq!(state.diffuse_bounces, 0);
+    assert_eq!(state.last_scatter, LastScatter::Camera);
     assert_eq!(diffuse.draws, 0);
+}
+
+#[test]
+fn event_state_tracks_camera_delta_and_diffuse_with_independent_budgets() {
+    for glass_prefix in [false, true] {
+        for depth in [0_usize, 1, 2, 4] {
+            let mut scene = two_planes(Vector3::repeat(0.8), Vector3::repeat(0.7));
+            scene.max_diffuse_bounces = depth;
+            if glass_prefix {
+                scene.add_with_material(
+                    Box::new(
+                        Triangle::new(
+                            Vector3::new(-0.05, -0.05, 0.25),
+                            Vector3::new(0.05, -0.05, 0.25),
+                            Vector3::new(0.0, 0.05, 0.25),
+                        )
+                        .unwrap(),
+                    ),
+                    Box::new(Dielectric::new(1.5).unwrap()),
+                );
+            }
+            let mut state =
+                CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), depth);
+            assert_eq!(state.last_scatter, LastScatter::Camera);
+            let mut camera = SequenceRng::new(if glass_prefix { &[0.9] } else { &[] });
+            let mut environment = SequenceRng::new(&[]);
+            // Fourth diffuse connection is issued only after a surviving RR draw.
+            let mut diffuse =
+                SequenceRng::new(&[0.25, 0.0, 0.75, 0.25, 0.25, 0.0, 0.0, 0.75, 0.25]);
+            trace_camera_path(
+                &scene,
+                &mut state,
+                &mut CameraPathRngs {
+                    camera: &mut camera,
+                    environment: &mut environment,
+                    diffuse: &mut diffuse,
+                },
+                sun().0,
+                sun().1,
+                None,
+            )
+            .unwrap();
+            assert_eq!(state.glass_events, usize::from(glass_prefix));
+            assert_eq!(state.diffuse_bounces, depth);
+            assert_eq!(
+                state.last_scatter,
+                if depth > 0 {
+                    LastScatter::Diffuse
+                } else if glass_prefix {
+                    LastScatter::Delta
+                } else {
+                    LastScatter::Camera
+                }
+            );
+            assert_eq!(camera.draws, usize::from(glass_prefix));
+            assert_eq!(environment.draws, 0);
+            assert_eq!(diffuse.draws, depth * 2 + depth.saturating_sub(3));
+            close(state.radiance.caustics, Vector3::zeros());
+        }
+    }
+}
+
+#[test]
+fn glass_event_limit_does_not_consume_the_diffuse_budget() {
+    use crate::{geometry::ground::Ground, scene::Scene};
+    for count in [8, 9] {
+        let mut scene = Scene::new();
+        scene.environment = None;
+        scene.max_diffuse_bounces = 4;
+        for height in 1..=count {
+            scene.add_with_material(
+                Box::new(Ground::new(f64::from(height)).unwrap()),
+                Box::new(Dielectric::new(1.0).unwrap()),
+            );
+        }
+        let mut state =
+            CameraPathState::new(Ray::new(Vector3::z() * 12.0, -Vector3::z()).unwrap(), 4);
+        let mut camera = SequenceRng::new(&[]); // IOR=1 transmits deterministically.
+        let mut environment = SequenceRng::new(&[]);
+        let mut diffuse = SequenceRng::new(&[]);
+        trace_camera_path(
+            &scene,
+            &mut state,
+            &mut CameraPathRngs {
+                camera: &mut camera,
+                environment: &mut environment,
+                diffuse: &mut diffuse,
+            },
+            sun().0,
+            sun().1,
+            None,
+        )
+        .unwrap();
+        assert_eq!(state.glass_events, 8);
+        assert_eq!(state.diffuse_bounces, 0);
+        assert_eq!(state.last_scatter, LastScatter::Delta);
+        close(
+            state.radiance.direct,
+            if count == 8 {
+                scene.background_color
+            } else {
+                Vector3::zeros()
+            },
+        );
+        close(state.radiance.caustics, Vector3::zeros());
+        assert_eq!((camera.draws, environment.draws, diffuse.draws), (0, 0, 0));
+    }
 }

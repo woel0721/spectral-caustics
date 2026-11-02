@@ -100,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `take_photon_landing` 返回 `PhotonLanding { position, weight }`，用于单条双界面光子路径；批量追踪使用内部 `take_photon_from_hit` 复用首交点。权重不能在累积能量时丢弃。
 - `sample_ground_irradiance`、`lambertian_radiance` 是世界坐标查图与中性反射换算；`save_png_with_exposure` 显式指定输出曝光。
 
-`src/render/integrator.rs` 组织 camera、path、diffuse、environment、direct、ground、rng、types 子模块；`src/scene.rs` 保留主类型，构建、物体、光照、棋盘格和光子追踪分别实现。测试共用当前状态 helper，未保留生产代码依赖测试模块的适配入口。
+`src/render/integrator.rs` 组织 camera、path、diffuse、environment、direct、ground、rng、types 子模块；`src/scene.rs` 保留主类型，构建、物体、光照、棋盘格和光子追踪分别实现。测试共用当前状态 helper，未保留生产代码依赖测试模块的适配入口。 F2a 的内部 `CameraPathState` 用 `LastScatter::{Camera, Diffuse, Delta}` 记录最近事件，并分别累计漫反射连接和玻璃事件；材质分派后的状态更新共用，Diffuse → Glass 仍在采样前终止。
 
 ## 计光与物理边界
 
