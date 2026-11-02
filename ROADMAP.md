@@ -63,7 +63,7 @@ Direct 仍包含解析太阳、环境和有界漫反射贡献；Caustics 仍只�
 
 仍保留的有用冗余：独立 RGB 单缓冲相机与光谱三图相机共用一份路径/像素循环，但有两种缓冲写入分支，避免 RGB 场景分配三张图；光源保留 sampled direct 用于守恒验证。单光子及独立逐波长发射测试参考用于数值验证，不是冻结生产算法。Render 门面与自由函数分别提供配置/线程池集成和直接调用。
 
-不增加漫反射后的玻璃续追、透明 shadow ray、新材质、环境焦散、GUI/GPU、BVH/KD-Tree 或通用 Photon Mapping。当前物理简化及运行方法见 [README.md](README.md)。
+F2b 第一阶段已允许漫反射后的玻璃传播；暂不增加透明 shadow ray、新材质、环境焦散、GUI/GPU、BVH/KD-Tree 或通用 Photon Mapping。当前物理简化及运行方法见 [README.md](README.md)。
 
 ## 验收记录
 
@@ -103,3 +103,26 @@ F2a 验收：原有 314 项测试全部保留，新增 2 项事件状态测试�
 临时公共 API 探针比较重构前后 1,746 份 XYZ 缓冲，覆盖无环境/渐变/HDRI、Balance/Power、环境样本 1/3/8、漫反射预算 0/1/2/4、seed 42/123，以及 1/2/4 线程，结果一致；探针未纳入仓库，没有保留冻结算法或 hash 测试。受控 RNG 测试继续核对玻璃、环境、漫反射和 RR 的消费顺序。
 
 实际运行 `camera_direct_caustics -- 8`（512²）、`diffuse_indirect -- 16`（0/1/4 预算）和 `camera_parallel_benchmark -- 16 64`；三项均成功，后者确认当前光源和相机 XYZ 在 1/2/4/6 线程一致。没有执行 F2b 或默认 256 SPP 的全尺寸渲染。
+
+
+## F2b 第一阶段 — 漫反射后的玻璃传播
+
+基于 `dee297d` 的 F2a 状态模型，开放 `Camera → Diffuse → Glass → Diffuse` 和多玻璃事件穿插的路径，不改动 BSDF/环境 MIS、RR、JSON 或公开接口。
+
+- `path.rs` 的 delta 分支不再因为最近事件是 `Diffuse` 而终止。每次玻璃反射/折射仍使用现有 `MaterialSample::Glass` 及 `apply_scatter(Delta, ...)`；不消耗漫反射预算，整条路径玻璃上限仍为 8。
+- 后续 Lambertian 顶点沿用 `secondary_direct_lighting`，只计太阳与环境 NEE 到 Direct；首次地面仍是唯一可使用光谱焦散图的顶点。漫反射深度达到上限后可以经过玻璃到终点，但不能再追加新的漫反射连接。
+- 将旧的“Diffuse → Glass 终止”测试更新为透射事件计数与 RNG 检查；增加双界面 Fresnel 透射后的独立 RGB 数值参考，以及漫反射后第九次玻璃事件终止检查。原有的未绑定、非 Lambertian 和背面终止检查仍保留。
+
+**尚未完成：** 当前 `diffuse_bounces > 0` 的 miss 仍不添加环境辐亮度，包括 Diffuse → Glass → Environment。为了不与局部环境 NEE/MIS 重复计光，本阶段刻意没有直接放开这个条件；下一阶段需为 delta 链后的逃逸环境建立正确估计规则，并验证玻璃遮挡、MIS、分量与采样统计。
+
+PR #1 审查以 `e9542ca` 为起点。原始分支的全目标构建和严格 Clippy 通过，但格式检查有两处差异，单元测试有一项真实回归：`deep_render_repeats_across_threads_mis_and_components_and_preserves_photons` 的焦散不变性断言失败。
+
+根因是漫反射后的玻璃仍使用 camera RNG，消费了后续 SPP 抖动和玻璃前缀所需的随机数。现将这些玻璃事件移到已有 diffuse 续追流；首次漫反射前的玻璃仍使用 camera 流，environment 流不变。保留原有断言并扩展到深度 4；没有删除有效测试或放宽容差。
+
+受控路径测试同步验证新的流归属，且补充双界面的实际 Snell 出射坐标/方向、前缀与后缀合计八个玻璃事件，以及一次镜面反射的单位权重和漫反射后不计逃逸背景的范围限制。双界面透射的 RGB 吞吐量及 Direct 数值参考保持原标准。
+
+本轮实际通过 `cargo fmt --check`、`cargo build --locked --all-targets`、`cargo test --locked`、`cargo clippy --locked --all-targets -- -D warnings` 和 `git diff --check`。282 项单元测试 + 37 项集成测试全部通过，无 ignored。
+
+实际运行 `camera_direct_caustics -- 8`（512×512）、`diffuse_indirect -- 16`（320×240，0/1/4 预算）和 `camera_parallel_benchmark -- 16 64`。PNG 尺寸/格式正确，检查相机合成图和四反弹示例未见明显异常；线程示例的光源与三个相机 XYZ 在 1/2/4/6 线程一致。低采样预览仍有蒙特卡洛噪声，本轮没有执行默认 256 SPP 的全尺寸渲染。
+
+此次修复不开放漫反射后的环境逃逸，不更改环境 MIS、Fresnel、RR、公开 API 或 JSON；透明 shadow ray、环境焦散、嵌套介质及通用无偏路径追踪仍未实现。

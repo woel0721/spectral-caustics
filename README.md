@@ -100,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `take_photon_landing` 返回 `PhotonLanding { position, weight }`，用于单条双界面光子路径；批量追踪使用内部 `take_photon_from_hit` 复用首交点。权重不能在累积能量时丢弃。
 - `sample_ground_irradiance`、`lambertian_radiance` 是世界坐标查图与中性反射换算；`save_png_with_exposure` 显式指定输出曝光。
 
-`src/render/integrator.rs` 组织 camera、path、diffuse、environment、direct、ground、rng、types 子模块；`src/scene.rs` 保留主类型，构建、物体、光照、棋盘格和光子追踪分别实现。测试共用当前状态 helper，未保留生产代码依赖测试模块的适配入口。 F2a 的内部 `CameraPathState` 用 `LastScatter::{Camera, Diffuse, Delta}` 记录最近事件，并分别累计漫反射连接和玻璃事件；材质分派后的状态更新共用，Diffuse → Glass 仍在采样前终止。
+`src/render/integrator.rs` 组织 camera、path、diffuse、environment、direct、ground、rng、types 子模块；`src/scene.rs` 保留主类型，构建、物体、光照、棋盘格和光子追踪分别实现。测试共用当前状态 helper，未保留生产代码依赖测试模块的适配入口。 `CameraPathState` 用 `LastScatter::{Camera, Diffuse, Delta}` 记录最近事件，并分别累计漫反射连接和玻璃事件。F2b 第一阶段允许 Diffuse → Glass → Diffuse 的混合传播；经玻璃逃逸环境的贡献仍待下一阶段处理。
 
 ## 计光与物理边界
 
@@ -108,9 +108,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 光谱贡献为 `k × D65(λ) × CMF(λ) × Δλ`，D65 归一化使完整发射光谱 Y=1；空间通量除以总发射数和接收像素面积。固定模式只追踪一条白光折射路径，色散模式逐波长追踪；直接落地仅合成并 splat 一次。双线性 splat 保持区域内能量，非法光谱能量返回错误。
 
-**相机端。** 相机路径在首次漫反射之前最多采样 8 次玻璃 Fresnel 反射/折射。反射权重为 1，透射权重为 `(η_i/η_t)²`，已抵消事件概率，不再额外乘 Fresnel、余弦或除概率。首先命中的可着色表面立即计光，随后最多续追 `max_diffuse_bounces` 次 Lambertian 连接，范围 0..1024；4 表示最多访问 5 个漫反射顶点。
+**相机端。** 相机路径在任何漫反射深度都可以采样玻璃 Fresnel 反射/折射；整条路径合计最多 8 个玻璃事件。反射权重为 1，透射权重为 `(η_i/η_t)²`，已抵消事件概率，不再额外乘 Fresnel、余弦或除概率。首先命中的可着色表面立即计光，随后最多续追 `max_diffuse_bounces` 次 Lambertian 连接，范围 0..1024；4 表示最多访问 5 个漫反射顶点。
 
-首个地面顶点将解析太阳和焦散图分别计入 Direct/Caustics，环境只加一次。后续 Lambertian 顶点仅累加太阳和环境直接光到 Direct，不读取焦散图；miss、玻璃、未绑定/不支持的材质和背面终止，不额外加入逃逸 HDRI。背景归入 Direct，因此背景的 Caustics 为零。
+首个地面顶点将解析太阳和焦散图分别计入 Direct/Caustics，环境只加一次。后续 Lambertian 顶点仅累加太阳和环境直接光到 Direct，不读取焦散图；玻璃顶点可在漫反射之间继续反射/折射，不读取焦散图。未绑定/不支持的材质及背面终止；漫反射之后的 miss 暂不添加逃逸环境辐亮度，即使此前又经过玻璃（已知漏计，下一阶段处理）。背景归入 Direct，因此背景的 Caustics 为零。
 
 第三次漫反射连接后的顶点已着色且仍有预算时执行 RR：`p=clamp(max(RGB throughput),0.05,0.95)`，存活吞吐量除以 p；不会缩放已累计辐亮度。浅层与最后顶点不抽 RR。各顶点使用 `f_r cosθ/pdf` 更新 RGB 吞吐量；Lambertian 配套余弦 PDF 为 `cosθ/π`。
 
@@ -118,13 +118,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 解析太阳和环境的 shadow ray 均是二值遮挡，玻璃也会遮光。光谱太阳使用水平发射窗口投影后的法向辐照度，使无遮挡水平地面得到 `Φ/A_horizontal`；独立 RGB 相机使用中性白光 `Φ/A_horizontal` 再乘表面余弦，两种强度约定有意区分。
 
-这是有界 Lambertian 路径估计器。未实现漫反射后的玻璃续追、透明 shadow ray、环境焦散、通用无偏 Path Tracer、通用 Photon Mapping、BVH/KD-Tree、体积、GUI 或 GPU。
+这是有界 Lambertian/玻璃混合路径估计器。已支持漫反射后的玻璃继续传播，但尚未估计 Diffuse → Glass → Environment 的逃逸环境贡献。未实现透明 shadow ray、环境焦散、通用无偏 Path Tracer、通用 Photon Mapping、BVH/KD-Tree、体积、GUI 或 GPU。
 
 ## 数据与可复现性
 
 CIE 1931 2°/D65 原始 CSV、官方 metadata、DOI、许可和校验和，以及 PBRT/Smits RGB 反射基谱的来源与许可证，见 [assets/color/README.md](assets/color/README.md)。RGB 不能唯一确定真实反射光谱；该反射基谱是有来源的近似模型，不能称为实测光谱。相机当前以 RGB 追踪，不执行逐波长色散。
 
-几何/光学和 XYZ 使用 `f64`。光源固定采样块与顺序合并，相机按像素派生独立 camera/environment/diffuse RNG 流，像素内顺序累积；固定配置和种子在当前实现的 1/2/4 线程下结果一致。改变采样块划分可能改变末位浮点舍入；改变算法或依赖版本也不承诺历史逐位输出。
+几何/光学和 XYZ 使用 `f64`。光源固定采样块与顺序合并，相机按像素派生独立 camera/environment/diffuse RNG 流，像素内顺序累积；camera 只负责抖动和首次漫反射前的玻璃，漫反射后的玻璃与其余续追共享 diffuse 流，避免改变后续 SPP 的相机路径及 Caustics；固定配置和种子在当前实现的 1/2/4 线程下结果一致。改变采样块划分可能改变末位浮点舍入；改变算法或依赖版本也不承诺历史逐位输出。
 
 ## 验证
 

@@ -308,8 +308,8 @@ impl Material for Unsupported {
 }
 
 #[test]
-fn second_glass_unsupported_unbound_and_back_faces_terminate() {
-    for kind in 0..4 {
+fn secondary_unsupported_unbound_and_back_faces_terminate() {
+    for kind in 1..4 {
         let mut scene = two_planes(Vector3::repeat(0.8), Vector3::repeat(0.7));
         scene.objects.pop();
         let geometry = Box::new(Plane {
@@ -321,9 +321,6 @@ fn second_glass_unsupported_unbound_and_back_faces_terminate() {
             },
         });
         match kind {
-            0 => {
-                scene.add_with_material(geometry, Box::new(Dielectric::new(1.5).unwrap()));
-            }
             1 => {
                 scene.add_with_material(geometry, Box::new(Unsupported));
             }

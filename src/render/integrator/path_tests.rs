@@ -1,11 +1,14 @@
-//! Unified path state: independent event budgets and diffuse-to-glass termination.
+//! Unified path state, mixed glass/diffuse transport and independent budgets.
 use super::{
     diffuse_tests::{SequenceRng, close, sun, two_planes},
     path::trace_camera_path,
     types::{CameraPathRngs, CameraPathState, LastScatter},
 };
 use crate::{
-    geometry::{ray::Ray, triangle::Triangle},
+    geometry::{
+        ray::{INTERSECTION_EPSILON, Ray},
+        triangle::Triangle,
+    },
     material::dielectric::Dielectric,
 };
 use nalgebra::Vector3;
@@ -69,9 +72,9 @@ fn glass_prefix_and_deep_diffuse_keep_independent_counts_and_roulette_order() {
 }
 
 #[test]
-fn diffuse_to_glass_stops_without_sampling_a_glass_event() {
+fn diffuse_to_glass_continues_with_an_independent_glass_event() {
     let mut scene = two_planes(Vector3::repeat(0.8), Vector3::repeat(0.7));
-    scene.max_diffuse_bounces = 5;
+    scene.max_diffuse_bounces = 2;
     scene.add_with_material(
         Box::new(
             Triangle::new(
@@ -85,8 +88,8 @@ fn diffuse_to_glass_stops_without_sampling_a_glass_event() {
     );
     let mut camera = SequenceRng::new(&[]);
     let mut environment = SequenceRng::new(&[]);
-    let mut diffuse = SequenceRng::new(&[0.25, 0.0, 0.5, 0.25]);
-    let mut state = CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 5);
+    let mut diffuse = SequenceRng::new(&[0.25, 0.0, 0.5, 0.25, 0.99]);
+    let mut state = CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 2);
     let (wi, light) = sun();
     trace_camera_path(
         &scene,
@@ -102,11 +105,11 @@ fn diffuse_to_glass_stops_without_sampling_a_glass_event() {
     )
     .unwrap();
     assert_eq!(state.diffuse_bounces, 2);
-    assert_eq!(state.glass_events, 0);
-    assert_eq!(state.last_scatter, LastScatter::Diffuse);
+    assert_eq!(state.glass_events, 1);
+    assert_eq!(state.last_scatter, LastScatter::Delta);
     assert_eq!(camera.draws, 0);
     assert_eq!(environment.draws, 0);
-    assert_eq!(diffuse.draws, 4);
+    assert_eq!(diffuse.draws, 5);
     assert!(state.radiance.direct.norm() > 0.0);
 }
 
@@ -269,4 +272,175 @@ fn glass_event_limit_does_not_consume_the_diffuse_budget() {
         close(state.radiance.caustics, Vector3::zeros());
         assert_eq!((camera.draws, environment.draws, diffuse.draws), (0, 0, 0));
     }
+}
+
+/// A thin glass patch seen by the cosine-sampled ray from the floor.
+fn glass_patch(x: f64, height: f64, positive_x_normal: bool) -> Triangle {
+    let a = Vector3::new(x, -0.5, height - 0.2);
+    let top = Vector3::new(x, 0.0, height + 0.2);
+    let b = Vector3::new(x, 0.5, height - 0.2);
+    if positive_x_normal {
+        Triangle::new(a, b, top).unwrap()
+    } else {
+        Triangle::new(a, top, b).unwrap()
+    }
+}
+
+#[test]
+fn diffuse_glass_diffuse_crosses_two_fresnel_interfaces_and_preserves_rgb_weight() {
+    let a = Vector3::new(0.8, 0.5, 0.2);
+    let b = Vector3::new(0.4, 0.7, 0.9);
+    let mut scene = two_planes(a, b);
+    scene.max_diffuse_bounces = 1;
+    // The primary camera ray hits A. A's chosen cosine ray crosses both
+    // interfaces (air -> glass -> air) before it reaches the lit wall B.
+    for (x, outward_x) in [(0.25, false), (0.35, true)] {
+        scene.add_with_material(
+            Box::new(glass_patch(x, x * 3.0_f64.sqrt(), outward_x)),
+            Box::new(Dielectric::new(1.5).unwrap()),
+        );
+    }
+    let mut camera = SequenceRng::new(&[]);
+    let mut environment = SequenceRng::new(&[]);
+    let mut diffuse = SequenceRng::new(&[0.25, 0.0, 0.99, 0.99]); // Diffuse, then two transmissions.
+    let mut state = CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 1);
+    let (wi, light) = sun();
+    trace_camera_path(
+        &scene,
+        &mut state,
+        &mut CameraPathRngs {
+            camera: &mut camera,
+            environment: &mut environment,
+            diffuse: &mut diffuse,
+        },
+        wi,
+        light,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(state.diffuse_bounces, 1);
+    assert_eq!(state.glass_events, 2);
+    assert_eq!(state.last_scatter, LastScatter::Delta);
+    assert_eq!((camera.draws, environment.draws, diffuse.draws), (0, 0, 4));
+    // Lambertian A contributes albedo A; entering and leaving the slab
+    // multiply by (1/1.5)^2 and (1.5/1)^2, canceling in radiance transport.
+    close(state.throughput, a);
+    // Snell gives dz/dx=1/sqrt(2) inside this slab, not the incident sqrt(3).
+    // Check the actual exit point and the restored outgoing direction, including offsets.
+    let epsilon = 10.0 * INTERSECTION_EPSILON;
+    let exit_z = epsilon + 0.25 * 3.0_f64.sqrt() + (0.1 - epsilon) / 2.0_f64.sqrt();
+    close(state.ray.origin, Vector3::new(0.35 + epsilon, 0.0, exit_z));
+    close(state.ray.direction, Vector3::new(0.5, 0.0, 0.75_f64.sqrt()));
+    assert_eq!(scene.intersect(&state.ray).unwrap().object_id, Some(1));
+    let k = light * wi.z / std::f64::consts::PI;
+    close(state.radiance.direct, (a + a.component_mul(&b)) * k);
+    close(state.radiance.caustics, Vector3::zeros());
+}
+
+#[test]
+fn glass_budget_after_diffuse_still_stops_at_the_ninth_interface() {
+    let a = Vector3::new(0.8, 0.5, 0.2);
+    let b = Vector3::new(0.4, 0.7, 0.9);
+    let (wi, light) = sun();
+    let k = light * wi.z / std::f64::consts::PI;
+    for (prefix, total) in [(false, 8_usize), (false, 9), (true, 8), (true, 9)] {
+        let mut scene = two_planes(a, b);
+        scene.max_diffuse_bounces = 1;
+        if prefix {
+            scene.add_with_material(
+                Box::new(
+                    Triangle::new(
+                        Vector3::new(-0.05, -0.05, 0.25),
+                        Vector3::new(0.05, -0.05, 0.25),
+                        Vector3::new(0.0, 0.05, 0.25),
+                    )
+                    .unwrap(),
+                ),
+                Box::new(Dielectric::new(1.0).unwrap()),
+            );
+        }
+        for i in 1..=total - usize::from(prefix) {
+            let x = i as f64 / 10.0;
+            scene.add_with_material(
+                Box::new(glass_patch(x, x * 3.0_f64.sqrt(), false)),
+                Box::new(Dielectric::new(1.0).unwrap()),
+            );
+        }
+        let mut camera = SequenceRng::new(&[]); // Equal IORs: no Fresnel RNG draw.
+        let mut environment = SequenceRng::new(&[]);
+        let mut diffuse = SequenceRng::new(&[0.25, 0.0]);
+        let mut state =
+            CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 1);
+        trace_camera_path(
+            &scene,
+            &mut state,
+            &mut CameraPathRngs {
+                camera: &mut camera,
+                environment: &mut environment,
+                diffuse: &mut diffuse,
+            },
+            wi,
+            light,
+            None,
+        )
+        .unwrap();
+        assert_eq!(state.diffuse_bounces, 1);
+        assert_eq!(state.glass_events, 8);
+        assert_eq!(state.last_scatter, LastScatter::Delta);
+        assert_eq!((camera.draws, environment.draws, diffuse.draws), (0, 0, 2));
+        close(state.throughput, a);
+        let expected = if total == 8 {
+            a + a.component_mul(&b)
+        } else {
+            a
+        };
+        close(state.radiance.direct, expected * k);
+        close(state.radiance.caustics, Vector3::zeros());
+    }
+}
+
+#[test]
+fn diffuse_glass_reflection_keeps_unit_weight_and_excludes_escape_background() {
+    let a = Vector3::new(0.8, 0.5, 0.2);
+    let mut scene = two_planes(a, Vector3::new(0.4, 0.7, 0.9));
+    scene.background_color = Vector3::repeat(1000.0);
+    for (x, outward_x) in [(0.25, false), (0.35, true)] {
+        scene.add_with_material(
+            Box::new(glass_patch(x, x * 3.0_f64.sqrt(), outward_x)),
+            Box::new(Dielectric::new(1.5).unwrap()),
+        );
+    }
+    let mut camera = SequenceRng::new(&[]);
+    let mut environment = SequenceRng::new(&[]);
+    let mut diffuse = SequenceRng::new(&[0.25, 0.0, 0.0]); // Select reflection, not transmission.
+    let mut state = CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 1);
+    trace_camera_path(
+        &scene,
+        &mut state,
+        &mut CameraPathRngs {
+            camera: &mut camera,
+            environment: &mut environment,
+            diffuse: &mut diffuse,
+        },
+        sun().0,
+        sun().1,
+        None,
+    )
+    .unwrap();
+    assert_eq!((state.diffuse_bounces, state.glass_events), (1, 1));
+    assert_eq!(state.last_scatter, LastScatter::Delta);
+    assert_eq!((camera.draws, environment.draws, diffuse.draws), (0, 0, 3));
+    close(state.throughput, a); // Reflection weight is F/F=1, with no extra Fresnel factor.
+    close(
+        state.ray.direction,
+        Vector3::new(-0.5, 0.0, 0.75_f64.sqrt()),
+    );
+    assert!(scene.intersect(&state.ray).is_none());
+    // A later Delta does not erase the diffuse history or enable the deferred escape term.
+    close(
+        state.radiance.direct,
+        a * (sun().1 * sun().0.z / std::f64::consts::PI),
+    );
+    close(state.radiance.caustics, Vector3::zeros());
 }
