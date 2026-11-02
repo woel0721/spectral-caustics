@@ -825,26 +825,28 @@ E1 当时只包含 A→B→直接光源，E2 的多次漫反射与 Russian Roule
 
 只接受 0–1024，拒绝更大值。对深度 >=2，配置和运行时相机入口用 checked multiplication 检查 `width*height*spp*environment_samples*(N+1)` 的最坏样本工作量，溢出时在分配/追踪前返回错误；0/1 保留旧工作量校验语义。路径状态为 O(1)，没有递归调用或按深度分配的历史栈。深度上限仍会影响最坏运行时间，RR 不替代有限预算。
 
-`CameraPathState` 保存当前 Ray、线性 RGB throughput、Direct/Caustics 累积、漫反射计数、玻璃事件计数与最大深度。`trace_camera_path()` 保留八次玻璃前缀传播，玻璃只乘 `GlassSample.weight`，不重复乘 Fresnel 或除事件概率；首次非 delta 表面的现有照明/绑定语义保留。之后 `trace_diffuse_path()` 迭代连接 Lambertian 顶点：
+`CameraPathState` 保存当前 Ray、线性 RGB throughput、Direct/Caustics 累积、漫反射计数、玻璃事件计数与最大深度。F1 后由像素循环为每条射线创建状态，`trace_camera_path()` 的唯一迭代循环推进玻璃前缀和 Lambertian 链。玻璃最多八次，只乘 `GlassSample.weight`，不重复乘 Fresnel 或除事件概率；首次非 delta 表面的现有照明/绑定语义保留：
 
 ```text
-sample_diffuse_ray(A) → Ray(B), T_A
-throughput *= T_A
 循环：
-  求最近交点；miss/玻璃/不支持或未绑定材质/背面 → 停止
-  L_vertex = secondary_direct_lighting(太阳 + 环境 NEE/MIS)
-  Direct += throughput ⊙ L_vertex
-  达到最大深度 → 停止
-  按条件执行 RR，终止或补偿 throughput
+  求最近交点；未绑定材质 → 停止
+  miss：仅漫反射之前添加背景，然后停止
+  玻璃前缀：采样玻璃、更新 throughput/Ray/glass_events，继续循环
+  首次表面 A：先估计 A 的环境，暂存 A 的交点/权重/环境
+  后续表面：玻璃/不支持材质/背面 → 停止
+            Direct += throughput ⊙ secondary_direct_lighting(太阳 + 环境 NEE/MIS)
+            达到漫反射上限 → 停止；否则按原条件执行 RR
+  首次表面预算为 0 或仅显示 Caustics → 停止
   sample_diffuse_ray(当前顶点) → 下一 Ray, T_vertex
-  throughput *= T_vertex
+  更新 throughput/Ray/diffuse_bounces
+结束后：计算并累加 A 的原直接光和焦散绑定
 ```
 
 所有后续深度只调用同一份 `secondary_direct_lighting()`。`sample_diffuse_ray()` 继续负责采样、`f_r*cos/pdf`、一次棋盘格乘数及起点偏移；Lambertian 的散射权重为 RGB albedo。当前顶点自己的直接辐亮度已含其 BSDF 和棋盘格，采样权重只用于下一个顶点，因而重复命中地面也不会重复调制同一顶点。
 
 首次表面可以使用原完整地面图或解析太阳+焦散绑定；**之后所有顶点仅使用解析太阳和环境**。绑定光谱地面时用 `direct_ground_irradiance()`，旧完整图绑定在后续顶点使用原 RGB 太阳回退，不读取其完整图。Caustics 只保留首次表面的原焦散图反射。路径 miss 后不再添加 HDRI/常量背景；环境已由当前顶点 NEE/MIS 估计，避免重复计光。
 
-深度 1 保留 E1 的 `(T_diffuse ⊙ L_next)*T_glass` 浮点分组及“先估计 A 的环境、再连接 B、最后加入 A 原照明”的顺序；生产路径不再调用 `sample_one_diffuse_indirect()`。后者仅作为 `#[cfg(test)]` 的固定深度 1 入口保留。新的 `e2_tests/legacy_e1.rs` 冻结 e664004 的路径及单连接实现，对照 0/1 的 RGB 位和三个 RNG 的后续状态；深度 >=2 使用路径状态中的真实 RGB 吞吐量，包含玻璃前缀权重。
+深度 1 保留 E1 的 `(T_diffuse ⊙ L_next)*T_glass` 浮点分组及“先估计 A 的环境、再连接 B、最后加入 A 原照明”的顺序；`CameraPathState.e1_diffuse_weights` 仅在深度 1 保存这两个未预乘的权重。首次表面的 `FirstSurface` 是 O(1) 的延迟着色记录，后续链完成后才执行 `accumulate_first_surface()`，保留浮点累加和错误返回顺序。生产路径不再调用 `trace_diffuse_path()` 或 `sample_one_diffuse_indirect()`；两者仅作为 `#[cfg(test)]` 入口，初始化续追状态后调用同一相机循环，没有独立路径循环。`e2_tests/legacy_e1.rs` 继续冻结 e664004 的路径及单连接实现，对照 0/1 的 RGB 位和三个 RNG 的后续状态；深度 >=2 使用路径状态中的真实 RGB 吞吐量，包含玻璃前缀权重。
 
 RR 在第三次漫反射之后、当前顶点已照明且仍有下一次预算时启用。例如 N=3 完全不抽 RR，N=5 最多在第 3/4 次之后抽两次。概率为 `p=clamp(max(throughput.r,g,b),0.05,0.95)`，包含玻璃权重；随机值 >=p 终止，存活时 `throughput/=p`，只补偿之后的贡献，不缩放已累计辐亮度。RR 和后续 BSDF/环境采样共用独立 diffuse RNG，原相机/玻璃及第一表面环境流不变，0/1 不消费 RR 随机数。零吞吐量终止；非法方向、PDF、BSDF、吞吐量或补偿溢出继续明确报错。
 
@@ -857,6 +859,18 @@ RR 在第三次漫反射之后、当前顶点已照明且仍有下一次预算�
 - 1/2/4 线程、重复 seed、两种 MIS、单图与三图、Direct+Caustics≈Combined、深度开关下光源图不变，以及原 Fresnel/光谱焦散回归通过。仅更新了两项旧深度校验测试，使 2/3/5 合法、1025 非法；既有渲染预期和旧对照估计器未改。
 
 这是有限深度、Lambertian 连续链的混合估计器。RR 保持已定义有限路径积分的期望，有限深度截断及其他路径缺失仍是简化：支持相机玻璃前缀后的 Lambertian 链，漫反射之后一旦遇玻璃就停止；仍无透明阴影、环境/二次焦散、吸收、嵌套介质、新材质、BDPT 或通用光子查询。`render_camera_lit` 继续是单顶点直接光调试入口；E2 作用于共用路径追踪的玻璃相机入口。下一阶段应单独定义 diffuse→glass→diffuse 的计光/MIS 与焦散归属，再考虑扩展该类路径。
+
+### F1：统一路径控制流，保留 E2 估计器
+
+F1 将两个生产路径循环合并为 `trace_camera_path()` 的一个循环，共用求交、miss/材质判断和漫反射采样后的状态推进。`diffuse.rs` 保留原 `sample_diffuse_ray()`、`secondary_direct_lighting()` 与 `russian_roulette()`；其 BSDF/PDF、偏移、MIS、RR 公式和采样顺序未改。首次地面图、后续纯直接光、E1 权重分组及历史测试入口继续分开保留，不合并其计光语义。公开 API、材质接口、默认配置、光源光谱追踪和依赖不变。
+
+重构前以 `2dcf1b1` 建立 E2 基线：305 项单元测试、38 项集成测试通过，3 项既有 MIS 比较默认忽略。固定 seed 的 release 对照使用 17×13、16 SPP、含原棱镜和新增彩色墙的六组运行时场景，包含五类环境设置：HDRI Power N=8、HDRI Balance N=3、渐变天空、无环境及 HDRI N=1，第六组复核默认 HDRI 设置；各跑深度 0/1/2/3/5、1/2/4 线程及两次重复。共 1620 份原始 f64 XYZ 缓冲与 1620 张 PNG（包含三分量、RGB/完整图/单次直接光入口和三张光源图）在重构前后逐字节一致，线程及重复运行也一致；单图分量与三图入口同时核对。快照仅修改运行时参数，没有改写默认 JSON 或已保存的展示图。
+
+`f1_tests/legacy_e2.rs` 只供测试，冻结基线的两个控制循环作为对照，函数体 token 与基线核对一致。新增测试覆盖 0/1/2/3/5、HDRI/渐变/无环境、Balance/Power、N=1/3/8、五种地面绑定的 RGB 位和三个 RNG 状态；另外核对真实玻璃前缀后的深路径计数/RR、漫反射后遇玻璃零玻璃采样，以及后续错误先于首次直接光错误。既有测试只调整逐射线适配入口的 import，没有删除测试、修改参考值或放宽断言。
+
+验收实际运行 `cargo fmt`、`cargo fmt --check`、`cargo test --locked`（309 项单元测试、38 项集成测试通过，3 项既有比较默认忽略）、`cargo clippy --locked --all-targets -- -D warnings` 和 `git diff --check`，全部通过。另运行 `cargo test --release --locked render::integrator::`，89 项积分器测试通过，包含 E1 冻结参考、E2 解析级数/RR 和四项 F1 回归；3 项既有比较继续忽略。已验证场景未发现 E2 输出或 RNG 差异。
+
+F2 应在这个循环中单独定义并接入漫反射后的玻璃事件、后续非 delta 顶点的计光和 MIS，继续分别维护两类事件预算，并明确环境/焦散图是否可计入。F1 保留该类玻璃命中的立即终止，不实现 F2/F3。
 
 ### V0.4 阶段 17：地面棋盘格
 

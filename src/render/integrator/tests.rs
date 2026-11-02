@@ -3,7 +3,7 @@ use super::*;
 use super::{
     direct::camera_lighting_setup,
     environment::environment_lighting,
-    path::trace_camera_path,
+    path::trace_camera_ray as trace_camera_path,
     rng::{CAMERA_STREAM, DIFFUSE_STREAM, ENVIRONMENT_SEED_OFFSET, ENVIRONMENT_STREAM, pixel_seed},
     types::CameraPathRngs,
 };

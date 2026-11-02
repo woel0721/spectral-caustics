@@ -1,4 +1,4 @@
-//! 有界迭代 Lambertian 路径、RGB 吞吐量与后续顶点的直接光。
+//! Lambertian 单步采样、后续顶点直接光与 Russian Roulette；无生产路径循环。
 
 use super::{
     direct::surface_sun_lighting,
@@ -17,8 +17,8 @@ use nalgebra::Vector3;
 use rand::Rng;
 use std::error::Error;
 
-/// 迭代 A→B→C…，只接收后续 Lambertian 顶点的太阳/环境直接光。
-/// 不读背景、旧完整地面图或焦散；玻璃和不支持的材质终止漫反射链。
+/// 既有状态测试的续追入口；只初始化第一步，迭代统一交给 trace_camera_path。
+#[cfg(test)]
 pub(super) fn trace_diffuse_path(
     scene: &Scene,
     hit: &Hit,
@@ -38,55 +38,23 @@ pub(super) fn trace_diffuse_path(
     state.ray = first.ray;
     state.throughput = prefix_throughput.component_mul(&first.throughput);
     state.diffuse_bounces = 1;
-    loop {
-        if !state.throughput.iter().all(|v| v.is_finite() && *v >= 0.0) {
-            return Err("漫反射路径吞吐量计算溢出".into());
-        }
-        let Some(next) = scene.intersect(&state.ray) else {
-            break;
-        };
-        let Some(material) = next.material_id.and_then(|id| scene.material(id)) else {
-            break;
-        };
-        if !material.is_lambertian() || material.is_delta() {
-            break;
-        }
-        let normal = unit_vector(next.normal).ok_or("第二漫反射表面法线无效")?;
-        let wo = -state.ray.direction;
-        if normal.dot(&wo) <= 0.0 {
-            break;
-        }
-        let direct = secondary_direct_lighting(scene, &next, material, wo, light, ground, rng)?;
-        // 深度 1 严格保留 E1 的 (T_diffuse ⊙ L_next) * T_glass 分组。
-        let contribution = if state.max_diffuse_bounces == 1 {
-            first
-                .throughput
-                .component_mul(&direct)
-                .component_mul(&prefix_throughput)
-        } else {
-            state.throughput.component_mul(&direct)
-        };
-        state.radiance.direct += contribution;
-        if !state.radiance.direct.iter().all(|v| v.is_finite()) {
-            return Err("漫反射间接光计算溢出".into());
-        }
-        if state.diffuse_bounces >= state.max_diffuse_bounces {
-            break;
-        }
-        if !russian_roulette(state, rng)? {
-            break;
-        }
-        let Some(next_ray) = sample_diffuse_ray(scene, &next, material, wo, rng)? else {
-            break;
-        };
-        state.throughput = state.throughput.component_mul(&next_ray.throughput);
-        if state.throughput == Vector3::zeros() {
-            break;
-        }
-        state.ray = next_ray.ray;
-        state.diffuse_bounces += 1;
+    if state.max_diffuse_bounces == 1 {
+        state.e1_diffuse_weights = Some((first.throughput, prefix_throughput));
     }
-    Ok(())
+    let mut unused_camera = super::diffuse_tests::SequenceRng::new(&[]);
+    let mut unused_environment = super::diffuse_tests::SequenceRng::new(&[]);
+    super::path::trace_camera_path(
+        scene,
+        state,
+        &mut super::types::CameraPathRngs {
+            camera: &mut unused_camera,
+            environment: &mut unused_environment,
+            diffuse: rng,
+        },
+        light.0,
+        light.1,
+        ground,
+    )
 }
 
 /// 第三次漫反射后的顶点已着色，且还有预算时，RR 只控制之后的贡献。
@@ -117,7 +85,7 @@ pub(super) fn russian_roulette(
 }
 
 /// 各深度共用一份着色逻辑；返回的 L 已含本顶点的 BSDF 和一次棋盘格调制。
-fn secondary_direct_lighting(
+pub(super) fn secondary_direct_lighting(
     scene: &Scene,
     hit: &Hit,
     material: &dyn Material,
@@ -143,7 +111,7 @@ fn secondary_direct_lighting(
     Ok((direct + environment) * scale)
 }
 
-/// 原 E1 单连接测试入口，固定深度 1；生产只调用迭代路径。
+/// 原 E1 单连接测试入口，固定深度 1；生产使用统一相机路径循环。
 #[cfg(test)]
 pub(super) fn sample_one_diffuse_indirect(
     scene: &Scene,

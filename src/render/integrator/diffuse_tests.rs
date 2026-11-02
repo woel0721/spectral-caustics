@@ -7,7 +7,7 @@ use super::{
     ground::{
         GroundLighting, bind_ground_lighting, bind_spectral_ground_lighting, ground_irradiance,
     },
-    path::{MAX_GLASS_BOUNCES, trace_camera_path},
+    path::{MAX_GLASS_BOUNCES, trace_camera_ray as trace_camera_path},
     types::{CameraPathComponents, CameraPathRngs, DiffuseRay},
 };
 use crate::{

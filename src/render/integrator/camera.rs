@@ -6,7 +6,10 @@ use super::{
     ground::{GroundLighting, bind_ground_lighting, bind_spectral_ground_lighting},
     path::trace_camera_path,
     rng::{CAMERA_STREAM, DIFFUSE_STREAM, ENVIRONMENT_SEED_OFFSET, ENVIRONMENT_STREAM, pixel_seed},
-    types::{CameraLightingImages, CameraPathComponents, CameraPathRngs, GroundLightingComponent},
+    types::{
+        CameraLightingImages, CameraPathComponents, CameraPathRngs, CameraPathState,
+        GroundLightingComponent,
+    },
 };
 use crate::{
     render::{caustics::SpectralLighting, framebuffer::Framebuffer, utils::linear_srgb_to_xyz},
@@ -226,9 +229,10 @@ fn render_camera_buffers(
                 .ray_for_pixel_sample(x, y, width, height, offset)
                 .ok_or("无法生成子像素摄像机光线")?;
             // 先缩放每项再相加，避免有限样本之和溢出而平均值仍有限。
-            let path = trace_camera_path(
+            let mut state = CameraPathState::new(ray, scene.max_diffuse_bounces);
+            trace_camera_path(
                 scene,
-                ray,
+                &mut state,
                 &mut CameraPathRngs {
                     camera: &mut rng,
                     environment: &mut environment_rng,
@@ -239,8 +243,8 @@ fn render_camera_buffers(
                 ground,
             )
             .map_err(|error| error.to_string())?;
-            mean.direct += path.direct / spp as f64;
-            mean.caustics += path.caustics / spp as f64;
+            mean.direct += state.radiance.direct / spp as f64;
+            mean.caustics += state.radiance.caustics / spp as f64;
         }
         Ok(mean)
     };

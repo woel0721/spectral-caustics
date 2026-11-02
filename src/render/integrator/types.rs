@@ -56,6 +56,8 @@ pub(super) struct CameraPathState {
     pub(super) diffuse_bounces: usize,
     pub(super) glass_events: usize,
     pub(super) max_diffuse_bounces: usize,
+    /// 仅深度 1 使用，保留 E1 的 (T_diffuse ⊙ L_next) ⊙ T_glass 浮点分组。
+    pub(super) e1_diffuse_weights: Option<(Vector3<f64>, Vector3<f64>)>,
 }
 
 impl CameraPathState {
@@ -67,6 +69,7 @@ impl CameraPathState {
             diffuse_bounces: 0,
             glass_events: 0,
             max_diffuse_bounces,
+            e1_diffuse_weights: None,
         }
     }
 }
