@@ -34,12 +34,15 @@ pub(super) fn russian_roulette(
 
 /// 全路径固定 λ；仅传输标量 Lλ 和 throughput，CIE 和 1/pλ 留在相机像素积分阶段。
 /// 不查询已经对波长积分的 XYZ 焦散贴图，避免把 XYZ 误当作单波长数据。
+/// prefix_rng 仅用于首次连续顶点前的 Delta；environment_rng 仅用于首次环境 NEE。
+/// 后续 BSDF、Delta、环境与 RR 使用 continuation_rng，深度变化不消耗上述前缀流。
 pub fn trace_spectral_camera_path(
     scene: &Scene,
     state: &mut SpectralPathState,
     ior_mode: IorMode,
-    scattering_rng: &mut dyn rand::RngCore,
+    prefix_rng: &mut dyn rand::RngCore,
     environment_rng: &mut dyn rand::RngCore,
+    continuation_rng: &mut dyn rand::RngCore,
 ) -> Result<(), Box<dyn Error>> {
     state.validate()?;
     crate::config::sceneconfig::validate_diffuse_bounces(scene.max_diffuse_bounces)?;
@@ -97,7 +100,11 @@ pub fn trace_spectral_camera_path(
                 wo,
                 state.wavelength_nm,
                 ior_mode,
-                environment_rng,
+                if state.has_non_delta_vertex || state.non_delta_bounces > 0 {
+                    &mut *continuation_rng
+                } else {
+                    &mut *environment_rng
+                },
             )?;
             state.radiance += state.throughput * (direct + environment) * scale;
         }
@@ -111,12 +118,18 @@ pub fn trace_spectral_camera_path(
         }
         if material.has_non_delta()
             && continuous_budget
-            && !russian_roulette(state, scattering_rng)?
+            && !russian_roulette(state, continuation_rng)?
         {
             break;
         }
+        let sampling_rng: &mut dyn rand::RngCore =
+            if state.has_non_delta_vertex || state.non_delta_bounces > 0 {
+                &mut *continuation_rng
+            } else {
+                &mut *prefix_rng
+            };
         let Some(sample) =
-            material.sample_spectral(wo, normal, state.wavelength_nm, ior_mode, scattering_rng)
+            material.sample_spectral(wo, normal, state.wavelength_nm, ior_mode, sampling_rng)
         else {
             break;
         };

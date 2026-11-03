@@ -25,6 +25,7 @@ use rayon::prelude::*;
 use std::error::Error;
 
 const WAVELENGTH_STREAM: u64 = 0xe703_7ed1_a0b4_28db;
+const PREFIX_STREAM: u64 = 0x8ebc_6af0_9c88_c6e3;
 
 pub fn render_spectral_camera(
     scene: &Scene,
@@ -66,6 +67,7 @@ pub fn render_spectral_camera(
             .try_for_each(|(index, pixel)| {
                 let mut jitter = StdRng::seed_from_u64(pixel_seed(seed, index, CAMERA_STREAM));
                 let mut scattering = StdRng::seed_from_u64(pixel_seed(seed, index, DIFFUSE_STREAM));
+                let mut prefix = StdRng::seed_from_u64(pixel_seed(seed, index, PREFIX_STREAM));
                 let mut environment =
                     StdRng::seed_from_u64(pixel_seed(seed, index, ENVIRONMENT_STREAM));
                 let mut wavelength =
@@ -84,8 +86,9 @@ pub fn render_spectral_camera(
                         scene,
                         &mut state,
                         ior_mode,
-                        &mut scattering,
+                        &mut prefix,
                         &mut environment,
+                        &mut scattering,
                     )
                     .map_err(|e| e.to_string())?;
                     // Lλ 的单位为每 nm。仅在此乘 1/pλ=400；绝不再乘离散 Δλ。

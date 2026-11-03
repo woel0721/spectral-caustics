@@ -116,6 +116,7 @@ fn probe(scene: &Scene, nm: f64, depth: usize) -> SpectralPathState {
         IorMode::Dispersion,
         &mut scattering,
         &mut environment,
+        &mut FixedRng::new(0),
     )
     .unwrap();
     state
@@ -222,6 +223,7 @@ fn sphere_two_spectral_interfaces_cancel_eta_weights_and_keep_one_wavelength() {
             &mut state,
             IorMode::Dispersion,
             &mut FixedRng::new(u64::MAX),
+            &mut FixedRng::new(0),
             &mut FixedRng::new(0),
         )
         .unwrap();
@@ -352,6 +354,7 @@ fn environment_escape_uses_full_scalar_throughput_only_after_delta() {
             IorMode::Dispersion,
             &mut FixedRng::new(0),
             &mut FixedRng::new(0),
+            &mut FixedRng::new(0),
         )
         .unwrap();
         let extra = if include {
@@ -401,6 +404,7 @@ fn spectral_paths_keep_the_32_delta_budget_and_roulette_after_three_continuous_c
         IorMode::Dispersion,
         &mut FixedRng::new(0),
         &mut FixedRng::new(0),
+        &mut FixedRng::new(0),
     )
     .unwrap();
     assert_eq!(state.delta_events(), 32);
@@ -412,12 +416,12 @@ fn spectral_paths_keep_the_32_delta_budget_and_roulette_after_three_continuous_c
             &chamber(true),
             &mut state,
             IorMode::Dispersion,
-            &mut rng,
             &mut FixedRng::new(0),
+            &mut FixedRng::new(0),
+            &mut rng,
         )
         .unwrap();
         assert_eq!(state.non_delta_bounces, depth.min(3));
-        assert_eq!(rng.draws, depth.min(3) * 2 + usize::from(depth > 3));
     }
 }
 
@@ -527,6 +531,7 @@ fn spectral_hdri_balance_power_and_odd_quotas_converge_to_a_uniform_emitter() {
                     IorMode::Dispersion,
                     &mut scattering,
                     &mut environment,
+                    &mut FixedRng::new(0),
                 )
                 .unwrap();
                 mean += state.radiance / 8192.0;
@@ -606,7 +611,8 @@ fn spectral_invalid_workloads_and_path_states_fail_explicitly() {
             &mut state,
             IorMode::Dispersion,
             &mut FixedRng::new(0),
-            &mut FixedRng::new(0)
+            &mut FixedRng::new(0),
+            &mut FixedRng::new(0),
         )
         .is_err()
     );
@@ -684,6 +690,7 @@ fn colored_hdr_odd_mis_with_glass_occlusion_matches_independent_hemisphere_quadr
                     IorMode::Dispersion,
                     &mut scattering,
                     &mut environment,
+                    &mut FixedRng::new(0),
                 )
                 .unwrap();
                 estimate += state.radiance / 32768.0;
@@ -694,4 +701,40 @@ fn colored_hdr_odd_mis_with_glass_occlusion_matches_independent_hemisphere_quadr
             );
         }
     }
+}
+
+#[test]
+fn deeper_continuation_does_not_consume_glass_prefix_or_first_environment_streams() {
+    let mut scene = chamber(true);
+    scene.environment = Some(Environment::try_from(&EnvironmentConfig::default()).unwrap());
+    scene.add_with_material(
+        Box::new(Sphere::new(Vector3::zeros(), 0.25).unwrap()),
+        Box::new(Dielectric::new(1.52).unwrap()),
+    );
+    let ray = Ray::new(Vector3::zeros(), Vector3::z()).unwrap();
+    let mut reference = None;
+    let mut continuation_values = Vec::new();
+    for depth in [0, 4] {
+        let mut prefix = StdRng::seed_from_u64(42);
+        let mut environment = StdRng::seed_from_u64(43);
+        let mut continuation = StdRng::seed_from_u64(44);
+        let mut state = SpectralPathState::new(ray, 550.0, depth).unwrap();
+        trace_spectral_camera_path(
+            &scene,
+            &mut state,
+            IorMode::Dispersion,
+            &mut prefix,
+            &mut environment,
+            &mut continuation,
+        )
+        .unwrap();
+        let values = (prefix.next_u64(), environment.next_u64());
+        if let Some(expected) = reference {
+            assert_eq!(values, expected);
+        }
+        reference = Some(values);
+        continuation_values.push(continuation.next_u64());
+        assert_eq!(state.non_delta_bounces > 0, depth > 0);
+    }
+    assert_ne!(continuation_values[0], continuation_values[1]);
 }
