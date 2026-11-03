@@ -23,7 +23,7 @@ impl Dielectric {
         })
     }
 
-    /// 只为光源端增加色散模型；RGB sample 始终保留给定的 ior。
+    /// 光源端与独立光谱相机共用色散模型；RGB sample 始终保留给定的 ior。
     pub fn with_dispersion(ior: f64, dispersion: Option<Cauchy>) -> Result<Self, String> {
         let mut glass = Self::new(ior)?;
         if let Some(model) = dispersion {
@@ -61,41 +61,36 @@ impl Material for Dielectric {
         normal: Vector3<f64>,
         rng: &mut dyn RngCore,
     ) -> Option<BsdfSample> {
-        let (wo, normal) = (unit_vector(wo)?, unit_vector(normal)?);
-        let cos_o = wo.dot(&normal);
-        if cos_o == 0.0 {
+        let sample = sample_interface(wo, normal, self.ior, rng)?;
+        Some(BsdfSample {
+            wi: sample.wi,
+            weight: Vector3::repeat(sample.weight),
+            pdf: sample.pdf,
+            event: sample.event,
+        })
+    }
+
+    fn supports_spectral(&self) -> bool {
+        true
+    }
+
+    fn sample_spectral(
+        &self,
+        wo: Vector3<f64>,
+        normal: Vector3<f64>,
+        wavelength_nm: f64,
+        ior_mode: IorMode,
+        rng: &mut dyn RngCore,
+    ) -> Option<super::SpectralBsdfSample> {
+        if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
             return None;
         }
-        let (normal, eta_i, eta_t) = if cos_o > 0.0 {
-            (normal, 1.0, self.ior)
-        } else {
-            (-normal, self.ior, 1.0)
-        };
-        let cos_i = wo.dot(&normal);
-        let f = fresnel_dielectric(cos_i, eta_i, eta_t)?;
-        // 全反射直接选反射；F=0 时直接透射，避免采样零概率事件。
-        let reflection = f == 1.0 || (f > 0.0 && rng.random::<f64>() < f);
-        let sample = if reflection {
-            BsdfSample {
-                wi: unit_vector(2.0 * cos_i * normal - wo)?,
-                event: ScatterType::SpecularReflection,
-                pdf: None,
-                weight: Vector3::repeat(1.0), // F / p_reflection = 1。
-            }
-        } else {
-            BsdfSample {
-                wi: unit_vector(refract(-wo, normal, eta_i, eta_t)?)?,
-                event: ScatterType::SpecularTransmission,
-                pdf: None,
-                // (1-F) / p_transmission 已抵消，保留 radiance 的折射率平方项。
-                weight: Vector3::repeat((eta_i / eta_t).powi(2)),
-            }
-        };
-        sample
-            .weight
-            .iter()
-            .all(|v| v.is_finite() && *v > 0.0)
-            .then_some(sample)
+        sample_interface(
+            wo,
+            normal,
+            self.photon_ior(Some(wavelength_nm), ior_mode)?,
+            rng,
+        )
     }
 
     fn has_non_delta(&self) -> bool {
@@ -115,6 +110,44 @@ impl Material for Dielectric {
             _ => Some(self.ior),
         }
     }
+}
+
+/// RGB/光谱仅共享同一介质界面的几何与 Fresnel 随机选择，不共享 RGB 权重。
+fn sample_interface(
+    wo: Vector3<f64>,
+    normal: Vector3<f64>,
+    ior: f64,
+    rng: &mut dyn RngCore,
+) -> Option<super::SpectralBsdfSample> {
+    let (wo, normal) = (unit_vector(wo)?, unit_vector(normal)?);
+    let cos_o = wo.dot(&normal);
+    if cos_o == 0.0 {
+        return None;
+    }
+    let (normal, eta_i, eta_t) = if cos_o > 0.0 {
+        (normal, 1.0, ior)
+    } else {
+        (-normal, ior, 1.0)
+    };
+    let cos_i = wo.dot(&normal);
+    let f = fresnel_dielectric(cos_i, eta_i, eta_t)?;
+    let reflection = f == 1.0 || (f > 0.0 && rng.random::<f64>() < f);
+    let sample = if reflection {
+        super::SpectralBsdfSample {
+            wi: unit_vector(2.0 * cos_i * normal - wo)?,
+            event: ScatterType::SpecularReflection,
+            pdf: None,
+            weight: 1.0,
+        }
+    } else {
+        super::SpectralBsdfSample {
+            wi: unit_vector(refract(-wo, normal, eta_i, eta_t)?)?,
+            event: ScatterType::SpecularTransmission,
+            pdf: None,
+            weight: (eta_i / eta_t).powi(2),
+        }
+    };
+    (sample.weight.is_finite() && sample.weight > 0.0).then_some(sample)
 }
 
 /// 理想光滑介质对非偏振光的精确 Fresnel 能量反射率，范围为 [0, 1]。

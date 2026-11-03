@@ -39,3 +39,11 @@ PBRT 代码和基谱的版权为 Matt Pharr、Greg Humphreys 和 Wenzel Jakob，
 - 数据 SHA-256：`bc785beefb8dd372b94d9f9092790fe18a9aeb43064d6defd6639dcafdd6d1c7`。
 - 实现：`src/optics/spectrum.rs::rgb_reflectance` 按 RGB 通道排序组合白、二次色和原色基谱，沿波长线性插值并在表外延用最近端点。使用 PBRT 的 0.94 反射率缩放；本项目额外将最终反射率上限设为 1（PBRT 原实现仅将负值裁为零），保证各波长 Lambertian 反射能量不超过入射能量。
 - 本实现直接查询原始分段线性基谱，没有经过 PBRT 内部 400–700 nm 的分桶平均；RGB→光谱不唯一，D65 下的 RGB 还原不保证精确。材质的 `evaluate` 在 `EvaluateMode::Spectral { wavelength_nm }` 模式下返回 `BsdfValue::Spectral(f64)`，仅保存标量光谱 BSDF；CIE 匹配函数在积分器转换为 XYZ 时使用，表外的 XYZ 响应为零。
+
+## PBRT RGB 发光基谱与 Hero 相机
+
+`pbrt_rgb_illuminant.csv` 从 [PBRT v3 官方 spectrum.cpp](https://github.com/mmp/pbrt-v3/blob/master/src/core/spectrum.cpp) 提取 `RGB2SpectLambda` 与七个 `RGBIllum2Spect*` 数组（白、青、品红、黄、红、绿、蓝），32 个 380–720 nm 节点，保留原数值字面量。它与反射基谱是不同的数据；适用同目录的 `PBRT_LICENSE.txt` BSD 两条款许可。提取文件 SHA-256：`def69d81d7fe266ae9575d9d85b3804066108852bbd980446ebe093761c61b24`。
+
+`src/optics/emission.rs` 采用七基谱通道排序组合，再除以同一波长的白基谱、乘本项目归一化 D65，作为 **D65 白点校准的发光近似**。这是本项目的校准方式，不是完整 PBRT 色彩管线；PBRT 的共同 Illuminant 缩放因子在白基谱比值中相消。720–780 nm 沿用端点，仅将负光谱值截为零。RGB→光谱并不唯一，任意 RGB 色度不保证精确还原，亦不能将本模型视为实测 HDRI 光谱。
+
+先以 max(RGB) 分离 HDR 强度，重建色度，再恢复强度；没有反射率的 [0,1] 上限。太阳、环境、渐变和常量背景统一使用每 nm 的光谱密度。太阳直接使用 D65；RGB 白色重建恰为 D65。Hero 相机固定采样 380–780 nm，D65 的 Y 积分按原表的分段线性插值连续归一化（每个 1 nm 区间对 SPD×CMF 使用 Simpson 积分）。相机样本仅乘 CIE 与 1/p(λ)，不再乘光子积分的离散 Δλ。

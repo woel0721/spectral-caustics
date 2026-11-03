@@ -19,6 +19,27 @@ impl Mirror {
     }
 }
 impl Material for Mirror {
+    fn supports_spectral(&self) -> bool {
+        true
+    }
+
+    fn sample_spectral(
+        &self,
+        wo: Vector3<f64>,
+        normal: Vector3<f64>,
+        wavelength_nm: f64,
+        _: crate::optics::iormode::IorMode,
+        rng: &mut dyn RngCore,
+    ) -> Option<super::SpectralBsdfSample> {
+        let weight = crate::optics::spectrum::rgb_reflectance(self.reflectance, wavelength_nm)?;
+        let sample = self.sample(wo, normal, rng)?;
+        Some(super::SpectralBsdfSample {
+            wi: sample.wi,
+            weight,
+            pdf: None,
+            event: sample.event,
+        })
+    }
     fn evaluate(
         &self,
         _: Vector3<f64>,

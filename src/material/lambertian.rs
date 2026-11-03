@@ -29,6 +29,29 @@ impl Lambertian {
 }
 
 impl Material for Lambertian {
+    fn supports_spectral(&self) -> bool {
+        true
+    }
+
+    fn sample_spectral(
+        &self,
+        wo: Vector3<f64>,
+        normal: Vector3<f64>,
+        wavelength_nm: f64,
+        _: crate::optics::iormode::IorMode,
+        rng: &mut dyn RngCore,
+    ) -> Option<super::SpectralBsdfSample> {
+        let weight = rgb_reflectance(self.albedo, wavelength_nm)?;
+        // 只复用余弦方向和 PDF，光谱权重独立由 rho(λ) 计算。
+        let sample = self.sample(wo, normal, rng)?;
+        Some(super::SpectralBsdfSample {
+            wi: sample.wi,
+            weight,
+            pdf: sample.pdf,
+            event: sample.event,
+        })
+    }
+
     fn irradiance_reflectance(&self) -> Option<Vector3<f64>> {
         Some(self.albedo)
     }

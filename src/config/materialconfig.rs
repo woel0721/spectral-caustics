@@ -10,7 +10,7 @@ pub enum MaterialConfig {
     },
     Dielectric {
         ior: f64,
-        /// None 为 Constant IOR；光源 dispersion 模式才查询 Cauchy，相机仍使用 ior。
+        /// None 为 Constant IOR；光源/光谱相机的 dispersion 模式查询 Cauchy，RGB 相机仍使用 ior。
         #[serde(default)]
         dispersion: Option<crate::optics::dispersion::Cauchy>,
     },

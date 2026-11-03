@@ -64,8 +64,44 @@ pub struct BsdfSample {
     pub event: ScatterType,
 }
 
+/// 独立的单波长 radiance 采样；权重含 f*cos/pdf 或已补偿概率的 Delta 权重。
+/// 不包含 CIE 匹配函数、光谱采样 PDF 或光源光谱。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpectralBsdfSample {
+    pub wi: Vector3<f64>,
+    pub weight: f64,
+    pub pdf: Option<f64>,
+    pub event: ScatterType,
+}
+
 /// 可通过 `Box<dyn Material>` 保存和并行只读访问的运行时材质。
 pub trait Material: Send + Sync {
+    /// 显式声明光谱采样能力；RGB eta/k 的 GGX 等模型不能自动退化为单通道。
+    fn supports_spectral(&self) -> bool {
+        false
+    }
+
+    fn sample_spectral(
+        &self,
+        _wo: Vector3<f64>,
+        _normal: Vector3<f64>,
+        _wavelength_nm: f64,
+        _ior_mode: crate::optics::iormode::IorMode,
+        _rng: &mut dyn RngCore,
+    ) -> Option<SpectralBsdfSample> {
+        None
+    }
+
+    /// 本阶段 Lambertian 的方向 PDF 与波长无关；Delta 材质仍为零。
+    fn pdf_spectral(
+        &self,
+        wi: Vector3<f64>,
+        wo: Vector3<f64>,
+        normal: Vector3<f64>,
+        _wavelength_nm: f64,
+    ) -> f64 {
+        self.pdf(wi, wo, normal)
+    }
     /// 按 mode 返回给定方向的 BSDF 值，单位为 sr⁻¹。
     ///
     /// wi、wo 均从交点向外指：wi 指向光源，wo 指向观察者。
