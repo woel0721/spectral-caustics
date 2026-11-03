@@ -8,7 +8,10 @@ use spectral_caustics::{
         materialconfig::MaterialConfig,
         sceneconfig::{EnvironmentMisHeuristic, ObjectConfig},
     },
-    geometry::{beveled_prism::BeveledPrism, object::Hittable},
+    geometry::{
+        beveled_prism::{BeveledPrism, ROUND_SEGMENTS},
+        object::Hittable,
+    },
     render::{Render, framebuffer::Framebuffer},
     scene::Scene,
 };
@@ -135,7 +138,7 @@ fn invalid_json_geometry_and_material_are_rejected_before_rendering() {
 }
 
 #[test]
-fn camera_center_ray_hits_each_new_bevel_face_at_both_test_sizes() {
+fn camera_center_ray_hits_all_eight_facets_of_each_round_corner_at_both_test_sizes() {
     let triangle = [
         Vector2::new(-0.5, 1.0),
         Vector2::new(0.5, 1.0),
@@ -143,13 +146,15 @@ fn camera_center_ray_hits_each_new_bevel_face_at_both_test_sizes() {
     ];
     for bevel in [0.02, 0.05] {
         let prism = BeveledPrism::new(triangle, -1.0, 1.0, bevel).unwrap();
-        for i in 0..3 {
-            let previous = triangle[i] + (triangle[(i + 2) % 3] - triangle[i]).normalize() * bevel;
-            let next = triangle[i] + (triangle[(i + 1) % 3] - triangle[i]).normalize() * bevel;
-            let midpoint = (previous + next) * 0.5;
-            let edge = next - previous;
-            let normal = Vector3::new(edge.y, 0.0, -edge.x).normalize();
-            let point = Vector3::new(midpoint.x, 0.25, midpoint.y);
+        for facet in
+            (0..3 * (ROUND_SEGMENTS + 1)).filter(|i| i % (ROUND_SEGMENTS + 1) < ROUND_SEGMENTS)
+        {
+            let a = prism.vertices()[facet];
+            let b = prism.vertices()[facet + 1];
+            let midpoint = (a + b) * 0.5;
+            let edge = b - a;
+            let normal = Vector3::new(edge.z, 0.0, -edge.x).normalize();
+            let point = Vector3::new(midpoint.x, 0.25, midpoint.z);
             let camera = Camera::from_config(&CameraConfig {
                 position: (point + normal * 0.3).into(),
                 target: point.into(),

@@ -150,13 +150,13 @@ pub enum ObjectConfig {
         #[serde(default = "MaterialConfig::default_glass")]
         material: MaterialConfig,
     },
-    /// 仅对三条 y 方向长棱做平面倒角；不进入现有三棱镜光谱焦散算法。
+    /// 仅对三条 y 方向长棱做固定 8 段圆角；不进入现有三棱镜光谱焦散算法。
     BeveledPrism {
         /// 三角形的 (x,z) 截面，支持顺/逆时针输入。
         cross_section_m: [[f64; 2]; 3],
         y_min_m: f64,
         y_max_m: f64,
-        /// 沿每条相邻边截取的长度；非圆角半径。
+        /// 圆弧切点沿每条相邻边截取的长度；非圆角半径。
         bevel_size_m: f64,
         #[serde(default = "MaterialConfig::default_glass")]
         material: MaterialConfig,
