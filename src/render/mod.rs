@@ -12,6 +12,8 @@ pub use integrator::{
     sample_ground_irradiance,
 };
 
+pub use integrator::{SpectralPathState, render_spectral_camera, trace_spectral_camera_path};
+
 use self::{
     framebuffer::Framebuffer,
     utils::{linear_rgb_to_srgb8, xyz_to_linear_srgb},
@@ -28,6 +30,48 @@ pub struct Render {
 }
 
 impl Render {
+    /// 独立相机模式选择；既有 RGB 三分量入口保持原语义。
+    pub fn render_camera(&self, scene: &Scene) -> Result<Framebuffer, Box<dyn Error>> {
+        use crate::config::rendersetting::CameraMode;
+        if self.settings.camera_mode == CameraMode::Spectral {
+            return self.render_spectral_camera(scene);
+        }
+        let work = || {
+            integrator::render_camera_glass(
+                scene,
+                self.settings.width,
+                self.settings.height,
+                self.settings.camera_spp,
+                self.settings.seed,
+            )
+            .map_err(|e| e.to_string())
+        };
+        match &self.pool {
+            Some(pool) => pool.install(work),
+            None => work(),
+        }
+        .map_err(Into::into)
+    }
+
+    pub fn render_spectral_camera(&self, scene: &Scene) -> Result<Framebuffer, Box<dyn Error>> {
+        let work = || {
+            integrator::render_spectral_camera(
+                scene,
+                self.settings.width,
+                self.settings.height,
+                self.settings.camera_spp,
+                self.settings.seed,
+                self.settings.mode,
+            )
+            .map_err(|e| e.to_string())
+        };
+        match &self.pool {
+            Some(pool) => pool.install(work),
+            None => work(),
+        }
+        .map_err(Into::into)
+    }
+
     pub fn new(settings: RenderSetting) -> Result<Self, Box<dyn Error>> {
         settings.validate()?;
         let pool = settings

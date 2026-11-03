@@ -4,9 +4,20 @@ use crate::optics::iormode::IorMode;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraMode {
+    #[default]
+    Rgb,
+    Spectral,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenderSetting {
+    /// 独立相机传输模式；省略时保留 RGB。光谱相机固定采样 380..780 nm。
+    #[serde(default)]
+    pub camera_mode: CameraMode,
     /// 输出图片宽、高，单位为像素。
     pub width: usize,
     pub height: usize,
@@ -18,8 +29,9 @@ pub struct RenderSetting {
     /// 仅 debug 构建可开启路径统计 AOV；release 忽略此开关，不影响辐亮度或随机流。
     #[serde(default)]
     pub debug_path: bool,
+    /// 光源端/光谱相机的 IOR 模式；RGB 相机始终使用材质的常数 ior。
     pub mode: IorMode,
-    /// 波长范围和积分步长，单位为 nm。
+    /// 光源端离散积分的波长范围和步长，单位 nm；Hero 相机固定为 380..780 nm。
     pub wavelength_min_nm: f64,
     pub wavelength_max_nm: f64,
     pub wavelength_step_nm: f64,
@@ -41,6 +53,7 @@ fn default_camera_spp() -> usize {
 impl Default for RenderSetting {
     fn default() -> Self {
         Self {
+            camera_mode: CameraMode::Rgb,
             width: 512,
             height: 512,
             samples_per_pixel_axis: 4,

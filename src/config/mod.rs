@@ -21,6 +21,22 @@ impl Config {
     pub fn validate(&self) -> Result<(), String> {
         self.render.validate()?;
         self.scene.validate()?;
+        if self.render.camera_mode == rendersetting::CameraMode::Spectral {
+            for object in &self.scene.objects {
+                use sceneconfig::ObjectConfig;
+                let material = match object {
+                    ObjectConfig::Prism { material, .. }
+                    | ObjectConfig::Sphere { material, .. }
+                    | ObjectConfig::BeveledPrism { material, .. }
+                    | ObjectConfig::Ground { material, .. } => material,
+                };
+                if matches!(material, materialconfig::MaterialConfig::GgxMetal { .. }) {
+                    return Err(
+                        "spectral 相机暂不支持 GGX Metal：RGB eta/k 没有唯一的物理光谱".into(),
+                    );
+                }
+            }
+        }
         self.render
             .width
             .checked_mul(self.render.height)

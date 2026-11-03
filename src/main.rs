@@ -40,6 +40,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         renderer.thread_count()
     );
 
+    if config.render.camera_mode == spectral_caustics::config::rendersetting::CameraMode::Spectral {
+        let image = renderer.render_camera(&scene)?;
+        renderer.save(&image, &config.render.output_path)?;
+        println!(
+            "Hero wavelength 光谱相机：{}，SPP={}，IOR={:?}",
+            config.render.output_path.display(),
+            config.render.camera_spp,
+            config.render.mode
+        );
+        println!("总耗时：{:.3} 秒", start.elapsed().as_secs_f64());
+        return Ok(());
+    }
+
     let lighting = renderer.render_lighting(&scene)?;
     let images = renderer.render_camera_glass_components(
         &scene,
