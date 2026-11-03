@@ -165,6 +165,10 @@ fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_en
                         )
                         .unwrap();
                     identical_images(&images, &ordinary);
+                    if !cfg!(debug_assertions) {
+                        assert!(images.path_debug.is_none());
+                        continue;
+                    }
                     let stats = images.path_debug.as_ref().unwrap();
                     if let Some(expected) = &reference {
                         assert_eq!(stats, expected);
@@ -216,7 +220,7 @@ fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_en
 }
 
 #[test]
-fn command_line_writes_aovs_without_exposure_and_protects_primary_filename() {
+fn command_line_gates_aovs_by_build_profile_and_protects_physical_outputs() {
     let directory = TemporaryDirectory::new();
     let mut config = config();
     config.render.exposure = 0.0;
@@ -268,6 +272,12 @@ fn command_line_writes_aovs_without_exposure_and_protects_primary_filename() {
                 .pixels()
                 .all(|p| p.0 == [0; 3])
         );
+    }
+    if !cfg!(debug_assertions) {
+        for name in names {
+            assert!(!directory.0.join(name).exists());
+        }
+        return;
     }
     let aovs: Vec<_> = names
         .iter()

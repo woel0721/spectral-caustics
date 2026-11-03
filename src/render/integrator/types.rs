@@ -8,7 +8,7 @@ pub struct CameraLightingImages {
     pub direct: Framebuffer,
     pub caustics: Framebuffer,
     pub combined: Framebuffer,
-    /// 路径事件统计，不是 XYZ 辐亮度；仅 RenderSetting::debug_path 开启时分配。
+    /// 路径事件统计，不是 XYZ 辐亮度；仅 debug 构建且 debug_path 开启时分配。
     pub path_debug: Option<super::debug::PathDebugBuffer>,
 }
 

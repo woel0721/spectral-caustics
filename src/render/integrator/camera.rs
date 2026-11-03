@@ -114,7 +114,9 @@ fn render_camera_buffers(
         })
         .ok_or("相机路径样本总数溢出")?;
     let split = matches!(output, CameraOutput::Components { .. });
-    let debug_path = matches!(output, CameraOutput::Components { debug_path: true });
+    // release 构建忽略配置开关，不分配统计缓冲，也不记录真实路径事件。
+    let debug_path =
+        cfg!(debug_assertions) && matches!(output, CameraOutput::Components { debug_path: true });
     if split {
         width
             .checked_mul(height)

@@ -15,7 +15,7 @@ pub struct RenderSetting {
     /// 玻璃相机渲染的每像素路径总数，与光源每轴分层数独立。
     #[serde(default = "default_camera_spp")]
     pub camera_spp: usize,
-    /// 在同一批相机路径上记录事件统计并输出 AOV；不影响辐亮度或随机流。
+    /// 仅 debug 构建可开启路径统计 AOV；release 忽略此开关，不影响辐亮度或随机流。
     #[serde(default)]
     pub debug_path: bool,
     pub mode: IorMode,

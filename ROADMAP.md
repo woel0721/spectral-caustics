@@ -201,3 +201,9 @@ Mirror、粗糙/光滑 GGX 的 JSON 场景在 Balance/Power、深度 0/1/4、see
 另实跑 `camera_direct_caustics -- 8`、`diffuse_indirect -- 16`、`camera_parallel_benchmark -- 16 64`、`refract_ray`，全部成功；线程示例确认光源与三个相机 XYZ 在 1/2/4/6 线程逐位一致。
 
 本阶段只保留路径摘要与像素统计，不输出逐顶点完整轨迹；采样拒绝沿用现有 sampler 的空结果分类，不细分所有空样本来源，也不重采样。透明 shadow ray、金属焦散和后续调试阶段未推进。
+
+### Path Debug 的构建模式限制
+
+Path Debug AOV 现仅在 `cfg!(debug_assertions)` 为 true 且 `render.debug_path=true` 时启用。常规 debug 构建使用 `cargo run --locked`；release 忽略配置开关，不分配统计缓冲、不记录路径事件、不输出 AOV/JSON。保留配置与返回类型，不改动 HDRI、场景或物理算法。
+
+原有 366 项测试全部保留，两种构建的完整测试均通过；debug/release 全目标构建与严格 Clippy、fmt 和 diff 检查通过。现有集成测试同时验证两种模式下的返回值和真实命令行输出。实跑相同 32×24、8 SPP、原 HDRI 场景及 `debug_path=true`：debug 生成五个调试文件，release 无调试文件，五张普通 PNG 逐字节一致；release 相机/焦散示例同样不输出调试文件。

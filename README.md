@@ -31,7 +31,7 @@ cargo run --release --locked -- /path/to/config.json
 
 ## Path Debug AOV（第一阶段）
 
-在所用 JSON 的 `render` 对象中加入 `"debug_path": true`，再用原主程序运行该配置。字段可省略，Rust/JSON 默认均为 `false`；仓库展示配置、HDRI 和场景参数不因调试而修改。
+在所用 JSON 的 `render` 对象中加入 `"debug_path": true`，使用 **debug 构建**运行：`cargo run --locked -- /path/to/config.json`。只有 `cfg!(debug_assertions)` 为 true 且配置开关打开时才记录/输出 AOV。`cargo run --release` 会忽略 `debug_path=true`，不分配调试缓冲、不记录路径统计，也不生成四张 AOV 或调试 JSON。字段可省略，Rust/JSON 默认均为 `false`；仓库展示配置、HDRI 和场景参数不因调试而修改。
 
 开启时，`Render::render_camera_glass_components` 在同一批真实相机路径上记录事件，通过 `CameraLightingImages.path_debug` 返回统计缓冲；主程序和 `camera_direct_caustics` 示例将其保存到主图目录。代码调用方可使用 `if let Some(debug) = &images.path_debug { debug.save(&config.render.output_path)?; }`。原自由函数入口保留原签名并默认关闭调试；关闭时不分配调试缓冲。追踪循环仍只有一份，不增加随机数消费，不改变 BSDF、Fresnel、MIS、RR 或普通 Direct/Caustics/Combined。
 
