@@ -1,6 +1,6 @@
 # Spectral Caustics Renderer
 
-Rust CPU 离线渲染器，默认在同一场景展示 Glass、Mirror、GGX 三个球体，支持 HDRI、MIS、有界 BSDF 路径和 Rayon 并行。库中保留三棱镜光源端光谱焦散算法。当前能力与开发边界见 [ROADMAP.md](ROADMAP.md)。
+Rust CPU 离线渲染器，支持理想 Dielectric Sphere/Prism 的光源端光谱焦散，以及 HDRI、MIS、有界 RGB BSDF 路径和 Rayon 并行。默认展示 Glass、Mirror、GGX 三个球体；主要光谱测试场景为 [configs/sphere.json](configs/sphere.json)。当前能力与开发边界见 [ROADMAP.md](ROADMAP.md)。
 
 ## 运行与输出
 
@@ -8,6 +8,7 @@ Rust CPU 离线渲染器，默认在同一场景展示 Glass、Mirror、GGX 三�
 
 ```sh
 cargo run --release --locked
+cargo run --release --locked -- configs/sphere.json
 cargo run --release --locked -- /path/to/config.json
 ```
 
@@ -19,7 +20,7 @@ cargo run --release --locked -- /path/to/config.json
 | 同目录的 `camera_direct.png` | 太阳、环境与相机续追贡献 |
 | 同目录的 `camera_caustics.png` | 首次地面着色的光谱焦散贡献 |
 
-三图共用一批相机路径。球体尚无光源端光谱焦散，因此默认场景的 Caustics 全黑，Direct 与 Combined 相同。自定义主图文件名时只保存指定名称；辅助图与主图重名时加 `aux_` 前缀。PNG 使用同一曝光，经 XYZ → linear sRGB → 裁剪 → display sRGB 输出，生成图位于忽略的 `output/` 中。
+三图共用一批相机路径。默认三球对照场景没有开启焦散；`sphere.json` 显式选择色散玻璃球，输出到 `output/sphere/`，其中 `camera_caustics.png` 包含球体的光谱焦散，`camera_combined.png` 为合成图。多波长重叠处接近白色，色散主要体现在焦散色边；高亮可能被显示裁剪。自定义主图文件名时只保存指定名称；辅助图与主图重名时加 `aux_` 前缀。PNG 使用同一曝光，经 XYZ → linear sRGB → 裁剪 → display sRGB 输出，生成图位于忽略的 `output/` 中。
 
 ## 配置
 
@@ -37,17 +38,36 @@ cargo run --release --locked -- /path/to/config.json
 - `camera_spp` 控制相机采样；`samples_per_pixel_axis` 控制光源每轴分层采样，二者独立。快速预览可同时降低尺寸和采样数。
 - `seed` 固定随机种子；`thread_count=null` 使用 Rayon 默认线程数，正整数创建专用池；`max_spectral_blocks` 控制光源采样块数。
 - `max_diffuse_bounces` 表示额外连续 BSDF 连接数，包含 Diffuse/Glossy，范围 0..1024；4 最多访问 5 个连续着色顶点。
-- 场景采用米制、Z-up；JSON 支持一个地面、至多一个光谱三棱镜及多个球体/圆角三棱镜。`receiver` 限制光子图范围，地面在其外扩 `ground_margin_m`，不限制解析太阳照明。
-- `render.mode=constant/dispersion` 只控制光源端折射率；波长以 nm 配置，支持 380–780 nm。相机始终以 RGB 追踪。
+- 场景采用米制、Z-up；JSON 支持一个地面、至多一个三棱镜及多个球体/圆角三棱镜。Sphere/Prism 的 `caustics` 开关显式选择至多一个理想 Dielectric 焦散目标，不依赖物体下标或 `debug_object_id`。Sphere 缺省关闭；Prism 缺省开启以兼容旧配置，非介质 Prism 仍只遮挡光线。选择 Sphere 时应关闭其他 Prism 的开关；Sphere 开启时绑定非介质材质会报错。
+- `receiver` 限制光子图范围，地面在其外扩 `ground_margin_m`，不限制解析太阳照明。
+- `render.mode=constant` 使用所选材质的 `ior`；`dispersion` 使用其 Cauchy 模型，未配置模型则仍为常数。波长以 nm 配置，支持 380–780 nm。相机始终以 RGB 和材质的常数 `ior` 追踪。
 
 材质使用 `type` 区分，所有参数必须有限，颜色为线性 RGB：
 
 | 类型 | 参数与范围 |
 | --- | --- |
 | `lambertian` | `albedo`：三个 [0,1] 分量 |
-| `dielectric` | `ior`：有限正数 |
+| `dielectric` | `ior`：有限正数；可选 `dispersion`：Cauchy 参数 `a>0`、`b_um2≥0` |
 | `mirror` | `reflectance`：三个 [0,1] 分量 |
 | `ggx_metal` | RGB `eta>0`、`k≥0`，`roughness∈[0,1]` |
+
+球体光谱配置的关键字段：
+
+```json
+{
+  "type": "sphere",
+  "center_m": [0.0, 0.0, 0.83],
+  "radius_m": 0.8,
+  "caustics": true,
+  "material": {
+    "type": "dielectric",
+    "ior": 1.52,
+    "dispersion": { "a": 1.5046, "b_um2": 0.0042 }
+  }
+}
+```
+
+`n(λ)=a+b_um2/λ_μm²`；输入波长为 nm，模型内部转换为 μm。上述参数用于演示，不代表特定实测玻璃。显式 Dielectric 的 `dispersion` 省略/null 表示常数；整个 `material` 省略时，保留旧演示玻璃默认值（1.52 和上述 Cauchy）。Rust 构造 `MaterialConfig::Dielectric` 需提供 `dispersion`，构造 `ObjectConfig::Sphere/Prism` 需提供 `caustics`；现有调用方已迁移。手工场景使用 `add_with_material` 后调用 `select_caustics_object(id)`，单条材质光谱路径可用 `trace_caustics_photon`；旧 `prism_id`、显式 IOR 的 `take_photon_landing` 和演示 `refractive_index` 保留。
 
 完整球体配置见 [configs/sphere.json](configs/sphere.json)，圆角三棱镜见 [configs/beveled_prism.json](configs/beveled_prism.json)。圆角仅作用于三条长棱，每角固定 8 段；`bevel_size_m` 是沿原边的切点距离，每条边须长于它的两倍。实际求交使用分段几何法线，没有插值平滑法线。字段与校验见 [src/config](src/config)。
 
@@ -89,7 +109,7 @@ cargo run --release --locked --example refract_ray
 - 相机由统一 `BsdfSample` 推进 RGB 吞吐量，Dielectric/Mirror/光滑 GGX 合计最多 32 次 Delta 事件。第三次连续连接后的顶点已着色且仍有预算时执行 RR，`p=clamp(max(throughput),0.05,0.95)`，存活除以 p 补偿。
 - 首次表面立即着色；仅首次连续着色顶点为地面时读取焦散图，续追不再读取。已有连续散射历史时，仅最近事件为 Delta 且有环境的 miss 累加环境到 Direct；非 Delta miss 由局部 NEE/MIS 负责。太阳/环境 shadow ray 对玻璃仍采用二值遮挡。
 - GGX 为各向同性、单次散射金属，`alpha=roughness²`，使用完整 NDF 采样；无效反射保留零贡献、不补采。`roughness≤0.001` 切换为理想镜面。默认 eta/k 为演示参数，RGB 参数不代表真实光谱，未做微表面多次散射补偿。
-- 光源焦散仅追踪理想介质三棱镜的两次透射，通量乘 `(1-F_enter)(1-F_exit)`；反射、TIR 和区域外通量不再分配。Cauchy 演示模型为 `n(λ)=1.5046+0.0042/λ_μm²`，光谱积分保留 `Δλ`。相机三分量 API 要求接收地面为中性 Lambertian；彩色地面可使用独立 RGB 入口 `render_camera_glass`。
+- 光源焦散只追踪选中理想介质 Sphere/Prism 的两次透射：首次求交进入后，通过 `Scene::intersect()` 查找同一物体出射面，再求地面交点。折射率由绑定材质查询，两个界面使用同一波长的 `n(λ)`；Snell/Fresnel 函数保持原有数值行为。光子通量乘 `(1-F_enter)(1-F_exit)`，不乘相机 radiance 的 IOR 平方因子；反射、TIR、其他物体遮挡和区域外通量不再分配。D65/CIE XYZ 积分只计一次 `Δλ`，保留原有空间发射归一化与地面双线性 splat。相机三分量 API 要求接收地面为中性 Lambertian；彩色地面可使用独立 RGB 入口 `render_camera_glass`。
 - 当前是有界 RGB 路径估计器。尚无透明阴影、嵌套介质、环境/金属焦散、通用 Photon Mapping、BVH/KD-Tree、体积、GUI 或 GPU；有限深度仍会截断路径。
 
 几何/光学与 XYZ 使用 `f64`；固定配置和 seed 在当前实现的 1/2/4 线程下结果一致。模块入口为 [src/render/integrator.rs](src/render/integrator.rs) 和 [src/scene.rs](src/scene.rs)。CIE/D65、PBRT 反射基谱的来源、许可证与校验和见 [颜色数据说明](assets/color/README.md)；RGB 到光谱是近似模型。
