@@ -963,6 +963,97 @@ fn configured_exposure_scales_linear_color_before_srgb_encoding() {
 }
 
 #[test]
+fn default_executable_renders_all_three_spheres_and_repeats_across_threads() {
+    let directory = TemporaryDirectory::new();
+    fs::create_dir(directory.0.join("configs")).unwrap();
+    let mut config = Config::from_json(include_str!("../configs/default.json")).unwrap();
+    config.render.width = 96;
+    config.render.height = 54;
+    config.render.camera_spp = 8;
+    config.render.samples_per_pixel_axis = 1;
+    config.render.debug_path = true;
+    // 入口验证使用渐变，HDRI 的加载、采样和积分由现有数值测试覆盖。
+    config.scene.environment.as_mut().unwrap().map_path = None;
+    let scene = Scene::from_config(&config.scene).unwrap();
+    assert_eq!(scene.prism_id, None);
+    let output_directory = directory.0.join("output/spheres");
+    let mut reference = None;
+    for (target, threads) in [(0, 1), (1, 2), (2, 4)] {
+        config.scene.debug_object_id = Some(target);
+        config.render.thread_count = Some(threads);
+        config
+            .save(directory.0.join("configs/default.json"))
+            .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_spectral-caustics"))
+            .current_dir(&directory.0)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let images: Vec<_> = [
+            "camera_direct.png",
+            "camera_caustics.png",
+            "camera_combined.png",
+        ]
+        .iter()
+        .map(|name| {
+            let path = output_directory.join(name);
+            let image = image::open(&path).unwrap();
+            assert_eq!((image.width(), image.height()), (96, 54));
+            assert_eq!(image.color(), image::ColorType::Rgb8);
+            fs::read(path).unwrap()
+        })
+        .collect();
+        assert_eq!(images[0], images[2]);
+        assert!(
+            image::open(output_directory.join("camera_caustics.png"))
+                .unwrap()
+                .into_rgb8()
+                .pixels()
+                .all(|p| p.0 == [0; 3])
+        );
+        if let Some(expected) = &reference {
+            assert_eq!(&images, expected);
+        } else {
+            reference = Some(images);
+        }
+        assert_eq!(
+            fs::read_dir(&output_directory).unwrap().count(),
+            if cfg!(debug_assertions) { 8 } else { 3 }
+        );
+        if cfg!(debug_assertions) {
+            let stats: serde_json::Value = serde_json::from_slice(
+                &fs::read(output_directory.join("path_debug.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(stats["target_object_id"], target);
+            let pixels = stats["pixels"].as_array().unwrap();
+            for object in 0..4 {
+                let key = object.to_string();
+                assert!(
+                    pixels
+                        .iter()
+                        .any(|p| p["first_hit_objects"][&key].as_u64().unwrap_or(0) > 0)
+                );
+            }
+            let event = [
+                "specular_transmission",
+                "specular_reflection",
+                "glossy_reflection",
+            ][target];
+            assert!(
+                pixels
+                    .iter()
+                    .any(|p| p["events"][event].as_u64().unwrap() > 0)
+            );
+        }
+    }
+}
+
+#[test]
 fn executable_reads_json_and_generates_current_outputs_reproducibly() {
     let directory = TemporaryDirectory::new();
     let mut config = small_config();
@@ -989,13 +1080,7 @@ fn executable_reads_json_and_generates_current_outputs_reproducibly() {
         );
     };
     run();
-    let names = [
-        "custom.png",
-        "dispersion.png",
-        "camera_direct.png",
-        "camera_caustics.png",
-        "camera_combined.png",
-    ];
+    let names = ["custom.png", "camera_direct.png", "camera_caustics.png"];
     let original: Vec<_> = names
         .iter()
         .map(|name| {
@@ -1014,14 +1099,12 @@ fn executable_reads_json_and_generates_current_outputs_reproducibly() {
         );
     }
     config.render.exposure = 0.0;
-    config.render.output_path = PathBuf::from("nested/camera_combined.png");
+    config.render.output_path = PathBuf::from("nested/camera_direct.png");
     config.save(&path).unwrap();
     run();
     for name in [
-        "camera_combined.png",
-        "aux_camera_combined.png",
-        "dispersion.png",
         "camera_direct.png",
+        "aux_camera_direct.png",
         "camera_caustics.png",
     ] {
         assert!(

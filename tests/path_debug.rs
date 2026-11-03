@@ -254,8 +254,6 @@ fn command_line_gates_aovs_by_build_profile_and_protects_physical_outputs() {
         "reflection_count.png",
         "camera_direct.png",
         "camera_caustics.png",
-        "camera_combined.png",
-        "constant_ior.png",
     ];
     let ordinary: Vec<_> = ordinary_names
         .iter()
@@ -308,7 +306,7 @@ fn command_line_gates_aovs_by_build_profile_and_protects_physical_outputs() {
         assert_eq!(fs::read(directory.0.join(name)).unwrap(), expected);
     }
     assert!(
-        image::open(directory.0.join("camera_combined.png"))
+        image::open(&config.render.output_path)
             .unwrap()
             .into_rgb8()
             .pixels()

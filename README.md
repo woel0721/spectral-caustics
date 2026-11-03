@@ -1,6 +1,6 @@
 # Spectral Caustics Renderer
 
-Rust CPU 离线光谱焦散渲染器。平行光经过三棱镜的双界面折射形成地面焦散；相机通过统一 BSDF 采样追踪玻璃 Fresnel、理想镜面与有界连续散射和 Russian Roulette。环境支持 Radiance HDR 贴图或渐变天空，以 Balance/Power MIS 估计照明，Rayon 并行执行光源采样块和相机像素。
+Rust CPU 离线渲染器。主程序默认在同一场景并排展示 Glass、Mirror、GGX 三个球体，通过统一 BSDF 路径追踪玻璃 Fresnel、理想镜面、有界连续散射和 Russian Roulette。环境支持 Radiance HDR 贴图或渐变天空，以 Balance/Power MIS 估计照明，Rayon 并行执行光源采样块和相机像素。库中另保留三棱镜双界面折射的光源端光谱焦散算法与数值测试。
 
 当前 API 已完成 Breaking Cleanup。使用方式和物理边界以本文与当前源码为准，不以历史阶段输出、浮点分组或 RNG 消耗顺序为兼容目标。
 
@@ -13,21 +13,21 @@ cargo run --release --locked
 cargo run --release --locked -- /path/to/config.json
 ```
 
-默认读取 [configs/default.json](configs/default.json)，使用随仓库提供的 `assets/HDRI/herkulessaulen_4k.hdr`。配置、HDR 路径及输出路径中的相对路径均相对于启动目录。主程序接受一个可选 JSON 路径，配置读写不加载 HDR；运行时构建 Scene 才加载并缓存贴图。
+默认读取 [configs/default.json](configs/default.json)，从画面左到右为玻璃（IOR=1.52）、镜面（RGB 反射率=0.95）、GGX 金属（roughness=0.4，eta=0.2、k=3 的中性演示参数），地面为 Lambertian 棋盘格。三球共用相机、太阳和随仓库提供的 `assets/HDRI/herkulessaulen_4k.hdr`。配置、HDR 路径及输出路径中的相对路径均相对于启动目录。主程序接受一个可选 JSON 路径，配置读写不加载 HDR；运行时构建 Scene 才加载并缓存贴图。
 
-主程序生成五张图，辅助图与配置指定的主图保存在同一目录：
+主程序生成三张相机图，辅助分量与配置指定的合成图保存在同一目录：
 
 | 输出 | 内容 |
 | --- | --- |
-| `render.output_path`，默认 `output/caustics.png` | 光源端地面总 XYZ 辐照度预览，包含直接落地与折射焦散 |
-| `constant_ior.png` 或 `dispersion.png` | 相反折射率模式的地面预览 |
+| `render.output_path`，默认 `output/spheres/camera_combined.png` | 相机合成图，Direct + Caustics |
 | `camera_direct.png` | 解析太阳、环境背景/照明及漫反射续追贡献 |
 | `camera_caustics.png` | 首次地面命中反射的焦散贡献 |
-| `camera_combined.png` | Direct + Caustics |
+
+`render.output_path` 现在保存相机合成图；自定义该路径时使用指定文件名，不额外复制一张 `camera_combined.png`。主程序不再输出光源端地面预览或相反 IOR 模式对照。照明仍通过现有 `render_lighting` 建立，再由一批共享相机路径计算三个分量。球体尚无光源端光谱焦散，因此默认场景的 `camera_caustics.png` 全黑，Direct 与 Combined 相同；玻璃球仍有 RGB 反射和折射。
 
 主图占用某个辅助图名称时，该辅助图加 `aux_` 前缀，避免覆盖。所有物理图像使用同一配置曝光，经 XYZ → linear sRGB → 裁剪 → display sRGB → RGB8 PNG 输出。生成图不纳入版本控制；历史阶段 PNG 已移除。
 
-默认展示配置为 512×512、256 SPP、8 个环境样本、Power MIS、4 次额外漫反射连接。快速查看可降低尺寸、`camera_spp` 和光源 `samples_per_pixel_axis`；三者控制不同工作量。
+默认展示配置为 768×432、256 SPP、8 个环境样本、Power MIS、4 次额外连续 BSDF 连接。快速查看可降低尺寸、`camera_spp` 和光源 `samples_per_pixel_axis`；三者控制不同工作量。`Config::default()` 的代码构建场景仍保留单三棱镜数值实验配置；主程序使用上述 JSON 展示场景。
 
 ## Path Debug AOV（第一阶段）
 
@@ -36,6 +36,8 @@ cargo run --release --locked -- /path/to/config.json
 开启时，`Render::render_camera_glass_components` 在同一批真实相机路径上记录事件，通过 `CameraLightingImages.path_debug` 返回统计缓冲；主程序和 `camera_direct_caustics` 示例将其保存到主图目录。代码调用方可使用 `if let Some(debug) = &images.path_debug { debug.save(&config.render.output_path)?; }`。原自由函数入口保留原签名并默认关闭调试；关闭时不分配调试缓冲。追踪循环仍只有一份，不增加随机数消费，不改变 BSDF、Fresnel、MIS、RR 或普通 Direct/Caustics/Combined。
 
 每个像素汇总全部 SPP。`scene.debug_object_id` 选择调试目标，编号为 `scene.objects` 的零基下标，可选择 Sphere、Prism 或 Ground；省略/null 时自动选择已有三棱镜，没有三棱镜则没有目标。显式越界编号返回错误。运行时 `Scene.debug_object_id` 独立于仅供光源焦散使用的 `prism_id`，手动 `add_with_material` 后也可设置它。
+
+默认三球配置显式选择 `debug_object_id=0`（玻璃球）；改为 1 或 2 可分别观察 Mirror 或 GGX，3 为地面。
 
 只将**主相机光线首次命中调试目标**的子样本纳入 AOV，其他子样本贡献零；分母始终是像素总 SPP，因此边缘保留覆盖率。不是根据 SPP 中第一条随机路径决定整个像素是否显示。没有目标时 AOV 全黑。
 

@@ -1,5 +1,5 @@
-//! JSON 场景：光谱地面预览、折射率对照及共享路径的三张相机图。
-use spectral_caustics::{config::Config, optics::iormode::IorMode, render::Render, scene::Scene};
+//! JSON 场景：共享 BSDF 路径输出相机合成图及 Direct/Caustics 分量。
+use spectral_caustics::{config::Config, render::Render, scene::Scene};
 use std::{
     error::Error,
     path::{Path, PathBuf},
@@ -41,22 +41,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let lighting = renderer.render_lighting(&scene)?;
-    renderer.save(&lighting.combined()?, &config.render.output_path)?;
-    println!(
-        "已输出 {:?} 主图：{}",
-        config.render.mode,
-        config.render.output_path.display()
-    );
     let images = renderer.render_camera_glass_components(
         &scene,
         &lighting,
         config.render.camera_spp,
         config.render.seed,
     )?;
+    renderer.save(&images.combined, &config.render.output_path)?;
+    println!(
+        "相机合成图：{}，SPP={}",
+        config.render.output_path.display(),
+        config.render.camera_spp
+    );
     for (image, name) in [
         (&images.direct, "camera_direct.png"),
         (&images.caustics, "camera_caustics.png"),
-        (&images.combined, "camera_combined.png"),
     ] {
         let path = auxiliary_path(&config.render.output_path, name);
         renderer.save(image, &path)?;
@@ -67,14 +66,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("路径调试：{}", path.display());
         }
     }
-    let (mode, filename) = match config.render.mode {
-        IorMode::Dispersion => (IorMode::Constant, "constant_ior.png"),
-        IorMode::Constant => (IorMode::Dispersion, "dispersion.png"),
-    };
-    renderer.save(
-        &renderer.render_mode(&scene, mode)?,
-        auxiliary_path(&config.render.output_path, filename),
-    )?;
     println!("总耗时：{:.3} 秒", start.elapsed().as_secs_f64());
     Ok(())
 }

@@ -1,7 +1,7 @@
 {
   "render": {
-    "width": 512,
-    "height": 512,
+    "width": 768,
+    "height": 432,
     "samples_per_pixel_axis": 4,
     "camera_spp": 256,
     "mode": "dispersion",
@@ -12,14 +12,14 @@
     "seed": 42,
     "thread_count": null,
     "max_spectral_blocks": 16,
-    "output_path": "output/caustics.png"
+    "output_path": "output/spheres/camera_combined.png"
   },
   "scene": {
     "camera": {
-      "position": [2.5, -4.5, 2.6],
-      "target": [0.0, 0.0, 0.4],
+      "position": [0.0, -5.5, 2.7],
+      "target": [0.0, 0.0, 0.68],
       "up": [0.0, 0.0, 1.0],
-      "fov_y_degrees": 35.0
+      "fov_y_degrees": 30.0
     },
     "background_linear_rgb": [0.08, 0.10, 0.14],
     "environment": {
@@ -38,18 +38,30 @@
       "odd_scale": 0.25
     },
     "ground_margin_m": 0.5,
+    "debug_object_id": 0,
     "objects": [
       {
-        "type": "prism",
-        "material": { "type": "dielectric", "ior": 1.52 },
-        "vertices_m": [
-          [-0.5, -1.0, 0.03],
-          [0.5, -1.0, 0.03],
-          [0.0, -1.0, 0.83],
-          [-0.5, 1.0, 0.03],
-          [0.5, 1.0, 0.03],
-          [0.0, 1.0, 0.83]
-        ]
+        "type": "sphere",
+        "center_m": [-1.55, 0.0, 0.68],
+        "radius_m": 0.65,
+        "material": { "type": "dielectric", "ior": 1.52 }
+      },
+      {
+        "type": "sphere",
+        "center_m": [0.0, 0.0, 0.68],
+        "radius_m": 0.65,
+        "material": { "type": "mirror", "reflectance": [0.95, 0.95, 0.95] }
+      },
+      {
+        "type": "sphere",
+        "center_m": [1.55, 0.0, 0.68],
+        "radius_m": 0.65,
+        "material": {
+          "type": "ggx_metal",
+          "eta": [0.2, 0.2, 0.2],
+          "k": [3.0, 3.0, 3.0],
+          "roughness": 0.4
+        }
       },
       {
         "type": "ground",

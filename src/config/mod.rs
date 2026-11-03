@@ -86,29 +86,51 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_json_enables_the_hdri_preset_and_roundtrips() {
+    fn checked_in_json_enables_three_sphere_materials_and_hdri_and_roundtrips() {
         let config = Config::from_json(include_str!("../../configs/default.json")).unwrap();
         // 展示配置显式启用本地 HDR，Rust/省略字段的 JSON 的缺省值仍不依赖图片文件。
         let mut expected = Config::default();
+        expected.render.width = 768;
+        expected.render.height = 432;
+        expected.render.output_path = PathBuf::from("output/spheres/camera_combined.png");
         expected.render.camera_spp = 256;
+        expected.scene.camera.position = [0.0, -5.5, 2.7];
+        expected.scene.camera.target = [0.0, 0.0, 0.68];
+        expected.scene.camera.fov_y_degrees = 30.0;
+        expected.scene.debug_object_id = Some(0);
+        expected.scene.objects = vec![
+            ObjectConfig::Sphere {
+                center_m: [-1.55, 0.0, 0.68],
+                radius_m: 0.65,
+                material: MaterialConfig::Dielectric { ior: 1.52 },
+            },
+            ObjectConfig::Sphere {
+                center_m: [0.0, 0.0, 0.68],
+                radius_m: 0.65,
+                material: MaterialConfig::Mirror {
+                    reflectance: [0.95; 3],
+                },
+            },
+            ObjectConfig::Sphere {
+                center_m: [1.55, 0.0, 0.68],
+                radius_m: 0.65,
+                material: MaterialConfig::GgxMetal {
+                    eta: [0.2; 3],
+                    k: [3.0; 3],
+                    roughness: 0.4,
+                },
+            },
+            ObjectConfig::Ground {
+                height_m: 0.0,
+                material: Default::default(),
+            },
+        ];
         expected.scene.environment_samples = 8;
         expected.scene.environment_mis_heuristic = sceneconfig::EnvironmentMisHeuristic::Power;
         expected.scene.max_diffuse_bounces = 4;
         expected.scene.environment.as_mut().unwrap().map_path =
             Some(PathBuf::from("assets/HDRI/herkulessaulen_4k.hdr"));
         assert_eq!(config, expected);
-        assert_eq!(config.scene.objects.len(), 2);
-        assert!(matches!(
-            config.scene.objects[0],
-            ObjectConfig::Prism { .. }
-        ));
-        assert_eq!(
-            config.scene.objects[1],
-            ObjectConfig::Ground {
-                height_m: 0.0,
-                material: Default::default()
-            }
-        );
         assert_eq!(config.scene.light.total_flux, 8.0);
         assert_eq!(
             Config::from_json(&config.to_json().unwrap()).unwrap(),
@@ -647,7 +669,7 @@ mod tests {
             );
         }
         let mut invalid = original.clone();
-        invalid["scene"]["objects"][0]["type"] = json!("sphere");
+        invalid["scene"]["objects"][0]["type"] = json!("unknown_shape");
         assert!(Config::from_json(&invalid.to_string()).is_err());
         invalid = original;
         invalid["render"].as_object_mut().unwrap().remove("width");
@@ -666,7 +688,7 @@ mod tests {
             ("position", json!([1e308, 1e308, 1e308])),                  // 模长溢出。
             ("target", original["scene"]["camera"]["position"].clone()),
             ("up", json!([0.0, 0.0, 0.0])),
-            ("up", json!([-2.5, 4.5, -2.2])), // up 平行于观察方向。
+            ("up", json!([0.0, 5.5, -2.02])), // up 平行于观察方向。
             ("position", json!([0.0, 0.0])),
             ("target", json!("origin")),
             ("fov_y_degrees", json!(0.0)),

@@ -16,6 +16,22 @@
 - [x] Path Debug AOV 第一阶段：在真实相机路径上记录事件、内部 TIR、地面命中与独立终止原因，输出四张统计图和像素 JSON。
 - [x] Sphere RGB 材质测试：内外求交、固定朝外法线及独立可配置 Debug 物体 ID；不增加球体光源焦散。
 - [x] BeveledPrism：三条 y 方向长棱各采用 8 段相切圆弧，封闭 indexed mesh 与 RGB/Debug AOV 测试。
+- [x] 主程序默认使用并排的 Glass、Mirror、GGX 三球场景，输出共享相机路径的合成图及两个分量。
+
+## 主程序接入三球材质场景（2026-11-03）
+
+修改前基线为 334 项单元 + 56 项集成，共 390 项全部通过。保留工作区已有的 `configs/mitsuba_compare.json`、`mitsuba_prism_reference.py`，不纳入此次改动。
+
+- `configs/default.json` 改为从左到右 Glass（IOR=1.52）、Mirror（反射率 0.95）、GGX（roughness=0.4、RGB eta=0.2/k=3）三个球及棋盘格地面。使用 768×432 横向构图；保留 256 SPP、8 环境样本、Power、连续连接深度 4、seed 42 和原 HDRI。调试目标显式为玻璃球 ID 0。
+- `main` 复用现有 `render_lighting` 与 `render_camera_glass_components`，一批相机路径生成三个分量。`render.output_path` 改为相机 Combined，默认 `output/spheres/camera_combined.png`；同目录保存 `camera_direct.png`、`camera_caustics.png`，保留辅助文件重名保护和 debug AOV。自定义主图名称时不再额外复制 Combined。
+- 主程序移除地面总辐照度输出和相反 IOR 对照，消除第二次光源端渲染。库中公开 API、三棱镜光谱算法和 `Config::default()` 数值实验场景保留；材质、相机路径、MIS/PDF、Fresnel、RR、RNG 与焦散计光算法未改动。`render_lighting` 仍计算 sampled Direct 以复用现有光照上下文；`sphere_materials` 示例仍用于单球逐材质对照。
+- 删除文件、非测试函数/API、测试均为 0。新增 1 项真实无参数命令行测试，验证三球/地面均可见、三种材质的真实事件、三分量输出、1/2/4 线程及调试目标切换的确定性；迁移已有配置、CLI 输出和 AOV 测试，保留全部 MIS/PDF、光谱/颜色、玻璃双界面、深度/RR、三分量及线程数值测试，没有增加第二套渲染实现。
+
+实际默认主程序 release 渲染完成（768×432、256 SPP、10 线程，70.689 秒），三张 RGB8 PNG 位于 `output/spheres/`，已检查合成图并核对尺寸、Direct=Combined、Caustics 全黑。球体只有 RGB 相机传输，仍未实现球体光源端光谱焦散；二值阴影、有限深度、GGX 单次散射和嵌套介质等既有边界保留。
+
+最终 334 项单元 + 57 项集成，共 **391 项全部通过**，无失败或 ignored。首轮全量测试暴露一处 AOV 测试仍读取旧 Combined 文件名，已改为读取配置的主图路径并重新完整通过。实际执行 `cargo fmt`；`cargo fmt --check`、`cargo build --locked --all-targets`、`cargo test --locked`、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 均通过。另通过 release 全目标构建，以及 release 配置/CLI 与 AOV 的 23 项集成测试。
+
+实跑 release `camera_direct_caustics -- 8`（768×432）、`diffuse_indirect -- 8`（320×240、深度 0/1/4）、`camera_parallel_benchmark -- 8 48`、`refract_ray` 均成功；线程基准的光源 Direct/Caustics 及三个相机 XYZ 缓冲在 1/2/4/6 线程逐位一致。
 
 ## 三条长棱改为八段圆角（2026-11-03）
 
