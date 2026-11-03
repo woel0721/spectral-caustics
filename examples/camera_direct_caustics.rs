@@ -29,5 +29,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         renderer.save(image, path)?;
         println!("{component}: {path}，SPP={spp}");
     }
+    if let Some(debug) = &images.path_debug {
+        for path in debug.save("output/caustics.png")? {
+            println!("Path AOV: {}", path.display());
+        }
+    }
     Ok(())
 }

@@ -13,6 +13,7 @@
 - [x] Direct/Caustics/Combined 共用相机路径，解析太阳避免重复计光。
 - [x] JSON 配置校验、固定种子、Rayon 独立流与线程一致性。
 - [x] Breaking Cleanup：统一当前算法，移除冻结算法、历史适配层和调试流程。
+- [x] Path Debug AOV 第一阶段：在真实相机路径上记录事件、内部 TIR、地面命中与独立终止原因，输出四张统计图和像素 JSON。
 
 ## Breaking Cleanup 引用审计
 
@@ -184,3 +185,19 @@ Mirror、粗糙/光滑 GGX 的 JSON 场景在 Balance/Power、深度 0/1/4、see
 用户随后要求将此前保留的改动一并提交：展示 JSON 改用随仓库提供的 `assets/HDRI/herkulessaulen_4k.hdr`，相应配置测试与 README 同步；`MAX_DELTA_EVENTS` 从 8 提高到 32，现有预算边界测试按此常量验证。上文关于保留未提交修改及提交版上限 8 的内容是两个 BSDF 重构提交时的验收记录。
 
 提交前再次通过 fmt、全目标 build、354 项测试（311 单元 + 43 集成）、严格 Clippy 和 diff 检查。
+
+## Path Debug AOV 第一阶段
+
+基于 `079d6a5`，修改前 354 项测试全部通过，工作区干净。保留 `trace_camera_path` 接口，唯一生产路径循环移入可选 recorder 的 `trace_camera_path_impl`；不修改材质 sample/evaluate/pdf、GGX PDF、Fresnel 权重、RR、MIS 或场景参数。
+
+`RenderSetting.debug_path` 默认 false。开启后随相机实际 SPP 记录第一次物体/几何法线、四类续追事件、是否到达地面、是否几何逃逸环境及是否发生内部 TIR，终止原因另记。TIR 同时检查理想介质、内部入射方向、Snell 临界条件和现有 Fresnel，不把普通镜面反射当作 TIR。记录不消耗随机数；关闭不分配统计缓冲。
+
+输出 `path_target.png`、`reflection_count.png`、`transmission_count.png`、`first_hit_normal.png` 与 `path_debug.json`。四张图只显示首次命中棱镜的子样本，用像素总 SPP 作分母；统计 PNG 直接量化，不经过曝光或物理颜色链路。次数图固定对数标尺在 32 次饱和，JSON 保留准确计数。几何环境逃逸不等于该 miss 增加辐亮度；地面命中不等于在地面终止。详细读图方法见 README。
+
+没有删除文件、函数或测试，也没有增加第二套追踪循环。新增 9 项单元测试与 3 项集成测试；320 单元 + 46 集成，共 366 项全部通过，无 ignored。覆盖 Mirror、介质折射/内部 TIR、GGX Glossy/拒绝样本、RR/预算等退出、共面三角形法线、全部 SPP 汇总与遮罩、曝光独立编码、主图重名保护，以及 HDRI/渐变、Balance/Power、固定 seed 下 1/2/4 线程/重跑的统计一致性和 debug 开关前后的普通 XYZ 逐位一致。
+
+实际通过 `cargo fmt`、`cargo fmt --check`、`cargo build --locked --all-targets`、`cargo test --locked`、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 和 release 全目标构建。实跑当前玻璃、Mirror、roughness=0.4 GGX 的 256²/64 SPP 主程序 AOV 预览；原 HDRI/相机/几何/地面等 scene 字段不变，仅在输出配置中启用调试并缩小渲染设置。检查四图、每像素统计总数与原配置哈希；未执行默认 512²/256 SPP 的调试渲染。
+
+另实跑 `camera_direct_caustics -- 8`、`diffuse_indirect -- 16`、`camera_parallel_benchmark -- 16 64`、`refract_ray`，全部成功；线程示例确认光源与三个相机 XYZ 在 1/2/4/6 线程逐位一致。
+
+本阶段只保留路径摘要与像素统计，不输出逐顶点完整轨迹；采样拒绝沿用现有 sampler 的空结果分类，不细分所有空样本来源，也不重采样。透明 shadow ray、金属焦散和后续调试阶段未推进。

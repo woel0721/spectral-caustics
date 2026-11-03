@@ -8,6 +8,8 @@ pub struct CameraLightingImages {
     pub direct: Framebuffer,
     pub caustics: Framebuffer,
     pub combined: Framebuffer,
+    /// 路径事件统计，不是 XYZ 辐亮度；仅 RenderSetting::debug_path 开启时分配。
+    pub path_debug: Option<super::debug::PathDebugBuffer>,
 }
 
 /// 单条路径或像素均值的线性 RGB 分量，共享玻璃路径和吞吐量。

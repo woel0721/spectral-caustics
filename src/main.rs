@@ -62,6 +62,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         renderer.save(image, &path)?;
         println!("相机：{}，SPP={}", path.display(), config.render.camera_spp);
     }
+    if let Some(debug) = &images.path_debug {
+        for path in debug.save(&config.render.output_path)? {
+            println!("路径调试：{}", path.display());
+        }
+    }
     let (mode, filename) = match config.render.mode {
         IorMode::Dispersion => (IorMode::Constant, "constant_ior.png"),
         IorMode::Constant => (IorMode::Dispersion, "dispersion.png"),

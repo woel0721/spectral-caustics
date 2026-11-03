@@ -1,6 +1,7 @@
 //! 有界 RGB BSDF 相机路径、MIS 环境照明与分量输出。
 
 mod camera;
+pub mod debug;
 mod diffuse;
 mod direct;
 mod environment;
@@ -9,6 +10,7 @@ mod path;
 mod rng;
 mod types;
 
+pub(crate) use camera::render_camera_glass_components_impl;
 pub use camera::{render_camera_glass, render_camera_glass_components};
 pub use ground::{lambertian_radiance, sample_ground_irradiance};
 pub use types::CameraLightingImages;

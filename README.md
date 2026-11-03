@@ -29,6 +29,31 @@ cargo run --release --locked -- /path/to/config.json
 
 默认展示配置为 512×512、256 SPP、8 个环境样本、Power MIS、4 次额外漫反射连接。快速查看可降低尺寸、`camera_spp` 和光源 `samples_per_pixel_axis`；三者控制不同工作量。
 
+## Path Debug AOV（第一阶段）
+
+在所用 JSON 的 `render` 对象中加入 `"debug_path": true`，再用原主程序运行该配置。字段可省略，Rust/JSON 默认均为 `false`；仓库展示配置、HDRI 和场景参数不因调试而修改。
+
+开启时，`Render::render_camera_glass_components` 在同一批真实相机路径上记录事件，通过 `CameraLightingImages.path_debug` 返回统计缓冲；主程序和 `camera_direct_caustics` 示例将其保存到主图目录。代码调用方可使用 `if let Some(debug) = &images.path_debug { debug.save(&config.render.output_path)?; }`。原自由函数入口保留原签名并默认关闭调试；关闭时不分配调试缓冲。追踪循环仍只有一份，不增加随机数消费，不改变 BSDF、Fresnel、MIS、RR 或普通 Direct/Caustics/Combined。
+
+每个像素汇总全部 SPP。只将**主相机光线首次命中 `scene.prism_id`** 的子样本纳入 AOV，其他子样本贡献零；分母始终是像素总 SPP，因此边缘保留覆盖率。不是根据 SPP 中第一条随机路径决定整个像素是否显示。没有棱镜编号时 AOV 全黑。
+
+| 图像 | 读取方式 |
+| --- | --- |
+| `path_target.png` | R=曾到达地面的路径比例，G=最终几何逃逸到已配置环境的比例，B=曾发生玻璃内部全反射的路径比例。三个标志独立，可以重叠；黄表示地面命中和环境逃逸都较多，并不表示路径终止于地面。 |
+| `reflection_count.png` | 平均 `SpecularReflection + GlossyReflection` 次数的灰度，不含 DiffuseReflection，也不含局部 NEE 的 BSDF 方向样本。 |
+| `transmission_count.png` | 平均 `SpecularTransmission` 次数的灰度。 |
+| `first_hit_normal.png` | 世界空间首次几何法线，逐子样本用 `(n+1)/2` 编码到 RGB 后平均，非棱镜子样本为黑；不翻转法线，也不将平均法线重新归一化。满覆盖处 R/G/B 对应 X/Y/Z，-1→0、0→128、+1→255。 |
+
+统计 PNG 直接量化到 RGB8，**不应用曝光、XYZ 转换或 sRGB 曲线**。比例/法线通道以 `round(255*v)` 编码。两张次数图使用固定标尺 `v=clamp(ln(1+平均次数)/ln(33),0,1)`：平均 0/1/2/4/8/16/32 次约为灰度 0/51/80/117/160/207/255，32 次以上饱和。此映射只增强统计可读性，不是物理亮度；准确次数保存在 JSON。
+
+同时输出 `path_debug.json`：`pixels[y*width+x]` 保存总 `samples`、所有主光线的首次命中物体直方图 `first_hit_objects`，以及首次命中棱镜的 `prism_samples`、法线和、四类 `events` 总数、地面/环境/TIR 路径数、`terminations` 终止原因直方图。事件总数除以 `samples` 得到图像使用的平均值，除以 `prism_samples` 可查看仅棱镜路径的条件平均。终止计数之和等于 `prism_samples`。
+
+终止原因区分 `environment_escape`、`background_escape`、`missing_material`、`no_scattering_components`、`backface`、`sample_rejected`、`russian_roulette`、连续/Delta/全部预算耗尽和 `zero_throughput`。`sample_rejected` 沿用现有 `sample_scatter_ray` 的空结果，包含 GGX 无效 NDF 反射、空采样、连续样本的零吞吐量等，不重采样。数值/配置错误仍返回原错误，不输出不完整统计。
+
+TIR 必须是已接受的 SpecularReflection，且理想介质的 `wo·几何法线<0`（从内部入射）、`ior>1`、Snell 临界条件成立，现有 `fresnel_dielectric` 也返回 1。普通 Fresnel 反射、Mirror 和光滑 GGX 不会仅因事件名相同而被标为 TIR。环境逃逸记录几何终点；连续事件后的 miss 仍沿用原局部 NEE/MIS 计光规则，不额外加环境辐亮度。
+
+分析不连续时，先查看法线图：同一平面的两片三角形应颜色一致，真实棱边处可以跳变；再比较目标比例与事件次数，结合 JSON 区分 TIR、多次界面穿越、采样拒绝和预算截断。有限 SPP 的统计仍会有采样噪声。调试文件名与主图重名时加 `aux_` 前缀。
+
 ## 主要示例
 
 ```sh
@@ -54,6 +79,7 @@ cargo run --release --locked --example refract_ray
 | 参数 | Rust 默认/省略字段 | 展示 JSON |
 | --- | --- | --- |
 | `render.camera_spp` | 64 | 256 |
+| `render.debug_path` | `false` | 省略，关闭 |
 | `scene.environment_samples` | 1 | 8 |
 | `scene.environment_mis_heuristic` | `balance` | `power` |
 | `scene.max_diffuse_bounces` | 0 | 4 |

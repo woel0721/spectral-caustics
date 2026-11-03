@@ -15,6 +15,9 @@ pub struct RenderSetting {
     /// 玻璃相机渲染的每像素路径总数，与光源每轴分层数独立。
     #[serde(default = "default_camera_spp")]
     pub camera_spp: usize,
+    /// 在同一批相机路径上记录事件统计并输出 AOV；不影响辐亮度或随机流。
+    #[serde(default)]
+    pub debug_path: bool,
     pub mode: IorMode,
     /// 波长范围和积分步长，单位为 nm。
     pub wavelength_min_nm: f64,
@@ -42,6 +45,7 @@ impl Default for RenderSetting {
             height: 512,
             samples_per_pixel_axis: 4,
             camera_spp: default_camera_spp(),
+            debug_path: false,
             mode: IorMode::Dispersion,
             wavelength_min_nm: 380.0,
             wavelength_max_nm: 780.0,

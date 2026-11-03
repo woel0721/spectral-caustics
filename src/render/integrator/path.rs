@@ -1,5 +1,6 @@
 //! 通用 RGB 相机路径：按 BSDF 事件推进，局部 NEE 与 Delta 链逃逸分开计光。
 use super::{
+    debug::{PathDebugSample, PathTermination},
     diffuse::{russian_roulette, sample_scatter_ray, secondary_direct_lighting},
     direct::first_surface_lighting,
     environment::environment_lighting,
@@ -20,13 +21,25 @@ pub(super) fn trace_camera_path(
     light: f64,
     ground: Option<&GroundLighting<'_>>,
 ) -> Result<(), Box<dyn Error>> {
+    trace_camera_path_impl(scene, state, rngs, light_wi, light, ground, None)
+}
+
+pub(super) fn trace_camera_path_impl(
+    scene: &Scene,
+    state: &mut CameraPathState,
+    rngs: &mut CameraPathRngs<'_>,
+    light_wi: Vector3<f64>,
+    light: f64,
+    ground: Option<&GroundLighting<'_>>,
+    mut debug: Option<&mut PathDebugSample>,
+) -> Result<(), Box<dyn Error>> {
     crate::config::sceneconfig::validate_diffuse_bounces(scene.max_diffuse_bounces)?;
-    loop {
+    let termination = loop {
         if !state.throughput.iter().all(|v| v.is_finite() && *v >= 0.0) {
             return Err("路径吞吐量必须有限且非负".into());
         }
         if state.throughput == Vector3::zeros() {
-            break;
+            break PathTermination::ZeroThroughput;
         }
         let Some(hit) = scene.intersect(&state.ray) else {
             if state.non_delta_bounces == 0 {
@@ -44,16 +57,26 @@ pub(super) fn trace_camera_path(
                 state.radiance.direct += state.throughput.component_mul(&li);
             }
             // 非 Delta miss 由该顶点的局部环境 NEE/MIS 估计，不能再次加背景。
-            break;
+            if let Some(debug) = debug.as_deref_mut() {
+                debug.escaped_environment = scene.environment.is_some();
+            }
+            break if scene.environment.is_some() {
+                PathTermination::EnvironmentEscape
+            } else {
+                PathTermination::BackgroundEscape
+            };
         };
+        if let Some(debug) = debug.as_deref_mut() {
+            debug.hit(&hit, scene.ground_id);
+        }
         let Some(material) = hit.material_id.and_then(|id| scene.material(id)) else {
-            break;
+            break PathTermination::MissingMaterial;
         };
         let wo = -state.ray.direction;
         if material.has_non_delta() {
             let normal = unit_vector(hit.normal).ok_or("表面法线无效")?;
             if normal.dot(&wo) <= 0.0 && !material.has_delta() {
-                break;
+                break PathTermination::Backface;
             }
             if state.has_non_delta_vertex || state.non_delta_bounces > 0 {
                 let direct = secondary_direct_lighting(
@@ -92,12 +115,20 @@ pub(super) fn trace_camera_path(
         if (!continuous_budget || !material.has_non_delta())
             && (!delta_budget || !material.has_delta())
         {
-            break;
+            break if !material.has_non_delta() && !material.has_delta() {
+                PathTermination::NoScatteringComponents
+            } else if material.has_non_delta() && material.has_delta() {
+                PathTermination::AllBudgetsExhausted
+            } else if material.has_non_delta() {
+                PathTermination::NonDeltaBudgetExhausted
+            } else {
+                PathTermination::DeltaBudgetExhausted
+            };
         }
         // 以非 Delta 连接数量控制 RR，保留浅层/终点不抽样的约定。
         if material.has_non_delta() && continuous_budget && !russian_roulette(state, rngs.diffuse)?
         {
-            break;
+            break PathTermination::RussianRoulette;
         }
         let rng = if state.non_delta_bounces == 0 && !state.has_non_delta_vertex {
             &mut *rngs.camera
@@ -105,16 +136,27 @@ pub(super) fn trace_camera_path(
             &mut *rngs.diffuse
         };
         let Some(next) = sample_scatter_ray(scene, &hit, material, wo, rng)? else {
-            break;
+            break PathTermination::SampleRejected;
         };
         // 混合材质按完整概率采样；没有预算的分量终止，不能重新选择另一个分量。
         if next.event.is_delta() && !delta_budget || !next.event.is_delta() && !continuous_budget {
-            break;
+            break if next.event.is_delta() {
+                PathTermination::DeltaBudgetExhausted
+            } else {
+                PathTermination::NonDeltaBudgetExhausted
+            };
         }
-        if !state.apply_scatter(next.event, next.throughput)? {
-            break;
+        let continues = state.apply_scatter(next.event, next.throughput)?;
+        if let Some(debug) = debug.as_deref_mut() {
+            debug.scatter(next.event, material, wo, hit.normal);
+        }
+        if !continues {
+            break PathTermination::ZeroThroughput;
         }
         state.ray = next.ray;
+    };
+    if let Some(debug) = debug {
+        debug.termination = Some(termination);
     }
     if !state
         .radiance

@@ -71,13 +71,14 @@ impl Render {
         seed: u64,
     ) -> Result<CameraLightingImages, Box<dyn Error>> {
         let work = || {
-            render_camera_glass_components(
+            integrator::render_camera_glass_components_impl(
                 scene,
                 lighting,
                 self.settings.width,
                 self.settings.height,
                 spp,
                 seed,
+                self.settings.debug_path,
             )
             .map_err(|error| error.to_string())
         };
