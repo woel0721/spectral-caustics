@@ -7,6 +7,7 @@ use std::sync::LazyLock;
 
 pub const WAVELENGTH_MIN_NM: f64 = 380.0;
 pub const WAVELENGTH_MAX_NM: f64 = 780.0;
+/// 各等宽波长层等配额混合的边缘 PDF；分层估计的每项权重为 1/(PDF*spp)。
 pub const WAVELENGTH_PDF: f64 = 1.0 / (WAVELENGTH_MAX_NM - WAVELENGTH_MIN_NM);
 
 static ILLUMINANT: LazyLock<Vec<[f64; 8]>> = LazyLock::new(|| {

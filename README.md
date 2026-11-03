@@ -77,7 +77,7 @@ ACES 对曝光后的每个线性 RGB 通道应用 `x=max(x,0)`、`clamp(x*(2.51*
 
 ## Hero Wavelength 光谱相机
 
-`render.camera_mode="spectral"` 为每个相机样本均匀采样一个 380–780 nm 波长（PDF 为 `1/400 nm⁻¹`），整条路径保持该波长。独立的 `SpectralPathState` 保存标量 throughput 和每 nm 的辐亮度；结束后才乘 `cie_xyz(λ)/p(λ)`，再对 SPP 求均值。没有离散波长步宽 `Δλ`，也不把 RGB BSDF 的某个通道当作光谱。波长、像素抖动、玻璃前缀、首次环境 NEE、续追各有确定性的随机流；后续玻璃/连续 BSDF、环境与 RR 只使用续追流，增加深度不扰动前缀。Rayon 像素并行不改变像素内的累积顺序。
+`render.camera_mode="spectral"` 将每个像素的 380–780 nm 范围按 SPP 等宽分层，第 i 个样本在第 i 层内均匀采样一个波长，整条路径保持该波长。各层等配额混合的边缘 PDF 为 `1/400 nm⁻¹`，每项最终积分权重为 `400/SPP`。独立的 `SpectralPathState` 保存标量 throughput 和每 nm 的辐亮度；结束后才乘 `cie_xyz(λ)/p(λ)`，再对 SPP 求均值。不再额外乘光子积分的离散步宽 `Δλ`，也不把 RGB BSDF 的某个通道当作光谱。波长、像素抖动、玻璃前缀、首次环境 NEE、续追各有确定性的随机流；后续玻璃/连续 BSDF、环境与 RR 只使用续追流，增加深度不扰动前缀。Rayon 像素并行不改变像素内的累积顺序。
 
 - 支持 Dielectric、Lambertian、Mirror。Dielectric 在当前 λ 下进行 Fresnel/Snell 采样，radiance 透射权重为 `(eta_i/eta_t)²`，反射/透射的选择概率已补偿；连续两个相反界面的 IOR 平方因子相消。Lambertian/Mirror 使用已有 `rgb_reflectance()` 近似重建反射光谱。GGX 的 RGB eta/k 没有唯一物理光谱，配置和运行时入口会明确拒绝该材质。
 - 太阳采用连续归一化 D65（380–780 nm 的 Y 积分为 1）。RGB HDRI、渐变和背景使用独立的 PBRT **Illuminant** 七基谱，并相对白基谱校准为 D65；保留 HDR 强度，不使用反射率基谱或 [0,1] 上限冒充发光光谱。这是近似重建，任意 RGB 色度不保证精确还原；来源、校准方法、许可见 [颜色数据说明](assets/color/README.md)。

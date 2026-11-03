@@ -73,9 +73,10 @@ pub fn render_spectral_camera(
                 let mut wavelength =
                     StdRng::seed_from_u64(pixel_seed(seed, index, WAVELENGTH_STREAM));
                 let mut mean = Vector3::zeros();
-                for _ in 0..spp {
+                for i in 0..spp {
+                    let u = wavelength.random::<f64>();
                     let nm = WAVELENGTH_MIN_NM
-                        + (WAVELENGTH_MAX_NM - WAVELENGTH_MIN_NM) * wavelength.random::<f64>();
+                        + (WAVELENGTH_MAX_NM - WAVELENGTH_MIN_NM) * ((i as f64 + u) / spp as f64);
                     let offset = Vector2::new(jitter.random::<f64>(), jitter.random::<f64>());
                     let ray = scene
                         .camera
@@ -91,7 +92,8 @@ pub fn render_spectral_camera(
                         &mut scattering,
                     )
                     .map_err(|e| e.to_string())?;
-                    // Lλ 的单位为每 nm。仅在此乘 1/pλ=400；绝不再乘离散 Δλ。
+                    // 各等宽层恰取一个样本，每项的积分权重仍为 400/spp。
+                    // 等价于等配额混合 PDF=1/400 再求均值，不再乘光子积分的离散 Δλ。
                     mean += cie_xyz(nm).ok_or("CIE 查询失败")?
                         * (state.radiance / (WAVELENGTH_PDF * spp as f64));
                 }

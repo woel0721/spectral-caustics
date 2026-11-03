@@ -141,6 +141,58 @@ fn hero_wavelength_integrates_d65_white_and_converges_without_a_second_delta_lam
 }
 
 #[test]
+fn camera_visits_each_wavelength_stratum_once_including_one_and_odd_spp() {
+    use std::sync::{Arc, Mutex};
+    struct Capture(Arc<Mutex<Vec<f64>>>);
+    impl Material for Capture {
+        fn supports_spectral(&self) -> bool {
+            true
+        }
+        fn evaluate(
+            &self,
+            _wi: Vector3<f64>,
+            _wo: Vector3<f64>,
+            _normal: Vector3<f64>,
+            mode: EvaluateMode,
+        ) -> BsdfValue {
+            match mode {
+                EvaluateMode::Spectral { wavelength_nm } => {
+                    self.0.lock().unwrap().push(wavelength_nm);
+                    BsdfValue::Spectral(0.0)
+                }
+                EvaluateMode::Rgb => BsdfValue::Rgb(Vector3::zeros()),
+            }
+        }
+    }
+    for spp in [1, 2, 7, 64] {
+        let wavelengths = Arc::new(Mutex::new(Vec::new()));
+        let mut scene = empty();
+        let camera = spectral_caustics::config::cameraconfig::CameraConfig {
+            position: [0.0, 0.0, 2.0],
+            target: [0.0; 3],
+            up: [0.0, 1.0, 0.0],
+            ..Default::default()
+        };
+        scene.camera = spectral_caustics::camera::Camera::from_config(&camera).unwrap();
+        scene.add_with_material(
+            Box::new(Ground::new(0.0).unwrap()),
+            Box::new(Capture(wavelengths.clone())),
+        );
+        render_spectral_camera(&scene, 1, 1, spp, 42, IorMode::Dispersion).unwrap();
+        let wavelengths = wavelengths.lock().unwrap();
+        assert_eq!(wavelengths.len(), spp);
+        for (i, &nm) in wavelengths.iter().enumerate() {
+            let lower = 380.0 + 400.0 * i as f64 / spp as f64;
+            let upper = 380.0 + 400.0 * (i + 1) as f64 / spp as f64;
+            assert!(
+                nm >= lower && nm < upper,
+                "SPP={spp}, layer={i}, wavelength={nm}"
+            );
+        }
+    }
+}
+
+#[test]
 fn dielectric_spectral_sample_uses_current_wavelength_and_preserves_constant_ior_rgb_behavior() {
     let glass = Dielectric::with_dispersion(1.52, Some(Cauchy::default())).unwrap();
     let wo = Vector3::new(0.6, 0.0, 0.8);
