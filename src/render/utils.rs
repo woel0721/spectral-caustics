@@ -1,6 +1,18 @@
-//! XYZ/sRGB 颜色转换、法线可视化与双线性插值权重工具。
+//! XYZ/sRGB 颜色转换、ACES 色调映射与双线性插值权重工具。
 
 use nalgebra::{Matrix3, Vector3};
+
+/// 对曝光后的线性 RGB 通道应用简化 ACES 曲线，曲线求值后限制显示范围。
+pub fn aces_filmic(x: f64) -> f64 {
+    let x = x.max(0.0);
+    let result = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+    result.clamp(0.0, 1.0)
+}
+
+/// 逐通道处理线性 RGB；曝光由调用方提前应用，sRGB 编码在此之后完成。
+pub fn tone_map(rgb: Vector3<f64>) -> Vector3<f64> {
+    rgb.map(aces_filmic)
+}
 
 /// 将线性 sRGB 转为 D65 白点下的 CIE XYZ，参考白的 Y = 1。
 /// 只做颜色空间转换，不施加 sRGB 解码、曝光或裁剪，也不重建反射光谱。
@@ -89,7 +101,7 @@ pub fn linear_to_srgb_channel(linear: f64) -> Option<f64> {
 }
 
 /// 将三个 [0, 1] 内的线性通道编码并量化为 [R, G, B] 字节。
-/// 任一通道非有限或超出范围时返回 None；显示范围裁剪由 save_png_with_exposure 完成。
+/// 任一通道非有限或超出范围时返回 None；ACES 色调映射由 save_png_with_exposure 完成。
 pub fn linear_rgb_to_srgb8(linear_rgb: Vector3<f64>) -> Option<[u8; 3]> {
     let r = linear_to_srgb_channel(linear_rgb.x)?;
     let g = linear_to_srgb_channel(linear_rgb.y)?;
@@ -147,6 +159,28 @@ pub fn bilinear_weights(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aces_maps_reference_values_and_preserves_highlight_differences_above_one() {
+        for (input, expected) in [
+            (-1.0, 0.0),
+            (0.0, 0.0),
+            (0.18, 0.2668989203894968),
+            (0.5, 0.6163069544364508),
+            (1.0, 0.8037974683544302),
+            (2.0, 0.914855072463768),
+            (4.0, 0.9734171097148379),
+            (8.0, 1.0),
+        ] {
+            assert!((aces_filmic(input) - expected).abs() < 1e-12);
+        }
+        assert!(aces_filmic(1.0) < aces_filmic(2.0));
+        assert!(aces_filmic(2.0) < aces_filmic(4.0));
+        let rgb = Vector3::new(-0.2, 0.18, 2.0);
+        let mapped = tone_map(rgb);
+        assert!((mapped - Vector3::new(0.0, 0.2668989203894968, 0.914855072463768)).norm() < 1e-12);
+        assert_eq!(rgb, Vector3::new(-0.2, 0.18, 2.0));
+    }
 
     // 浮点矩阵计算有舍入误差，使用向量差的长度（欧几里得范数）衡量接近程度。
     // 例如 0.9999999999999993 与 1.0 的差远小于这里使用的 1e-12 容差。

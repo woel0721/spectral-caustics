@@ -1,4 +1,4 @@
-//! 图像输出链路：XYZ -> 线性 sRGB -> 显示范围裁剪 -> sRGB8 -> PNG。
+//! 图像输出链路：XYZ -> 线性 sRGB -> 曝光 -> 简化 ACES -> sRGB8 -> PNG。
 //! Render 使用配置中的曝光，颜色计算与存储使用 f64，导出时才进行 8 位量化。
 
 pub mod caustics;
@@ -11,12 +11,11 @@ pub use integrator::{
     CameraLightingImages, lambertian_radiance, render_camera_glass, render_camera_glass_components,
     sample_ground_irradiance,
 };
-
 pub use integrator::{SpectralPathState, render_spectral_camera, trace_spectral_camera_path};
 
 use self::{
     framebuffer::Framebuffer,
-    utils::{linear_rgb_to_srgb8, xyz_to_linear_srgb},
+    utils::{linear_rgb_to_srgb8, tone_map, xyz_to_linear_srgb},
 };
 use crate::{config::rendersetting::RenderSetting, optics::iormode::IorMode, scene::Scene};
 use image::{ImageFormat, Rgb, RgbImage};
@@ -171,7 +170,7 @@ impl Render {
     }
 }
 
-/// 按配置在线性空间施加曝光，再裁剪、sRGB 编码和保存 PNG。
+/// 按配置在线性空间施加曝光，再进行 ACES 色调映射、sRGB 编码和 PNG 保存。
 pub fn save_png_with_exposure(
     framebuffer: &Framebuffer,
     path: impl AsRef<Path>,
@@ -207,11 +206,14 @@ pub fn save_png_with_exposure(
                 return Err("曝光计算溢出".into());
             }
 
-            // 对三个通道分别裁剪，满足编码函数的输入要求。
-            let bounded_rgb = linear_rgb.map(|v| v.clamp(0.0, 1.0));
+            // 在编码前压缩 HDR 高光；保留曲线内的最终范围限制。
+            let mapped_rgb = tone_map(linear_rgb);
+            if !mapped_rgb.iter().all(|v| v.is_finite()) {
+                return Err("ACES 色调映射计算溢出".into());
+            }
 
             // 复用已有函数：编码并量化为 [u8; 3]。
-            let rgb8 = linear_rgb_to_srgb8(bounded_rgb).ok_or("sRGB 编码失败")?;
+            let rgb8 = linear_rgb_to_srgb8(mapped_rgb).ok_or("sRGB 编码失败")?;
 
             // Rgb(...) 将三个字节包装成 image 库的像素类型。
             image.put_pixel(x, y, Rgb(rgb8));
@@ -234,8 +236,8 @@ mod tests {
     use nalgebra::Vector3;
 
     #[test]
-    fn png_roundtrip_preserves_dimensions_positions_and_srgb_encoding() -> Result<(), Box<dyn Error>>
-    {
+    fn png_roundtrip_preserves_dimensions_positions_and_aces_then_srgb_encoding()
+    -> Result<(), Box<dyn Error>> {
         // 每次测试使用独立目录；路径中的时间戳只用于避免文件冲突，不影响颜色结果。
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -248,7 +250,7 @@ mod tests {
         let path = directory.join("nested/roundtrip.png");
 
         // 宽高不同，且每个位置的颜色不同，可以检查坐标顺序和图像翻转。
-        let mut framebuffer = Framebuffer::new(3, 2);
+        let mut framebuffer = Framebuffer::new(4, 2);
         let white_xyz = Vector3::new(0.3127 / 0.3290, 1.0, (1.0 - 0.3127 - 0.3290) / 0.3290);
         // 三原色 XYZ 来自上述 W3C 文档的 lin_sRGB_to_XYZ。
         let cases = [
@@ -256,24 +258,27 @@ mod tests {
                 0,
                 0,
                 Vector3::new(506752.0 / 1228815.0, 87098.0 / 409605.0, 7918.0 / 409605.0),
-                [255, 0, 0],
+                [232, 0, 0],
             ),
             (
                 1,
                 0,
                 Vector3::new(87881.0 / 245763.0, 175762.0 / 245763.0, 87881.0 / 737289.0),
-                [0, 255, 0],
+                [0, 232, 0],
             ),
             (
                 2,
                 0,
                 Vector3::new(12673.0 / 70218.0, 12673.0 / 175545.0, 1001167.0 / 1053270.0),
-                [0, 0, 255],
+                [0, 0, 232],
             ),
-            (0, 1, white_xyz, [255, 255, 255]),
-            // 线性亮度减半，经过 sRGB 编码后应量化为 188，而非直接乘 255 得到的 128。
-            (1, 1, white_xyz * 0.5, [188, 188, 188]),
+            (0, 1, white_xyz, [232, 232, 232]),
+            // 0.5 经 ACES 后约为 0.6163，再编码为 sRGB8 的 206。
+            (1, 1, white_xyz * 0.5, [206, 206, 206]),
             (2, 1, Vector3::zeros(), [0, 0, 0]),
+            // 大于 1 的高光经过曲线后仍有区别，不能预先裁剪为白色。
+            (3, 0, white_xyz * 2.0, [245, 245, 245]),
+            (3, 1, white_xyz * 4.0, [252, 252, 252]),
         ];
 
         for &(x, y, xyz, _) in &cases {
@@ -285,7 +290,7 @@ mod tests {
         // 先核对原始像素格式，避免格式转换掩盖错误的位深或通道数量。
         assert_eq!(decoded.color(), image::ColorType::Rgb8);
         let pixels = decoded.into_rgb8();
-        assert_eq!(pixels.dimensions(), (3, 2));
+        assert_eq!(pixels.dimensions(), (4, 2));
         for (x, y, _, expected) in cases {
             assert_eq!(
                 pixels.get_pixel(x as u32, y as u32).0,

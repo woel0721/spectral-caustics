@@ -949,12 +949,19 @@ fn runtime_rejects_unsupported_counts_and_invalid_prism_geometry() {
 }
 
 #[test]
-fn configured_exposure_scales_linear_color_before_srgb_encoding() {
+fn configured_exposure_scales_linear_color_before_aces_and_srgb_encoding() {
     let directory = TemporaryDirectory::new();
     let mut framebuffer = Framebuffer::new(1, 1);
     let white = Vector3::new(0.3127 / 0.3290, 1.0, (1.0 - 0.3127 - 0.3290) / 0.3290);
     assert!(framebuffer.set(0, 0, white * 0.5));
-    for (exposure, byte) in [(0.0, 0), (0.5, 137), (1.0, 188), (2.0, 255)] {
+    for (exposure, byte) in [
+        (0.0, 0),
+        (0.5, 165),
+        (1.0, 206),
+        (2.0, 232),
+        (4.0, 245),
+        (8.0, 252),
+    ] {
         let mut config = small_config();
         config.render.exposure = exposure;
         let path = directory.0.join("exposure.png");
