@@ -158,7 +158,7 @@ fn sphere_camera_double_transmission_records_outward_entry_and_environment_once(
 #[test]
 fn sphere_internal_tir_repeats_until_delta_budget_without_rng_or_escape() {
     let scene = glass_sphere();
-    // 冲量参数 b=0.9 > 1/1.5；封闭球内每次碰撞都超过临界角。
+    // 光线到球心的垂距 b=0.9 > 1/1.5；封闭球内每次碰撞都超过临界角。
     let ray = Ray::new(Vector3::new(0.0, 0.9, 0.0), Vector3::x()).unwrap();
     let (debug, state, draws) = trace(&scene, ray, &[], &[], &[]);
     assert_eq!(debug.events.specular_reflection, MAX_DELTA_EVENTS as u64);

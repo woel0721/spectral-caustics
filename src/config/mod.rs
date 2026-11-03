@@ -1,5 +1,5 @@
 //! JSON 配置的统一入口：序列化、文件读写和配置数值校验。
-//! 这里只返回配置数据，不创建 Scene、Render 或任何 Hittable 实例。
+//! 这里只返回配置数据，不创建 Scene、Render 或分配运行时物体集合。
 
 pub mod cameraconfig;
 pub mod materialconfig;

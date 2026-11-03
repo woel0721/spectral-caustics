@@ -4,7 +4,7 @@
 
 ## 已实现
 
-- [x] 米制 Z-up 几何、单三棱镜/有限地面配置、材质绑定与最近交点。
+- [x] 米制 Z-up 几何、单三棱镜/有限地面/球体配置、材质绑定与最近交点。
 - [x] 双界面 Snell 折射、Cauchy 色散、Fresnel 透射通量与地面双线性 XYZ 累积。
 - [x] 可追溯 CIE/D65 梯形积分、线性颜色与固定曝光 sRGB PNG。
 - [x] 通用 BsdfSample RGB 相机路径，支持 Lambertian、Dielectric、Mirror、GgxMetal；共享最多 32 次 Delta 事件预算。
@@ -14,6 +14,31 @@
 - [x] JSON 配置校验、固定种子、Rayon 独立流与线程一致性。
 - [x] Breaking Cleanup：统一当前算法，移除冻结算法、历史适配层和调试流程。
 - [x] Path Debug AOV 第一阶段：在真实相机路径上记录事件、内部 TIR、地面命中与独立终止原因，输出四张统计图和像素 JSON。
+- [x] Sphere RGB 材质测试：内外求交、固定朝外法线及独立可配置 Debug 物体 ID；不增加球体光源焦散。
+
+## Sphere 几何与材质对照验收（2026-11-03）
+
+基于 main `31e3e59`，起始工作区干净；修改前 320 项单元测试 + 46 项集成测试全部通过。
+
+- 新增 `geometry/sphere.rs`，由球心和正半径定义，选择大于几何 epsilon 的最近有限根，支持球外入口、球内出口、切线与表面起始。单位法线始终朝外；非法几何、非有限光线及计算溢出返回失败。
+- `ObjectConfig::Sphere { center_m, radius_m, material }` 经现有 `Scene::add_with_material` 构建，可与三棱镜共存。没有增加球体的光源光谱焦散，`prism_id` 只记录真正的三棱镜，球体在光源端仍为遮挡物。Dielectric、Mirror、GGX、光子算法和相机路径计光实现没有改动。
+- `scene.debug_object_id` 为 objects 的零基下标，省略/null 时沿用三棱镜目标；运行时 `Scene.debug_object_id` 与光源编号独立。AOV/JSON 的 `prism_object_id`、`prism_samples` 分别改为 `target_object_id`、`target_samples`，不保留别名；总 SPP 分母、首次命中过滤、曝光无关和 debug 构建限制保留。
+- 删除文件 0 个、非测试函数 0 个、测试 0 项；新增 11 项测试，1 项统计过滤测试改名，其他旧测试仅迁移目标字段。没有为了此次新增功能做算法去重或删除已有数值参考；保留 MIS/PDF、Fresnel/光谱颜色、RR、深度、三分量、三棱镜焦散及其线程确定性验证。
+- 新增测试验证球内外/朝外法线、非法输入和远处求交、三种入射偏移的解析双界面 Snell 出射坐标/方向及 eta² 抵消、真实相机双透射、球内连续 TIR 至 32 次 Delta 上限且不消费 RNG、Sphere/Ground/无目标的 AOV 切换，以及四种材质在 Balance/Power、深度 0/1/4、seed 42/123、Rayon 1/2/4/重复 1 线程下的原始 XYZ/统计一致性与三分量可加性。远处额外球体不影响现有三棱镜的光谱 Direct/Caustics 结果。
+
+实际执行 `cargo fmt`；`cargo fmt --check`、`cargo build --locked --all-targets`、`cargo test --locked`、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 全部通过。最终 325 项单元测试 + 52 项集成测试，共 377 项通过，无失败或 ignored。
+
+| 实跑 | 参数与结果 |
+| --- | --- |
+| `sphere_materials -- 256 512`（release） | 同一相机、Sphere、HDRI、太阳、曝光、seed、8 环境样本/Power/深度 4；玻璃 1.52、Mirror 0.95、GGX 0/0.4（相同 eta=0.2、k=3）四组各输出三张 RGB8 PNG 与配置。解码核对 512²、Caustics 全黑、Direct=Combined，确认配置仅材质/输出路径不同。 |
+| `sphere_materials -- 16 96 output/sphere_debug`（debug） | 四组各输出四张 AOV 和 JSON，核对目标 ID、目标子样本与终止计数；玻璃有透射，Mirror/GGX 0 有镜面事件，GGX 0.4 有 glossy 事件。 |
+| JSON 主程序（debug） | 使用生成的玻璃 Sphere 配置，96²/16 SPP，成功生成地面预览、相反 IOR 模式、三个相机分量及 AOV。 |
+| `camera_direct_caustics -- 8`（release） | 原有三棱镜场景 512²，三张相机 PNG 成功；检查 Combined 图。 |
+| `diffuse_indirect -- 8`（release） | 320×240，0/1/4 深度图成功输出。 |
+| `camera_parallel_benchmark -- 8 48`（release） | 光源与三个相机 XYZ 在 1/2/4/6 线程逐位一致。 |
+| `refract_ray`（release） | 原有三棱镜双界面出射方向和地面落点成功输出。 |
+
+输出位于忽略的 `output/sphere_materials/` 和 `output/sphere_debug/`，原始图/配置分别保留；`comparison.png` 为四组 Combined 的带标签拼图。检查了对照拼图和球体法线 AOV，曲面法线连续、目标外为黑。256 SPP 下仍有蒙特卡洛噪声。RGB 金属参数仅供演示；球体光源焦散、透明阴影、嵌套介质、色散相机和通用光子映射仍未实现。
 
 ## Breaking Cleanup 引用审计
 

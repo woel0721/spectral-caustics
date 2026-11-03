@@ -35,18 +35,20 @@ cargo run --release --locked -- /path/to/config.json
 
 开启时，`Render::render_camera_glass_components` 在同一批真实相机路径上记录事件，通过 `CameraLightingImages.path_debug` 返回统计缓冲；主程序和 `camera_direct_caustics` 示例将其保存到主图目录。代码调用方可使用 `if let Some(debug) = &images.path_debug { debug.save(&config.render.output_path)?; }`。原自由函数入口保留原签名并默认关闭调试；关闭时不分配调试缓冲。追踪循环仍只有一份，不增加随机数消费，不改变 BSDF、Fresnel、MIS、RR 或普通 Direct/Caustics/Combined。
 
-每个像素汇总全部 SPP。只将**主相机光线首次命中 `scene.prism_id`** 的子样本纳入 AOV，其他子样本贡献零；分母始终是像素总 SPP，因此边缘保留覆盖率。不是根据 SPP 中第一条随机路径决定整个像素是否显示。没有棱镜编号时 AOV 全黑。
+每个像素汇总全部 SPP。`scene.debug_object_id` 选择调试目标，编号为 `scene.objects` 的零基下标，可选择 Sphere、Prism 或 Ground；省略/null 时自动选择已有三棱镜，没有三棱镜则没有目标。显式越界编号返回错误。运行时 `Scene.debug_object_id` 独立于仅供光源焦散使用的 `prism_id`，手动 `add_with_material` 后也可设置它。
+
+只将**主相机光线首次命中调试目标**的子样本纳入 AOV，其他子样本贡献零；分母始终是像素总 SPP，因此边缘保留覆盖率。不是根据 SPP 中第一条随机路径决定整个像素是否显示。没有目标时 AOV 全黑。
 
 | 图像 | 读取方式 |
 | --- | --- |
 | `path_target.png` | R=曾到达地面的路径比例，G=最终几何逃逸到已配置环境的比例，B=曾发生玻璃内部全反射的路径比例。三个标志独立，可以重叠；黄表示地面命中和环境逃逸都较多，并不表示路径终止于地面。 |
 | `reflection_count.png` | 平均 `SpecularReflection + GlossyReflection` 次数的灰度，不含 DiffuseReflection，也不含局部 NEE 的 BSDF 方向样本。 |
 | `transmission_count.png` | 平均 `SpecularTransmission` 次数的灰度。 |
-| `first_hit_normal.png` | 世界空间首次几何法线，逐子样本用 `(n+1)/2` 编码到 RGB 后平均，非棱镜子样本为黑；不翻转法线，也不将平均法线重新归一化。满覆盖处 R/G/B 对应 X/Y/Z，-1→0、0→128、+1→255。 |
+| `first_hit_normal.png` | 世界空间首次几何法线，逐子样本用 `(n+1)/2` 编码到 RGB 后平均，非目标子样本为黑；不翻转法线，也不将平均法线重新归一化。满覆盖处 R/G/B 对应 X/Y/Z，-1→0、0→128、+1→255。 |
 
 统计 PNG 直接量化到 RGB8，**不应用曝光、XYZ 转换或 sRGB 曲线**。比例/法线通道以 `round(255*v)` 编码。两张次数图使用固定标尺 `v=clamp(ln(1+平均次数)/ln(33),0,1)`：平均 0/1/2/4/8/16/32 次约为灰度 0/51/80/117/160/207/255，32 次以上饱和。此映射只增强统计可读性，不是物理亮度；准确次数保存在 JSON。
 
-同时输出 `path_debug.json`：`pixels[y*width+x]` 保存总 `samples`、所有主光线的首次命中物体直方图 `first_hit_objects`，以及首次命中棱镜的 `prism_samples`、法线和、四类 `events` 总数、地面/环境/TIR 路径数、`terminations` 终止原因直方图。事件总数除以 `samples` 得到图像使用的平均值，除以 `prism_samples` 可查看仅棱镜路径的条件平均。终止计数之和等于 `prism_samples`。
+同时输出 `path_debug.json`：顶层 `target_object_id` 保存实际目标，`pixels[y*width+x]` 保存总 `samples`、所有主光线的首次命中物体直方图 `first_hit_objects`，以及首次命中目标的 `target_samples`、法线和、四类 `events` 总数、地面/环境/TIR 路径数、`terminations` 终止原因直方图。事件总数除以 `samples` 得到图像使用的平均值，除以 `target_samples` 可查看仅目标路径的条件平均。终止计数之和等于 `target_samples`。原 `prism_object_id`/`prism_samples` 字段已改名，不保留棱镜语义的别名。
 
 终止原因区分 `environment_escape`、`background_escape`、`missing_material`、`no_scattering_components`、`backface`、`sample_rejected`、`russian_roulette`、连续/Delta/全部预算耗尽和 `zero_throughput`。`sample_rejected` 沿用现有 `sample_scatter_ray` 的空结果，包含 GGX 无效 NDF 反射、空采样、连续样本的零吞吐量等，不重采样。数值/配置错误仍返回原错误，不输出不完整统计。
 
@@ -68,6 +70,11 @@ cargo run --release --locked --example camera_parallel_benchmark -- 16 64
 
 # 逐界面输出单条光线的方向和落点，便于核对 Snell 几何
 cargo run --release --locked --example refract_ray
+
+# Sphere 四种材质，同一相机/HDRI/太阳/曝光/seed；省略参数为 256 SPP、512²
+cargo run --release --locked --example sphere_materials -- 256 512
+# 小尺寸 debug 构建另输出每种材质的四张 AOV 与原始统计
+cargo run --locked --example sphere_materials -- 16 128 output/sphere_debug
 ```
 
 `diffuse_indirect` 输出 `output/diffuse_0.png`、`diffuse_1.png`、`diffuse_4.png`。线程示例比较当前实现的原始 XYZ 缓冲，不与历史版本或历史 hash 比较；计时不含 HDR 加载、线程池创建和 PNG 编码。
@@ -93,11 +100,21 @@ cargo run --release --locked --example refract_ray
 - `render.mode`：`constant` 或 `dispersion`；波长范围在 380–780 nm 内，默认 10 nm 步长，包含两端点的梯形积分共 41 节点，最后一段允许短于步长。
 - `render.thread_count`：null 使用 Rayon 默认线程数，正整数创建专用池；`max_spectral_blocks` 控制光源采样块，独立于线程数。
 - `scene.camera`：位置、目标、up 和垂直 FOV；世界 +Z 向上，位置以米计。
-- `scene.objects`：配置流程支持一个三棱镜和一个地面；地面可用 `ground_margin_m` 在 receiver 四边外扩，默认 0.5 m。代码可构建额外三角形/漫反射物体。
+- `scene.objects`：配置流程支持至多一个三棱镜、一个接收地面及多个球体；地面可用 `ground_margin_m` 在 receiver 四边外扩，默认 0.5 m。代码可构建额外三角形/漫反射物体。
 - `scene.light`：平行光方向、水平矩形发射窗口、高度和总通量；`receiver` 只限制光子图范围，不限制解析太阳照明。相机超出有限地面的边缘看到背景。
 - `scene.ground_checkerboard`：世界 x/y 的棋盘格，按 floor 处理负坐标；比例在每个地面顶点各应用一次，不改变光子图。缺省/null 关闭。
 
 材质 JSON 保留带 `type` 的 `MaterialConfig` enum：`lambertian { albedo }`、`dielectric { ior }`、`mirror { reflectance }`、`ggx_metal { eta, k, roughness }`；RGB 反射率必须有限且位于 [0,1]。运行时仍保存 `Box<dyn Material>`。
+
+Sphere 示例见 [configs/sphere.json](configs/sphere.json)，球心/半径单位为米：
+
+```json
+{"type":"sphere","center_m":[0.0,0.0,0.83],"radius_m":0.8,"material":{"type":"dielectric","ior":1.52}}
+```
+
+`Sphere::new(center, radius)` 实现 `Hittable`，返回最近的有限正向根；入口小于自相交 epsilon 时继续检查出口。球内/球外均可求交，法线始终为朝外单位方向。非法球心、非正半径、半径平方或范围溢出/下溢返回错误。场景通过现有 `add_with_material` 绑定材质；省略 Sphere 材质时与 Prism 一样使用 1.52 的 Dielectric。
+
+Sphere 当前只用于 RGB 相机路径：保留现有玻璃 Fresnel/双界面折射、Mirror 与 GGX，不生成球体的光源端光谱焦散，也不会填入 `prism_id`。光源端将球体作为遮挡物；无三棱镜场景的 Caustics 为零。`sphere_materials` 为玻璃、Mirror、GGX 0、GGX 0.4 分别保存配置及 Direct/Caustics/Combined；仅更换球体材质，其余条件完全一致。金属 eta/k 为演示 RGB 参数，不代表实测数据。
 
 `MaterialSample`/`GlassSample`/`GlassEvent` 与 `is_lambertian()` 已删除，`sample()` 返回 `BsdfSample { wi, weight, pdf, event }`。`pdf: Some(p)` 为连续立体角密度；Delta 为 `None`，其离散概率和透射 eta² 已包含在 RGB weight 中。`ScatterType` 区分 DiffuseReflection、GlossyReflection、SpecularReflection、SpecularTransmission。`has_non_delta()`/`has_delta()` 声明可用分量，混合材质可同时声明两者；路径依实际采样事件更新状态，预算耗尽时不重选分量。局部 NEE 的 BSDF 配额若抽到 Delta，则保留为零贡献，不重新分配配额。
 
