@@ -132,7 +132,7 @@ GGX Metal 使用相对于空气的三个 RGB 复折射率 `eta + i*k`：eta 有�
 
 ### 仅倒三条长棱的三棱镜
 
-[configs/beveled_prism.json](configs/beveled_prism.json) 保留默认场景的相机、HDRI 和太阳，将原三棱镜替换为 `beveled_prism`，默认截取长度 0.035 m，并显式设置 `scene.debug_object_id=0`。用现有主程序运行即可；debug 构建另输出路径 AOV：
+[configs/beveled_prism.json](configs/beveled_prism.json) 保留默认场景的相机、HDRI 和太阳，将原三棱镜替换为 `beveled_prism`，每处长棱使用 8 段相切圆弧，默认沿边切点距离 0.035 m，并显式设置 `scene.debug_object_id=0`。用现有主程序运行即可；debug 构建另输出路径 AOV：
 
 ```sh
 cargo run --release --locked -- configs/beveled_prism.json
@@ -152,23 +152,27 @@ cargo run --locked -- configs/beveled_prism.json
 
 构造函数为 `BeveledPrism::new([Vector2<f64>;3], y_min, y_max, bevel_size) -> Option<Self>`；Vector2 表示 `(x,z)`，所有长度以米计。支持 0.02–0.05 m，也接受其他满足几何条件的正长度。每条三角形原边必须严格长于 `2*bevel_size`；零倒角、截取段重合、退化三角形、非有限参数、`y_min>=y_max`、溢出或低于坐标精度的截取返回失败。要保留尖棱时使用原 `Prism`。
 
-输入截面先统一为逆时针 `A→B→C`（顺时针输入会交换 B/C，A 保留）。设 `u(P,Q)` 为从 P 到 Q 的单位向量、`b=bevel_size`，六边形顶点按如下顺序排列：
+输入截面先统一为逆时针 `A→B→C`（顺时针输入会交换 B/C，A 保留）。每个角点 P 的两条邻边单位方向为 u、v，内角为 θ，令 `b=bevel_size`：
 
 ```text
-Q0 = A + b*u(A,B)    Q1 = B + b*u(B,A)
-Q2 = B + b*u(B,C)    Q3 = C + b*u(C,B)
-Q4 = C + b*u(C,A)    Q5 = A + b*u(A,C)
+起点 T0 = P + b*u（朝前一个角）
+终点 T8 = P + b*v（朝后一个角）
+圆心 O  = P + b*(u+v)/(1+u·v)
+半径 r  = b*tan(θ/2)
+圆弧转角 α = π-θ，每段转角 α/8
 ```
 
-`Q0→Q1→…→Q5` 保持逆时针；Q1–Q2、Q3–Q4、Q5–Q0 是三个平面倒角。前截面顶点 `Vi=(Qi.x,y_min,Qi.z)`，后截面 `V(i+6)=(Qi.x,y_max,Qi.z)`，每点只计算一次并由索引共享：
+圆弧与两条原边相切；从 T0 开始沿逆时针方向等角度采样至 T8，每角保存 9 点。两个切点直接沿原边计算，避免三角函数舍入改变拼接端点。`bevel_size_m` 继续表示沿边距离，因此不同内角的圆弧半径可以不同；它不是统一圆角半径。
 
-- 六个侧矩形：`[i,i+6,j+6]`、`[i,j+6,j]`，`i=0…5`、`j=(i+1)%6`，共 12 片。
-- 前端面：`[0,k,k+1]`，`k=1…4`，法线 −y；后端面：`[6,6+k+1,6+k]`，法线 +y，各 4 片。
-- 总计 12 顶点、30 条 mesh 边、20 个三角形；每条 mesh 边由两个方向相反的三角形共享，无 T 接点。`vertices()`、`triangle_indices()` 提供只读 indexed mesh。
+截面顺序为 `A0…A8 → B0…B8 → C0…C8`：24 条圆角分段边，加上 A8–B0、B8–C0、C8–A0 三条原侧面直边，共 27 点。前后截面复用同一组 x/z 坐标，设 N=27：
 
-构建时逐片验证三角形有效性。此物体为凸体，求交使用六个侧面和两个端面的外向平面做区间裁剪，避免共享三角形边的重心坐标舍入缝；最近入口/出口保留朝外法线。这个实现只属于 `BeveledPrism`，原 Prism、Triangle、Dielectric、Mirror 和 GGX 均不改动。
+- 侧面：`[i,i+N,j+N]`、`[i,j+N,j]`，`j=(i+1)%N`，27 个矩形共 54 片。
+- 前端面：`[0,k,k+1]`，`k=1…25`，法线 −y；后端面：`[N,N+k+1,N+k]`，法线 +y，各 25 片。
+- 总计 **54 顶点、156 条 mesh 边、104 个三角形**；每条边由两个方向相反的三角形共享，无 T 接点。`vertices()` / `triangle_indices()` 的固定数组长度随之从 12/20 改为 54/104。
 
-Scene 沿用 `add_with_material` 绑定，支持原有玻璃/Mirror/GGX 及 `debug_path`。它不会被登记为 `prism_id`，没有倒角三棱镜的光源端光谱焦散；光源端仍将其作为遮挡物。三个倒角面为平面，沿 y 的两端边仍为锐边，本阶段没有圆弧倒角或平滑法线。
+构造函数和 JSON 字段保持原样，`ROUND_SEGMENTS=8` 固定控制每角段数，现有 `beveled_prism` 配置直接使用圆角，不保留旧单平面模式。构建时逐片验证三角形有效性，求交使用 27 个侧面及两个端面的外向半空间裁剪；共享边不会依赖三角形重心判断，最近入口/出口的法线始终朝外。
+
+Scene 沿用 `add_with_material` 绑定，支持原有玻璃/Mirror/GGX 及 `debug_path`，不登记为 `prism_id`。只用于 RGB 相机，不增加圆角三棱镜的光源端光谱焦散；光源端仍将其作为遮挡物。前后端面的边保持锐利。圆角由 8 个平面段近似，使用各段真实几何法线，没有另加平滑法线；原 Prism、Triangle 和材质实现均未改动。
 
 ## API 与模块
 
