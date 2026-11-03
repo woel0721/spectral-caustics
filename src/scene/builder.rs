@@ -4,7 +4,9 @@ use super::{Checkerboard, Environment, GroundReceiver, ParallelLight, Scene};
 use crate::{
     camera::Camera,
     config::sceneconfig::{ObjectConfig, SceneConfig},
-    geometry::{ground::Ground, prism::Prism, ray::Ray, sphere::Sphere},
+    geometry::{
+        beveled_prism::BeveledPrism, ground::Ground, prism::Prism, ray::Ray, sphere::Sphere,
+    },
     material,
 };
 use nalgebra::{Vector2, Vector3};
@@ -61,7 +63,7 @@ impl Scene {
         })
     }
 
-    /// 支持一个地面、至多一个三棱镜及多个 RGB 相机测试球体。
+    /// 支持一个地面、至多一个光谱三棱镜，以及 RGB 测试用球体/倒角三棱镜。
     pub fn from_config(config: &SceneConfig) -> Result<Self, Box<dyn Error>> {
         config.validate()?;
         let mut scene = Self::empty_from_config(config)?;
@@ -110,6 +112,22 @@ impl Scene {
                     let sphere = Sphere::new(Vector3::from(*center_m), *radius_m)
                         .ok_or("球体的球心或半径无效")?;
                     scene.add_with_material(Box::new(sphere), material::from_config(material)?);
+                }
+                ObjectConfig::BeveledPrism {
+                    cross_section_m,
+                    y_min_m,
+                    y_max_m,
+                    bevel_size_m,
+                    material,
+                } => {
+                    let prism = BeveledPrism::new(
+                        cross_section_m.map(Vector2::from),
+                        *y_min_m,
+                        *y_max_m,
+                        *bevel_size_m,
+                    )
+                    .ok_or("倒角三棱镜截面、y 范围或倒角长度无效")?;
+                    scene.add_with_material(Box::new(prism), material::from_config(material)?);
                 }
             }
         }

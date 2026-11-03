@@ -150,6 +150,17 @@ pub enum ObjectConfig {
         #[serde(default = "MaterialConfig::default_glass")]
         material: MaterialConfig,
     },
+    /// 仅对三条 y 方向长棱做平面倒角；不进入现有三棱镜光谱焦散算法。
+    BeveledPrism {
+        /// 三角形的 (x,z) 截面，支持顺/逆时针输入。
+        cross_section_m: [[f64; 2]; 3],
+        y_min_m: f64,
+        y_max_m: f64,
+        /// 沿每条相邻边截取的长度；非圆角半径。
+        bevel_size_m: f64,
+        #[serde(default = "MaterialConfig::default_glass")]
+        material: MaterialConfig,
+    },
     /// 仅用于 RGB 相机路径，不参与三棱镜的光源端光谱焦散算法。
     Sphere {
         center_m: [f64; 3],
@@ -320,6 +331,29 @@ impl SceneConfig {
                     {
                         return Err(format!(
                             "scene.objects[{index}] 球心必须有限，半径必须有限且为正，平方及范围不能溢出或下溢"
+                        ));
+                    }
+                }
+                ObjectConfig::BeveledPrism {
+                    cross_section_m,
+                    y_min_m,
+                    y_max_m,
+                    bevel_size_m,
+                    material,
+                } => {
+                    material
+                        .validate()
+                        .map_err(|message| format!("scene.objects[{index}].{message}"))?;
+                    if crate::geometry::beveled_prism::BeveledPrism::new(
+                        cross_section_m.map(Into::into),
+                        *y_min_m,
+                        *y_max_m,
+                        *bevel_size_m,
+                    )
+                    .is_none()
+                    {
+                        return Err(format!(
+                            "scene.objects[{index}] 倒角三棱镜无效：需要有限非退化截面、y_min_m < y_max_m、正 bevel_size_m 且小于每条边长的一半"
                         ));
                     }
                 }

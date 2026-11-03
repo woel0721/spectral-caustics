@@ -1,5 +1,6 @@
 //! 光线、交点、统一求交接口与几何物体。
 
+pub mod beveled_prism;
 pub mod ground;
 pub mod hit;
 pub mod object;

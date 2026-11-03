@@ -1,0 +1,133 @@
+{
+  "render": {
+    "width": 512,
+    "height": 512,
+    "samples_per_pixel_axis": 4,
+    "camera_spp": 256,
+    "mode": "dispersion",
+    "wavelength_min_nm": 380.0,
+    "wavelength_max_nm": 780.0,
+    "wavelength_step_nm": 10.0,
+    "exposure": 1.0,
+    "seed": 42,
+    "thread_count": null,
+    "max_spectral_blocks": 16,
+    "output_path": "output/beveled_prism/lighting.png",
+    "debug_path": true
+  },
+  "scene": {
+    "camera": {
+      "position": [
+        2.5,
+        -4.5,
+        2.6
+      ],
+      "target": [
+        0.0,
+        0.0,
+        0.4
+      ],
+      "up": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "fov_y_degrees": 35.0
+    },
+    "background_linear_rgb": [
+      0.08,
+      0.1,
+      0.14
+    ],
+    "environment": {
+      "map_path": "assets/HDRI/herkulessaulen_4k.hdr",
+      "rotation_degrees": 0.0,
+      "intensity": 1.0,
+      "horizon_linear_rgb": [
+        0.16,
+        0.2,
+        0.28
+      ],
+      "zenith_linear_rgb": [
+        0.04,
+        0.08,
+        0.18
+      ]
+    },
+    "environment_samples": 8,
+    "environment_mis_heuristic": "power",
+    "max_diffuse_bounces": 4,
+    "ground_checkerboard": {
+      "cell_size_m": 0.5,
+      "even_scale": 1.0,
+      "odd_scale": 0.25
+    },
+    "ground_margin_m": 0.5,
+    "objects": [
+      {
+        "type": "beveled_prism",
+        "cross_section_m": [
+          [
+            -0.5,
+            0.03
+          ],
+          [
+            0.5,
+            0.03
+          ],
+          [
+            0.0,
+            0.83
+          ]
+        ],
+        "y_min_m": -1.0,
+        "y_max_m": 1.0,
+        "bevel_size_m": 0.035,
+        "material": {
+          "type": "dielectric",
+          "ior": 1.52
+        }
+      },
+      {
+        "type": "ground",
+        "height_m": 0.0,
+        "material": {
+          "type": "lambertian",
+          "albedo": [
+            0.8,
+            0.8,
+            0.8
+          ]
+        }
+      }
+    ],
+    "light": {
+      "height_m": 3.0,
+      "direction": [
+        0.45,
+        0.0,
+        -1.0
+      ],
+      "aperture_min_m": [
+        -2.0,
+        -2.0
+      ],
+      "aperture_max_m": [
+        2.0,
+        2.0
+      ],
+      "total_flux": 8.0
+    },
+    "receiver": {
+      "min_m": [
+        -2.0,
+        -2.0
+      ],
+      "max_m": [
+        2.0,
+        2.0
+      ]
+    },
+    "debug_object_id": 0
+  }
+}
