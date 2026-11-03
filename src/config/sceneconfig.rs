@@ -39,6 +39,9 @@ pub struct SceneConfig {
     /// 地面矩形相对 receiver 各边向外扩展的米数，须为正。
     #[serde(default = "default_ground_margin_m")]
     pub ground_margin_m: f64,
+    /// Debug AOV 的首次命中目标（objects 的零基下标）；省略/null 自动选择三棱镜。
+    #[serde(default)]
+    pub debug_object_id: Option<usize>,
     pub objects: Vec<ObjectConfig>,
     pub light: ParallelLightConfig,
     pub receiver: GroundReceiverConfig,
@@ -147,6 +150,13 @@ pub enum ObjectConfig {
         #[serde(default = "MaterialConfig::default_glass")]
         material: MaterialConfig,
     },
+    /// 仅用于 RGB 相机路径，不参与三棱镜的光源端光谱焦散算法。
+    Sphere {
+        center_m: [f64; 3],
+        radius_m: f64,
+        #[serde(default = "MaterialConfig::default_glass")]
+        material: MaterialConfig,
+    },
     Ground {
         height_m: f64,
         #[serde(default)]
@@ -187,6 +197,7 @@ impl Default for SceneConfig {
             max_diffuse_bounces: 0,
             ground_checkerboard: Some(CheckerboardConfig::default()),
             ground_margin_m: default_ground_margin_m(),
+            debug_object_id: None,
             objects: vec![
                 ObjectConfig::Prism {
                     vertices_m: [
@@ -297,7 +308,28 @@ impl SceneConfig {
                         return Err("scene 地面高度必须有限".into());
                     }
                 }
+                ObjectConfig::Sphere {
+                    center_m,
+                    radius_m,
+                    material,
+                } => {
+                    material
+                        .validate()
+                        .map_err(|message| format!("scene.objects[{index}].{message}"))?;
+                    if crate::geometry::sphere::Sphere::new((*center_m).into(), *radius_m).is_none()
+                    {
+                        return Err(format!(
+                            "scene.objects[{index}] 球心必须有限，半径必须有限且为正，平方及范围不能溢出或下溢"
+                        ));
+                    }
+                }
             }
+        }
+        if self
+            .debug_object_id
+            .is_some_and(|id| id >= self.objects.len())
+        {
+            return Err("scene.debug_object_id 必须是 objects 中有效的零基下标".into());
         }
         let direction_norm_squared: f64 = self.light.direction.iter().map(|v| v * v).sum();
         if !self.light.height_m.is_finite()

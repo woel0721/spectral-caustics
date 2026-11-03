@@ -4,7 +4,7 @@ use super::{Checkerboard, Environment, GroundReceiver, ParallelLight, Scene};
 use crate::{
     camera::Camera,
     config::sceneconfig::{ObjectConfig, SceneConfig},
-    geometry::{ground::Ground, prism::Prism, ray::Ray},
+    geometry::{ground::Ground, prism::Prism, ray::Ray, sphere::Sphere},
     material,
 };
 use nalgebra::{Vector2, Vector3};
@@ -57,10 +57,11 @@ impl Scene {
             },
             prism_id: None,
             ground_id: None,
+            debug_object_id: None,
         })
     }
 
-    /// 从纯数据描述建立真实物体和数学对象；当前支持一个地面、至多一个三棱镜。
+    /// 支持一个地面、至多一个三棱镜及多个 RGB 相机测试球体。
     pub fn from_config(config: &SceneConfig) -> Result<Self, Box<dyn Error>> {
         config.validate()?;
         let mut scene = Self::empty_from_config(config)?;
@@ -101,11 +102,21 @@ impl Scene {
                         ),
                     );
                 }
+                ObjectConfig::Sphere {
+                    center_m,
+                    radius_m,
+                    material,
+                } => {
+                    let sphere = Sphere::new(Vector3::from(*center_m), *radius_m)
+                        .ok_or("球体的球心或半径无效")?;
+                    scene.add_with_material(Box::new(sphere), material::from_config(material)?);
+                }
             }
         }
         if scene.ground_id.is_none() {
             return Err("场景必须包含一个 ground 接收地面".into());
         }
+        scene.debug_object_id = config.debug_object_id.or(scene.prism_id);
         Ok(scene)
     }
 }

@@ -183,13 +183,13 @@ fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_en
                         stats
                             .pixels
                             .iter()
-                            .all(|p| p.terminations.values().sum::<u64>() == p.prism_samples)
+                            .all(|p| p.terminations.values().sum::<u64>() == p.target_samples)
                     );
                     assert!(
                         stats
                             .pixels
                             .iter()
-                            .any(|p| p.prism_samples > 0 && p.prism_samples < p.samples)
+                            .any(|p| p.target_samples > 0 && p.target_samples < p.samples)
                     );
                     assert!(stats.pixels.iter().any(|p| {
                         p.terminations

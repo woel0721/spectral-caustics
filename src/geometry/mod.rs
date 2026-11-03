@@ -5,4 +5,5 @@ pub mod hit;
 pub mod object;
 pub mod prism;
 pub mod ray;
+pub mod sphere;
 pub mod triangle;

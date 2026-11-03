@@ -39,6 +39,8 @@ pub struct Scene {
     /// 配置构建时记录的物体编号，手动 add 的场景也可显式传编号给追踪入口。
     pub prism_id: Option<usize>,
     pub ground_id: Option<usize>,
+    /// Debug AOV 的首次命中目标，独立于光源端使用的 prism_id。
+    pub debug_object_id: Option<usize>,
 }
 
 #[cfg(test)]

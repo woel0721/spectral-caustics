@@ -5,7 +5,7 @@ use super::super::{
 };
 use super::*;
 use crate::{
-    geometry::{ground::Ground, prism::Prism, ray::Ray},
+    geometry::{ground::Ground, prism::Prism, ray::Ray, sphere::Sphere},
     material::{
         dielectric::Dielectric, ggx_metal::GgxMetal, lambertian::Lambertian, mirror::Mirror,
     },
@@ -17,7 +17,8 @@ fn surface(material: Box<dyn Material>) -> Scene {
     scene.environment = None;
     scene.ground_checkerboard = None;
     scene.max_diffuse_bounces = 1;
-    scene.prism_id = Some(scene.add_with_material(Box::new(Ground::new(0.0).unwrap()), material));
+    scene.debug_object_id =
+        Some(scene.add_with_material(Box::new(Ground::new(0.0).unwrap()), material));
     scene
 }
 
@@ -63,7 +64,7 @@ fn mirror_reflection_records_first_geometry_and_has_no_tir_or_extra_rng() {
     let mut scene = surface(Box::new(Mirror::new(Vector3::repeat(0.95)).unwrap()));
     scene.environment = Scene::new().environment;
     let (debug, state, draws) = trace(&scene, downward(), &[], &[], &[]);
-    assert_eq!(debug.first_hit_object_id, scene.prism_id);
+    assert_eq!(debug.first_hit_object_id, scene.debug_object_id);
     assert_eq!(debug.first_hit_normal, Some([0.0, 0.0, 1.0]));
     assert_eq!(debug.events.specular_reflection, 1);
     assert_eq!(debug.events.specular_transmission, 0);
@@ -108,6 +109,79 @@ fn dielectric_internal_supercritical_ray_records_real_tir_without_rng() {
     assert_eq!(debug.termination, Some(PathTermination::BackgroundEscape));
 }
 
+fn glass_sphere() -> Scene {
+    let mut scene = Scene::new();
+    scene.ground_checkerboard = None;
+    scene.debug_object_id = Some(scene.add_with_material(
+        Box::new(Sphere::new(Vector3::zeros(), 1.0).unwrap()),
+        Box::new(Dielectric::new(1.5).unwrap()),
+    ));
+    assert_eq!(scene.prism_id, None);
+    scene
+}
+
+#[test]
+fn sphere_camera_double_transmission_records_outward_entry_and_environment_once() {
+    let scene = glass_sphere();
+    let ray = Ray::new(Vector3::new(-3.0, 0.6, 0.0), Vector3::x()).unwrap();
+    let (debug, state, draws) = trace(&scene, ray, &[0.99, 0.99], &[], &[]);
+    let angle = 2.0 * ((0.6_f64 / 1.5).asin() - 0.6_f64.asin());
+    let expected_direction = Vector3::new(angle.cos(), angle.sin(), 0.0);
+    // 真实路径使用现有法线偏移，曲面上的第二交点因此存在 O(epsilon) 偏差。
+    assert!((state.ray.direction - expected_direction).norm() < 1e-5);
+    assert!((state.throughput - Vector3::repeat(1.0)).norm() < 1e-12);
+    let background = scene.background_radiance(state.ray.direction).unwrap();
+    assert!((state.radiance.direct - background).norm() < 1e-12);
+    assert_eq!(state.radiance.caustics, Vector3::zeros());
+    assert_eq!(debug.events.specular_transmission, 2);
+    assert_eq!(debug.events.specular_reflection, 0);
+    assert!(!debug.total_internal_reflection);
+    assert_eq!(debug.termination, Some(PathTermination::EnvironmentEscape));
+    assert_eq!(draws, [2, 0, 0]);
+    let normal = Vector3::from(debug.first_hit_normal.unwrap());
+    assert!((normal - Vector3::new(-0.8, 0.6, 0.0)).norm() < 1e-12);
+    let mut pixel = PathDebugPixel::default();
+    pixel.record(&debug, scene.debug_object_id).unwrap();
+    assert_eq!(pixel.target_samples, 1);
+    assert_eq!(pixel.escaped_environment, 1);
+    for (actual, expected) in aov_pixel(&pixel, 3).into_iter().zip([26, 204, 128]) {
+        // -0.8 对应 25.5 的量化边界，允许浮点舍入造成一个码值差。
+        assert!(actual.abs_diff(expected) <= 1);
+    }
+    // 同一真实路径对其他物体过滤时，不得冒用 prism_id 或纳入事件。
+    let mut masked = PathDebugPixel::default();
+    masked.record(&debug, Some(1)).unwrap();
+    assert_eq!(masked.target_samples, 0);
+    assert_eq!(aov_pixel(&masked, 0), [0; 3]);
+}
+
+#[test]
+fn sphere_internal_tir_repeats_until_delta_budget_without_rng_or_escape() {
+    let scene = glass_sphere();
+    // 冲量参数 b=0.9 > 1/1.5；封闭球内每次碰撞都超过临界角。
+    let ray = Ray::new(Vector3::new(0.0, 0.9, 0.0), Vector3::x()).unwrap();
+    let (debug, state, draws) = trace(&scene, ray, &[], &[], &[]);
+    assert_eq!(debug.events.specular_reflection, MAX_DELTA_EVENTS as u64);
+    assert_eq!(debug.events.specular_transmission, 0);
+    assert!(debug.total_internal_reflection);
+    assert!(!debug.escaped_environment);
+    assert_eq!(
+        debug.termination,
+        Some(PathTermination::DeltaBudgetExhausted)
+    );
+    assert_eq!(draws, [0; 3]);
+    assert_eq!(state.throughput, Vector3::repeat(1.0));
+    assert_eq!(state.radiance.direct, Vector3::zeros());
+    assert!(state.ray.origin.norm() < 1.0);
+    let mut pixel = PathDebugPixel::default();
+    pixel.record(&debug, scene.debug_object_id).unwrap();
+    assert_eq!(aov_pixel(&pixel, 0), [0, 0, 255]);
+    assert_eq!(
+        pixel.terminations.values().sum::<u64>(),
+        pixel.target_samples
+    );
+}
+
 #[test]
 fn ggx_records_glossy_or_delta_and_preserves_rejected_ndf_samples() {
     for (roughness, words, event, rejected) in [
@@ -143,7 +217,7 @@ fn ggx_records_glossy_or_delta_and_preserves_rejected_ndf_samples() {
 #[test]
 fn ground_visit_and_geometric_environment_escape_are_independent_of_radiance_termination() {
     let mut scene = surface(Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()));
-    scene.ground_id = scene.prism_id;
+    scene.ground_id = scene.debug_object_id;
     scene.environment = Scene::new().environment;
     scene.environment_samples = 1;
     let (debug, state, draws) = trace(&scene, downward(), &[], &[0.25, 0.0], &[0.0, 0.0]);
@@ -229,7 +303,7 @@ fn rr_budget_backface_missing_material_and_zero_weight_have_distinct_reasons() {
 #[test]
 fn coplanar_prism_triangles_produce_identical_first_hit_geometric_normals() {
     let mut scene = Scene::new();
-    scene.prism_id = Some(scene.add_with_material(
+    scene.debug_object_id = Some(scene.add_with_material(
         Box::new(Prism::new().unwrap()),
         Box::new(Mirror::new(Vector3::repeat(0.95)).unwrap()),
     ));
@@ -264,7 +338,7 @@ fn coplanar_prism_triangles_produce_identical_first_hit_geometric_normals() {
             );
             let actual = Vector3::from(debug.first_hit_normal.unwrap());
             assert!((actual - normal).norm() < 1e-14);
-            assert_eq!(debug.first_hit_object_id, scene.prism_id);
+            assert_eq!(debug.first_hit_object_id, scene.debug_object_id);
             normals.push(actual);
         }
         assert!((normals[0] - normals[1]).norm() < 1e-14);
@@ -329,7 +403,7 @@ fn mixed_both_budgets_and_absent_components_are_not_reported_as_sample_rejection
 }
 
 #[test]
-fn pixel_statistics_average_all_spp_and_mask_each_non_prism_subsample() {
+fn pixel_statistics_average_all_spp_and_mask_each_non_target_subsample() {
     let mut pixel = PathDebugPixel::default();
     let a = PathDebugSample {
         first_hit_object_id: Some(2),
@@ -364,7 +438,7 @@ fn pixel_statistics_average_all_spp_and_mask_each_non_prism_subsample() {
         pixel.record(&sample, Some(2)).unwrap();
     }
     assert_eq!(pixel.samples, 4);
-    assert_eq!(pixel.prism_samples, 2);
+    assert_eq!(pixel.target_samples, 2);
     assert_eq!(pixel.first_hit_objects, BTreeMap::from([(2, 2), (3, 1)]));
     assert_eq!(pixel.terminations.values().sum::<u64>(), 2);
     assert_eq!(aov_pixel(&pixel, 0), [64, 64, 64]);

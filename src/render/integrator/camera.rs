@@ -117,6 +117,13 @@ fn render_camera_buffers(
     // release 构建忽略配置开关，不分配统计缓冲，也不记录真实路径事件。
     let debug_path =
         cfg!(debug_assertions) && matches!(output, CameraOutput::Components { debug_path: true });
+    if debug_path
+        && scene
+            .debug_object_id
+            .is_some_and(|id| id >= scene.objects.len())
+    {
+        return Err("调试物体编号不在场景中".into());
+    }
     if split {
         width
             .checked_mul(height)
@@ -139,7 +146,7 @@ fn render_camera_buffers(
                 Framebuffer::new(width, height),
             )
         }),
-        debug: debug_path.then(|| PathDebugBuffer::new(width, height, scene.prism_id)),
+        debug: debug_path.then(|| PathDebugBuffer::new(width, height, scene.debug_object_id)),
     };
     let render_pixel =
         |pixel_index: usize| -> Result<(CameraPathComponents, Option<PathDebugPixel>), String> {
@@ -178,7 +185,7 @@ fn render_camera_buffers(
                         Some(&mut sample),
                     )
                     .map_err(|error| error.to_string())?;
-                    pixel.record(&sample, scene.prism_id)?;
+                    pixel.record(&sample, scene.debug_object_id)?;
                 } else {
                     trace_camera_path(scene, &mut state, &mut rngs, light_wi, light, ground)
                         .map_err(|error| error.to_string())?;

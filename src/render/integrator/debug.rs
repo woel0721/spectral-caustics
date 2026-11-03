@@ -121,13 +121,13 @@ fn internal_tir(
     sin_i >= 1.0 / ior && fresnel_dielectric(cos_i, ior, 1.0) == Some(1.0)
 }
 
-/// 一像素的原始整数总计。除 samples / first_hit_objects 外，只统计首次命中棱镜的子样本。
+/// 一像素的原始整数总计。除 samples / first_hit_objects 外，只统计首次命中调试目标的子样本。
 /// AOV 用总 samples 作分母，保留子像素覆盖率；不将一条路径放大成整像素。
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct PathDebugPixel {
     pub samples: u64,
     pub first_hit_objects: BTreeMap<usize, u64>,
-    pub prism_samples: u64,
+    pub target_samples: u64,
     pub first_hit_normal_sum: [f64; 3],
     pub events: PathEventCounts,
     pub reached_ground: u64,
@@ -140,16 +140,16 @@ impl PathDebugPixel {
     pub(super) fn record(
         &mut self,
         sample: &PathDebugSample,
-        prism_id: Option<usize>,
+        target_object_id: Option<usize>,
     ) -> Result<(), &'static str> {
         add(&mut self.samples, 1)?;
         if let Some(id) = sample.first_hit_object_id {
             add(self.first_hit_objects.entry(id).or_default(), 1)?;
         }
-        if prism_id.is_none() || sample.first_hit_object_id != prism_id {
+        if target_object_id.is_none() || sample.first_hit_object_id != target_object_id {
             return Ok(());
         }
-        add(&mut self.prism_samples, 1)?;
+        add(&mut self.target_samples, 1)?;
         if let Some(normal) = sample.first_hit_normal {
             for (sum, value) in self.first_hit_normal_sum.iter_mut().zip(normal) {
                 *sum += value;
@@ -180,16 +180,16 @@ fn add(total: &mut u64, value: u64) -> Result<(), &'static str> {
 pub struct PathDebugBuffer {
     pub width: usize,
     pub height: usize,
-    pub prism_object_id: Option<usize>,
+    pub target_object_id: Option<usize>,
     pub pixels: Vec<PathDebugPixel>,
 }
 
 impl PathDebugBuffer {
-    pub(super) fn new(width: usize, height: usize, prism_object_id: Option<usize>) -> Self {
+    pub(super) fn new(width: usize, height: usize, target_object_id: Option<usize>) -> Self {
         Self {
             width,
             height,
-            prism_object_id,
+            target_object_id,
             pixels: vec![PathDebugPixel::default(); width * height],
         }
     }
@@ -247,7 +247,7 @@ impl PathDebugBuffer {
 }
 
 fn aov_pixel(pixel: &PathDebugPixel, index: usize) -> [u8; 3] {
-    if pixel.samples == 0 || pixel.prism_samples == 0 {
+    if pixel.samples == 0 || pixel.target_samples == 0 {
         return [0; 3];
     }
     let n = pixel.samples as f64;
@@ -267,7 +267,7 @@ fn aov_pixel(pixel: &PathDebugPixel, index: usize) -> [u8; 3] {
         2 => [count_byte(pixel.events.specular_transmission as f64 / n); 3],
         _ => pixel
             .first_hit_normal_sum
-            .map(|v| byte((v + pixel.prism_samples as f64) / (2.0 * n))),
+            .map(|v| byte((v + pixel.target_samples as f64) / (2.0 * n))),
     }
 }
 
