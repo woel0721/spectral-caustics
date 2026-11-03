@@ -52,8 +52,13 @@ impl Render {
     pub fn render_lighting(&self, scene: &Scene) -> Result<SpectralLighting, Box<dyn Error>> {
         let ground_id = scene.ground_id.ok_or("运行时场景缺少接收地面编号")?;
         let work = || {
-            caustics::render_spectral_lighting(scene, scene.prism_id, ground_id, &self.settings)
-                .map_err(|error| error.to_string())
+            caustics::render_spectral_lighting(
+                scene,
+                scene.caustics_object_id,
+                ground_id,
+                &self.settings,
+            )
+            .map_err(|error| error.to_string())
         };
         let result = match &self.pool {
             Some(pool) => pool.install(work),
@@ -98,8 +103,13 @@ impl Render {
         };
         // install 的返回值跨线程传递，转换为可 Send 的错误文本，再交回公共错误接口。
         let work = || {
-            caustics::render_spectral_caustics(scene, scene.prism_id, ground_id, &settings)
-                .map_err(|error| error.to_string())
+            caustics::render_spectral_caustics(
+                scene,
+                scene.caustics_object_id,
+                ground_id,
+                &settings,
+            )
+            .map_err(|error| error.to_string())
         };
         let result = match &self.pool {
             Some(pool) => pool.install(work),

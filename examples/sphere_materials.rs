@@ -26,7 +26,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     config.validate()?;
     for (name, material) in [
-        ("dielectric", MaterialConfig::Dielectric { ior: 1.52 }),
+        (
+            "dielectric",
+            MaterialConfig::Dielectric {
+                ior: 1.52,
+                dispersion: None,
+            },
+        ),
         (
             "mirror",
             MaterialConfig::Mirror {
@@ -51,9 +57,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
     ] {
         let start = Instant::now();
-        let ObjectConfig::Sphere { material: slot, .. } = &mut config.scene.objects[0] else {
+        let ObjectConfig::Sphere {
+            material: slot,
+            caustics,
+            ..
+        } = &mut config.scene.objects[0]
+        else {
             return Err("configs/sphere.json 的第一个物体必须为 Sphere".into());
         };
+        *caustics = matches!(material, MaterialConfig::Dielectric { .. });
         *slot = material;
         let output = directory.join(name);
         fs::create_dir_all(&output)?;
@@ -61,7 +73,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.save(output.join("config.json"))?;
         let scene = Scene::from_config(&config.scene)?;
         let renderer = Render::new(config.render.clone())?;
-        // prism_id 保持 None；此调用仅提供现有太阳标尺，Sphere 不生成光谱焦散。
+        // 显式选择理想介质球体；Mirror/GGX 只参与 RGB 相机路径。
         let lighting = renderer.render_lighting(&scene)?;
         let images = renderer.render_camera_glass_components(
             &scene,

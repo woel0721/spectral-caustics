@@ -15,7 +15,10 @@ use spectral_caustics::{
 
 fn materials() -> [MaterialConfig; 4] {
     [
-        MaterialConfig::Dielectric { ior: 1.52 },
+        MaterialConfig::Dielectric {
+            ior: 1.52,
+            dispersion: None,
+        },
         MaterialConfig::Mirror {
             reflectance: [0.95; 3],
         },
@@ -43,8 +46,14 @@ fn config(material: MaterialConfig) -> Config {
     // 目标置于非零编号，避免把球体默认为 prism_id 或 objects[0]。
     config.scene.objects.swap(0, 1);
     config.scene.debug_object_id = Some(1);
-    if let ObjectConfig::Sphere { material: slot, .. } = &mut config.scene.objects[1] {
+    if let ObjectConfig::Sphere {
+        material: slot,
+        caustics,
+        ..
+    } = &mut config.scene.objects[1]
+    {
         *slot = material;
+        *caustics = false;
     }
     config
 }
@@ -67,7 +76,7 @@ fn sphere_json_binds_all_materials_and_keeps_prism_and_debug_ids_independent() {
         let bound = scene.material(hit.material_id.unwrap()).unwrap();
         assert_eq!(
             bound.ior(),
-            if let MaterialConfig::Dielectric { ior } = material {
+            if let MaterialConfig::Dielectric { ior, .. } = material {
                 Some(ior)
             } else {
                 None
@@ -104,7 +113,7 @@ fn sphere_json_binds_all_materials_and_keeps_prism_and_debug_ids_independent() {
     assert!(matches!(
         loaded.scene.objects[1],
         ObjectConfig::Sphere {
-            material: MaterialConfig::Dielectric { ior: 1.52 },
+            material: MaterialConfig::Dielectric { ior: 1.52, .. },
             ..
         }
     ));
@@ -308,6 +317,7 @@ fn adding_a_distant_sphere_preserves_prism_spectral_caustics() {
     let expected = renderer.render_lighting(&ordinary).unwrap();
     assert!(expected.caustics.pixels.iter().any(|p| p.norm() > 0.0));
     config.scene.objects.push(ObjectConfig::Sphere {
+        caustics: false,
         center_m: [100.0, 100.0, 1.0],
         radius_m: 0.8,
         material: materials()[0].clone(),

@@ -147,6 +147,9 @@ pub enum ObjectConfig {
     /// 与 Prism 当前默认顶点顺序一致，长度单位为米；面连接方式由运行时 Prism 定义。
     Prism {
         vertices_m: [[f64; 3]; 6],
+        /// 旧三棱镜配置默认开启；显式 false 可将焦散目标切换到球体。
+        #[serde(default = "default_prism_caustics")]
+        caustics: bool,
         #[serde(default = "MaterialConfig::default_glass")]
         material: MaterialConfig,
     },
@@ -161,10 +164,12 @@ pub enum ObjectConfig {
         #[serde(default = "MaterialConfig::default_glass")]
         material: MaterialConfig,
     },
-    /// 仅用于 RGB 相机路径，不参与三棱镜的光源端光谱焦散算法。
+    /// 解析球面；理想 Dielectric 可显式启用光源端光谱焦散。
     Sphere {
         center_m: [f64; 3],
         radius_m: f64,
+        #[serde(default)]
+        caustics: bool,
         #[serde(default = "MaterialConfig::default_glass")]
         material: MaterialConfig,
     },
@@ -173,6 +178,10 @@ pub enum ObjectConfig {
         #[serde(default)]
         material: MaterialConfig,
     },
+}
+
+fn default_prism_caustics() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -211,6 +220,7 @@ impl Default for SceneConfig {
             debug_object_id: None,
             objects: vec![
                 ObjectConfig::Prism {
+                    caustics: true,
                     vertices_m: [
                         [-0.5, -1.0, 0.03],
                         [0.5, -1.0, 0.03],
@@ -298,11 +308,41 @@ impl SceneConfig {
         {
             return Err("scene.background_linear_rgb 必须有限且非负".into());
         }
+        let mut caustics_count = 0;
         for (index, object) in self.objects.iter().enumerate() {
+            let selected_material = match object {
+                ObjectConfig::Sphere {
+                    caustics: true,
+                    material,
+                    ..
+                } => {
+                    if !matches!(material, MaterialConfig::Dielectric { .. }) {
+                        return Err(format!(
+                            "scene.objects[{index}].caustics 要求理想 Dielectric 材质"
+                        ));
+                    }
+                    Some(material)
+                }
+                ObjectConfig::Prism {
+                    caustics: true,
+                    material,
+                    ..
+                } => Some(material),
+                _ => None,
+            };
+            if selected_material.is_some_and(|m| matches!(m, MaterialConfig::Dielectric { .. })) {
+                caustics_count += 1;
+                if caustics_count > 1 {
+                    return Err(
+                        "当前只支持一个焦散物体，请仅为一个 Sphere/Prism 启用 caustics".into(),
+                    );
+                }
+            }
             match object {
                 ObjectConfig::Prism {
                     vertices_m,
                     material,
+                    ..
                 } => {
                     material
                         .validate()
@@ -323,6 +363,7 @@ impl SceneConfig {
                     center_m,
                     radius_m,
                     material,
+                    ..
                 } => {
                     material
                         .validate()

@@ -31,7 +31,10 @@ fn config() -> Config {
 
 fn materials() -> [MaterialConfig; 4] {
     [
-        MaterialConfig::Dielectric { ior: 1.52 },
+        MaterialConfig::Dielectric {
+            ior: 1.52,
+            dispersion: None,
+        },
         MaterialConfig::Mirror {
             reflectance: [0.95; 3],
         },
@@ -94,7 +97,10 @@ fn json_roundtrips_builds_materials_and_keeps_debug_target_separate_from_spectra
     assert!(matches!(
         loaded.scene.objects[1],
         ObjectConfig::BeveledPrism {
-            material: MaterialConfig::Dielectric { ior: 1.52 },
+            material: MaterialConfig::Dielectric {
+                ior: 1.52,
+                dispersion: Some(_)
+            },
             ..
         }
     ));

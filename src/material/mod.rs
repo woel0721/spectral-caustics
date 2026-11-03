@@ -125,6 +125,16 @@ pub trait Material: Send + Sync {
     fn ior(&self) -> Option<f64> {
         None
     }
+
+    /// 独立的光源双透射通量追踪接口，不改变 RGB BSDF 采样。
+    /// 无色散的理想介质可以直接复用 ior；其他材质仍返回 None。
+    fn photon_ior(
+        &self,
+        _wavelength_nm: Option<f64>,
+        _mode: crate::optics::iormode::IorMode,
+    ) -> Option<f64> {
+        self.ior()
+    }
 }
 
 /// JSON 保留可序列化的 enum，运行时构建为具体材质的 trait object。
@@ -133,7 +143,9 @@ pub fn from_config(config: &MaterialConfig) -> Result<Box<dyn Material>, String>
         MaterialConfig::Lambertian { albedo } => {
             Ok(Box::new(Lambertian::new(Vector3::from(*albedo))?))
         }
-        MaterialConfig::Dielectric { ior } => Ok(Box::new(Dielectric::new(*ior)?)),
+        MaterialConfig::Dielectric { ior, dispersion } => {
+            Ok(Box::new(Dielectric::with_dispersion(*ior, *dispersion)?))
+        }
         MaterialConfig::Mirror { reflectance } => {
             Ok(Box::new(mirror::Mirror::new(Vector3::from(*reflectance))?))
         }

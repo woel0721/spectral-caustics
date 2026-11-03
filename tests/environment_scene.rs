@@ -333,7 +333,10 @@ fn glass_reflection_and_transmission_query_hdr_in_the_final_direction() {
     let mut config = scene_config(hdr.config());
     config.objects = vec![ObjectConfig::Ground {
         height_m: 1.0,
-        material: MaterialConfig::Dielectric { ior: 1.5 },
+        material: MaterialConfig::Dielectric {
+            ior: 1.5,
+            dispersion: None,
+        },
     }];
     let scene = Scene::from_config(&config).unwrap();
     fs::remove_file(&hdr.0).unwrap();

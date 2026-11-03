@@ -58,12 +58,13 @@ impl Scene {
                 max_m: Vector2::from(config.receiver.max_m),
             },
             prism_id: None,
+            caustics_object_id: None,
             ground_id: None,
             debug_object_id: None,
         })
     }
 
-    /// 支持一个地面、至多一个光谱三棱镜，以及 RGB 测试用球体/倒角三棱镜。
+    /// 支持一个地面及一个选中的理想介质 Sphere/Prism 焦散目标。
     pub fn from_config(config: &SceneConfig) -> Result<Self, Box<dyn Error>> {
         config.validate()?;
         let mut scene = Self::empty_from_config(config)?;
@@ -73,6 +74,7 @@ impl Scene {
                 ObjectConfig::Prism {
                     vertices_m,
                     material,
+                    caustics,
                 } => {
                     if scene.prism_id.is_some() {
                         return Err("当前渲染只支持一个三棱镜".into());
@@ -82,6 +84,10 @@ impl Scene {
                     scene.prism_id = Some(
                         scene.add_with_material(Box::new(prism), material::from_config(material)?),
                     );
+                    // 非介质三棱镜保留原有的二值遮挡行为。
+                    if *caustics && scene.supports_ideal_caustics(scene.prism_id.unwrap()) {
+                        scene.select_caustics_object(scene.prism_id.unwrap())?;
+                    }
                 }
                 ObjectConfig::Ground { height_m, material } => {
                     if scene.ground_id.is_some() {
@@ -108,10 +114,15 @@ impl Scene {
                     center_m,
                     radius_m,
                     material,
+                    caustics,
                 } => {
                     let sphere = Sphere::new(Vector3::from(*center_m), *radius_m)
                         .ok_or("球体的球心或半径无效")?;
-                    scene.add_with_material(Box::new(sphere), material::from_config(material)?);
+                    let id =
+                        scene.add_with_material(Box::new(sphere), material::from_config(material)?);
+                    if *caustics {
+                        scene.select_caustics_object(id)?;
+                    }
                 }
                 ObjectConfig::BeveledPrism {
                     cross_section_m,

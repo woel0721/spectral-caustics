@@ -112,7 +112,10 @@ fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_en
     let directory = TemporaryDirectory::new();
     let hdr = directory.hdr();
     for material in [
-        MaterialConfig::Dielectric { ior: 1.52 },
+        MaterialConfig::Dielectric {
+            ior: 1.52,
+            dispersion: None,
+        },
         MaterialConfig::Mirror {
             reflectance: [0.95; 3],
         },

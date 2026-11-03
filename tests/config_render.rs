@@ -34,7 +34,10 @@ fn camera_spp_from_json_controls_camera_paths_without_changing_photon_rendering(
     config.scene.background_linear_rgb = [0.2, 0.4, 0.8];
     config.scene.objects = vec![ObjectConfig::Ground {
         height_m: 1.0,
-        material: MaterialConfig::Dielectric { ior: 1.5 },
+        material: MaterialConfig::Dielectric {
+            ior: 1.5,
+            dispersion: None,
+        },
     }];
     let camera_image = |config: &Config| {
         let loaded = Config::from_json(&config.to_json().unwrap()).unwrap();
@@ -473,7 +476,10 @@ fn json_materials_build_runtime_values_and_follow_the_hit_object() {
     for reverse in [false, true] {
         let mut config = small_config();
         if let ObjectConfig::Prism { material, .. } = &mut config.scene.objects[0] {
-            *material = MaterialConfig::Dielectric { ior: 1.33 };
+            *material = MaterialConfig::Dielectric {
+                ior: 1.33,
+                dispersion: None,
+            };
         }
         if let ObjectConfig::Ground { material, .. } = &mut config.scene.objects[1] {
             *material = MaterialConfig::Lambertian {
@@ -923,6 +929,7 @@ fn runtime_rejects_unsupported_counts_and_invalid_prism_geometry() {
     assert!(Scene::from_config(&config).is_err());
     config = original.clone();
     config.objects[0] = ObjectConfig::Prism {
+        caustics: true,
         vertices_m: [[0.0; 3]; 6],
         material: Default::default(),
     };

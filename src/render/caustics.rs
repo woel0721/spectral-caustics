@@ -9,7 +9,7 @@ use crate::{
         iormode::IorMode,
         spectrum::{d65_normalization, d65_spd, wavelength_to_xyz},
     },
-    scene::{GroundReceiver, Scene, refractive_index, take_photon_from_hit},
+    scene::{GroundReceiver, Scene, take_photon_from_hit},
 };
 use nalgebra::Vector3;
 use rand::{Rng, SeedableRng};
@@ -113,18 +113,18 @@ pub fn ground_to_pixel(
 /// Rayon 并行追踪固定采样块，各块使用独立缓冲，全部完成后按块顺序合并 XYZ。
 pub fn render_spectral_caustics(
     scene: &Scene,
-    prism_id: Option<usize>,
+    caustics_object_id: Option<usize>,
     ground_id: usize,
     settings: &RenderSetting,
 ) -> Result<Framebuffer, Box<dyn Error>> {
-    render_spectral_lighting(scene, prism_id, ground_id, settings)?.combined()
+    render_spectral_lighting(scene, caustics_object_id, ground_id, settings)?.combined()
 }
 
-/// 一次追踪拆分 Direct（首次命中地面）与 Caustics（经棱镜双界面后落地）。
+/// 一次追踪拆分 Direct（首次命中地面）与 Caustics（经所选介质双界面后落地）。
 /// 折射落点乘双界面 Fresnel 透射通量比例；解析太阳的强度不依赖 receiver。
 pub fn render_spectral_lighting(
     scene: &Scene,
-    prism_id: Option<usize>,
+    caustics_object_id: Option<usize>,
     ground_id: usize,
     settings: &RenderSetting,
 ) -> Result<SpectralLighting, Box<dyn Error>> {
@@ -145,7 +145,8 @@ pub fn render_spectral_lighting(
     {
         return Err("焦散接收范围无效".into());
     }
-    let (buffers, white_xyz) = render_spectral_buffers(scene, prism_id, ground_id, settings)?;
+    let (buffers, white_xyz) =
+        render_spectral_buffers(scene, caustics_object_id, ground_id, settings)?;
     let sun_irradiance_xyz = white_xyz * strength;
     if sun_irradiance_xyz.iter().any(|v| !v.is_finite()) {
         return Err("太阳光 XYZ 强度溢出".into());
@@ -161,7 +162,7 @@ pub fn render_spectral_lighting(
 
 fn render_spectral_buffers(
     scene: &Scene,
-    prism_id: Option<usize>,
+    caustics_object_id: Option<usize>,
     ground_id: usize,
     settings: &RenderSetting,
 ) -> Result<(SpectralBuffers, Vector3<f64>), Box<dyn Error>> {
@@ -171,8 +172,8 @@ fn render_spectral_buffers(
     if settings.width == 0 || settings.height == 0 || samples_per_pixel_axis == 0 {
         return Err("图像尺寸和每轴采样数必须大于零".into());
     }
-    if prism_id.is_some_and(|id| id == ground_id || id >= scene.objects.len()) {
-        return Err("三棱镜编号无效或与地面编号相同".into());
+    if caustics_object_id.is_some_and(|id| id == ground_id || id >= scene.objects.len()) {
+        return Err("焦散物体编号无效或与地面编号相同".into());
     }
     if ground_id >= scene.objects.len() {
         return Err("地面编号不在场景中".into());
@@ -202,9 +203,12 @@ fn render_spectral_buffers(
     let samples = settings.wavelength_samples()?;
     // 归一化只取决于完整发射光谱，在追踪/丢弃光子之前计算。
     let k = d65_normalization(&samples).ok_or("D65 光谱归一化失败")?;
-    // 固定模式只计算一次折射率；色散模式没有统一的玻璃折射率。
+    // 显式选择的非介质仍作二值遮挡，不生成光谱焦散。
+    let caustics_object_id = caustics_object_id.filter(|&id| scene.supports_ideal_caustics(id));
     let constant_ior = match mode {
-        IorMode::Constant => Some(refractive_index(None, mode).ok_or("折射率计算失败")?),
+        IorMode::Constant => caustics_object_id
+            .map(|id| scene.photon_ior(id, None, mode).ok_or("材质折射率计算失败"))
+            .transpose()?,
         IorMode::Dispersion => None,
     };
     // 完整白光只在渲染前积分一次；仅色散模式缓存逐波长的 (折射率, XYZ)。
@@ -224,8 +228,10 @@ fn render_spectral_buffers(
         // spectral_xyz 已含 Δλ，不再除以波长样本数；空间权重按全图发射数和接收面积归一化。
         let xyz = spectral_xyz * spatial_weight;
         direct_xyz += xyz;
-        if mode == IorMode::Dispersion {
-            let glass_ior = refractive_index(Some(wavelength_nm), mode).ok_or("折射率计算失败")?;
+        if let Some(id) = caustics_object_id.filter(|_| mode == IorMode::Dispersion) {
+            let glass_ior = scene
+                .photon_ior(id, Some(wavelength_nm), mode)
+                .ok_or("材质光谱折射率计算失败")?;
             contributions.push((glass_ior, xyz));
         }
     }
@@ -264,18 +270,23 @@ fn render_spectral_buffers(
                     )?;
                     continue;
                 }
-                if first_hit.object_id != prism_id {
+                if first_hit.object_id != caustics_object_id {
                     continue;
                 }
-                let Some(prism_id) = prism_id else {
+                let Some(caustics_object_id) = caustics_object_id else {
                     continue;
                 };
 
                 if let Some(glass_ior) = constant_ior {
                     // 固定折射率下所有波长光路相同，完整白光沿这一条路径落地。
-                    if let Some(landing) =
-                        take_photon_from_hit(scene, ray, first_hit, prism_id, ground_id, glass_ior)
-                    {
+                    if let Some(landing) = take_photon_from_hit(
+                        scene,
+                        ray,
+                        first_hit,
+                        caustics_object_id,
+                        ground_id,
+                        glass_ior,
+                    ) {
                         splat_spectral_xyz(
                             buffers.target(true),
                             landing.position,
@@ -287,9 +298,14 @@ fn render_spectral_buffers(
                 }
 
                 for &(glass_ior, xyz) in &contributions {
-                    let Some(landing) =
-                        take_photon_from_hit(scene, ray, first_hit, prism_id, ground_id, glass_ior)
-                    else {
+                    let Some(landing) = take_photon_from_hit(
+                        scene,
+                        ray,
+                        first_hit,
+                        caustics_object_id,
+                        ground_id,
+                        glass_ior,
+                    ) else {
                         continue;
                     };
                     // 落地即累积；丢失光子不重新分配通量。
@@ -404,6 +420,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::scene::refractive_index;
     use crate::{
         geometry::{ground::Ground, prism::Prism},
         render::save_png_with_exposure,
@@ -572,7 +589,7 @@ mod tests {
     fn spectral_xyz_is_identical_across_rayon_thread_counts_and_repeated_runs() {
         let settings = settings_for_size(19, 17);
         let mut scene = Scene::new();
-        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let caustics_object_id = scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         let serial_pool = rayon::ThreadPoolBuilder::new()
             .num_threads(1)
@@ -582,7 +599,7 @@ mod tests {
             let reference = serial_pool.install(|| {
                 render_spectral_caustics(
                     &scene,
-                    Some(prism_id),
+                    Some(caustics_object_id),
                     ground_id,
                     &sample_settings(&settings, 2, mode),
                 )
@@ -596,7 +613,7 @@ mod tests {
                 let image = pool.install(|| {
                     render_spectral_caustics(
                         &scene,
-                        Some(prism_id),
+                        Some(caustics_object_id),
                         ground_id,
                         &sample_settings(&settings, 2, mode),
                     )
@@ -613,7 +630,7 @@ mod tests {
         for case in 0..3 {
             let settings = settings_for_size(6, 4);
             let mut scene = Scene::new();
-            let prism_id = if case == 2 {
+            let caustics_object_id = if case == 2 {
                 scene.add(Box::new(Ground::new(4.0).unwrap()))
             } else {
                 scene.add(Box::new(Prism::new().unwrap()))
@@ -633,7 +650,7 @@ mod tests {
                 calls.store(0, Ordering::Relaxed);
                 let image = render_spectral_caustics(
                     &scene,
-                    Some(prism_id),
+                    Some(caustics_object_id),
                     ground_id,
                     &sample_settings(&settings, samples_per_pixel_axis, mode),
                 )
@@ -648,7 +665,7 @@ mod tests {
     fn constant_spectral_render_traces_one_path_per_spatial_sample() {
         let settings = settings_for_size(24, 12);
         let mut scene = Scene::new();
-        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let caustics_object_id = scene.add(Box::new(Prism::new().unwrap()));
         let calls = Arc::new(AtomicUsize::new(0));
         let ground_id = scene.add(Box::new(CountedGround {
             ground: Ground::new(0.0).unwrap(),
@@ -659,7 +676,7 @@ mod tests {
             &scene,
             ground_id,
             &sample_settings(&settings, 2, IorMode::Constant),
-            |ray| take_photon_landing(&scene, ray, prism_id, ground_id, || Some(1.52)),
+            |ray| take_photon_landing(&scene, ray, caustics_object_id, ground_id, || Some(1.52)),
         )
         .unwrap();
         let single_path_calls = calls.load(Ordering::Relaxed);
@@ -668,7 +685,7 @@ mod tests {
         calls.store(0, Ordering::Relaxed);
         let image = render_spectral_caustics(
             &scene,
-            Some(prism_id),
+            Some(caustics_object_id),
             ground_id,
             &sample_settings(&settings, 2, IorMode::Constant),
         )
@@ -680,7 +697,7 @@ mod tests {
         }
         let repeated = render_spectral_caustics(
             &scene,
-            Some(prism_id),
+            Some(caustics_object_id),
             ground_id,
             &sample_settings(&settings, 2, IorMode::Constant),
         )
@@ -690,7 +707,7 @@ mod tests {
         calls.store(0, Ordering::Relaxed);
         render_spectral_caustics(
             &scene,
-            Some(prism_id),
+            Some(caustics_object_id),
             ground_id,
             &sample_settings(&settings, 2, IorMode::Dispersion),
         )
@@ -722,7 +739,7 @@ mod tests {
     fn spectral_accumulation_matches_independent_single_wavelength_renders_with_lost_flux() {
         let settings = settings_for_size(32, 16);
         let mut scene = Scene::new();
-        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let caustics_object_id = scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         // 在光源与三棱镜之间遮住一部分光，确保真的测试了丢失通量。
         scene.add(Box::new(
@@ -741,7 +758,7 @@ mod tests {
         for mode in [IorMode::Constant, IorMode::Dispersion] {
             let actual = render_spectral_caustics(
                 &scene,
-                Some(prism_id),
+                Some(caustics_object_id),
                 ground_id,
                 &sample_settings(&settings, 2, mode),
             )
@@ -755,7 +772,7 @@ mod tests {
                     ground_id,
                     &sample_settings(&settings, 2, IorMode::Constant),
                     |ray| {
-                        take_photon_landing(&scene, ray, prism_id, ground_id, || {
+                        take_photon_landing(&scene, ray, caustics_object_id, ground_id, || {
                             refractive_index(Some(nm), mode)
                         })
                     },
@@ -781,25 +798,25 @@ mod tests {
     fn spectral_constant_stays_white_and_dispersion_separates_colors_reproducibly() {
         let settings = settings_for_size(128, 16);
         let mut scene = Scene::new();
-        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let caustics_object_id = scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         let constant = render_spectral_caustics(
             &scene,
-            Some(prism_id),
+            Some(caustics_object_id),
             ground_id,
             &sample_settings(&settings, 2, IorMode::Constant),
         )
         .unwrap();
         let dispersion = render_spectral_caustics(
             &scene,
-            Some(prism_id),
+            Some(caustics_object_id),
             ground_id,
             &sample_settings(&settings, 2, IorMode::Dispersion),
         )
         .unwrap();
         let repeated = render_spectral_caustics(
             &scene,
-            Some(prism_id),
+            Some(caustics_object_id),
             ground_id,
             &sample_settings(&settings, 2, IorMode::Dispersion),
         )
@@ -838,7 +855,7 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         let settings = settings_for_size(128, 16);
         let mut scene = Scene::new();
-        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let caustics_object_id = scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -851,7 +868,7 @@ mod tests {
         ] {
             let image = render_spectral_caustics(
                 &scene,
-                Some(prism_id),
+                Some(caustics_object_id),
                 ground_id,
                 &sample_settings(&settings, 2, mode),
             )?;
@@ -878,20 +895,20 @@ mod tests {
     fn spectral_render_rejects_invalid_ids_dimensions_and_sampling_overflow() {
         let mut settings = settings_for_size(8, 4);
         let mut scene = Scene::new();
-        let prism_id = scene.add(Box::new(Prism::new().unwrap()));
+        let caustics_object_id = scene.add(Box::new(Prism::new().unwrap()));
         let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
         for mode in [IorMode::Constant, IorMode::Dispersion] {
-            for (prism_id, ground_id, samples) in [
+            for (caustics_object_id, ground_id, samples) in [
                 (usize::MAX, ground_id, 1),
                 (ground_id, ground_id, 1),
-                (prism_id, usize::MAX, 1),
-                (prism_id, ground_id, 0),
-                (prism_id, ground_id, usize::MAX),
+                (caustics_object_id, usize::MAX, 1),
+                (caustics_object_id, ground_id, 0),
+                (caustics_object_id, ground_id, usize::MAX),
             ] {
                 assert!(
                     render_spectral_caustics(
                         &scene,
-                        Some(prism_id),
+                        Some(caustics_object_id),
                         ground_id,
                         &sample_settings(&settings, samples, mode)
                     )
@@ -911,7 +928,7 @@ mod tests {
             assert!(
                 render_spectral_caustics(
                     &scene,
-                    Some(prism_id),
+                    Some(caustics_object_id),
                     ground_id,
                     &sample_settings(&settings, 2, IorMode::Dispersion)
                 )

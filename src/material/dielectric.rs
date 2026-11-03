@@ -1,13 +1,14 @@
 //! 理想光滑介质：普通 BSDF 为零，通过 Fresnel 概率采样反射/透射事件。
 
 use super::{BsdfSample, BsdfValue, EvaluateMode, Material, ScatterType, unit_vector};
-use crate::optics::refract;
+use crate::optics::{dispersion::Cauchy, iormode::IorMode, refract};
 use nalgebra::Vector3;
 use rand::{Rng, RngCore};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dielectric {
     ior: f64,
+    dispersion: Option<Cauchy>,
 }
 
 impl Dielectric {
@@ -16,7 +17,20 @@ impl Dielectric {
         if !ior.is_finite() || ior <= 0.0 {
             return Err("material.ior 必须有限且大于零".into());
         }
-        Ok(Self { ior })
+        Ok(Self {
+            ior,
+            dispersion: None,
+        })
+    }
+
+    /// 只为光源端增加色散模型；RGB sample 始终保留给定的 ior。
+    pub fn with_dispersion(ior: f64, dispersion: Option<Cauchy>) -> Result<Self, String> {
+        let mut glass = Self::new(ior)?;
+        if let Some(model) = dispersion {
+            model.validate()?;
+        }
+        glass.dispersion = dispersion;
+        Ok(glass)
     }
 }
 
@@ -93,6 +107,13 @@ impl Material for Dielectric {
 
     fn ior(&self) -> Option<f64> {
         Some(self.ior)
+    }
+
+    fn photon_ior(&self, wavelength_nm: Option<f64>, mode: IorMode) -> Option<f64> {
+        match (mode, self.dispersion) {
+            (IorMode::Dispersion, Some(model)) => model.ior(wavelength_nm?),
+            _ => Some(self.ior),
+        }
     }
 }
 

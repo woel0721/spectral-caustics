@@ -100,11 +100,16 @@ mod tests {
         expected.scene.debug_object_id = Some(0);
         expected.scene.objects = vec![
             ObjectConfig::Sphere {
+                caustics: false,
                 center_m: [-1.55, 0.0, 0.68],
                 radius_m: 0.65,
-                material: MaterialConfig::Dielectric { ior: 1.52 },
+                material: MaterialConfig::Dielectric {
+                    ior: 1.52,
+                    dispersion: None,
+                },
             },
             ObjectConfig::Sphere {
+                caustics: false,
                 center_m: [0.0, 0.0, 0.68],
                 radius_m: 0.65,
                 material: MaterialConfig::Mirror {
@@ -112,6 +117,7 @@ mod tests {
                 },
             },
             ObjectConfig::Sphere {
+                caustics: false,
                 center_m: [1.55, 0.0, 0.68],
                 radius_m: 0.65,
                 material: MaterialConfig::GgxMetal {
@@ -536,7 +542,10 @@ mod tests {
             };
         }
         if let ObjectConfig::Ground { material, .. } = &mut config.scene.objects[1] {
-            *material = MaterialConfig::Dielectric { ior: 1.33 };
+            *material = MaterialConfig::Dielectric {
+                ior: 1.33,
+                dispersion: None,
+            };
         }
         config.save(&path).unwrap();
         let json: serde_json::Value =
@@ -730,6 +739,7 @@ mod tests {
         };
         assert!(config.to_json().is_err());
         config.scene.objects[0] = ObjectConfig::Prism {
+            caustics: true,
             vertices_m: [[f64::INFINITY; 3]; 6],
             material: Default::default(),
         };
@@ -739,7 +749,10 @@ mod tests {
                 MaterialConfig::Lambertian {
                     albedo: [0.2, value, 0.4],
                 },
-                MaterialConfig::Dielectric { ior: value },
+                MaterialConfig::Dielectric {
+                    ior: value,
+                    dispersion: None,
+                },
             ] {
                 let mut config = Config::default();
                 if let ObjectConfig::Prism { material: slot, .. } = &mut config.scene.objects[0] {

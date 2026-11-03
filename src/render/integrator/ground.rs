@@ -164,7 +164,8 @@ pub(super) fn ground_irradiance(
         )?,
         // 焦散已包含折射路径可见性，不能用太阳 shadow ray 再次清零。
         caustics_xyz: if scene
-            .prism_id
+            .caustics_object_id
+            .or(scene.prism_id)
             .is_none_or(|id| scene.supports_ideal_caustics(id))
         {
             sample_ground_irradiance(ground.irradiance, ground.receiver, hit.coords)

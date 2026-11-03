@@ -10,6 +10,9 @@ pub enum MaterialConfig {
     },
     Dielectric {
         ior: f64,
+        /// None 为 Constant IOR；光源 dispersion 模式才查询 Cauchy，相机仍使用 ior。
+        #[serde(default)]
+        dispersion: Option<crate::optics::dispersion::Cauchy>,
     },
     Mirror {
         reflectance: [f64; 3],
@@ -29,7 +32,10 @@ impl Default for MaterialConfig {
 
 impl MaterialConfig {
     pub fn default_glass() -> Self {
-        Self::Dielectric { ior: 1.52 }
+        Self::Dielectric {
+            ior: 1.52,
+            dispersion: Some(crate::optics::dispersion::Cauchy::default()),
+        }
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -55,9 +61,12 @@ impl MaterialConfig {
             Self::GgxMetal { eta, k, roughness } => {
                 crate::material::ggx_metal::GgxMetal::new((*eta).into(), (*k).into(), *roughness)?;
             }
-            Self::Dielectric { ior } => {
+            Self::Dielectric { ior, dispersion } => {
                 if !ior.is_finite() || *ior <= 0.0 {
                     return Err("material.ior 必须有限且大于零".into());
+                }
+                if let Some(model) = dispersion {
+                    model.validate()?;
                 }
             }
         }
