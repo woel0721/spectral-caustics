@@ -100,7 +100,7 @@ cargo run --locked --example sphere_materials -- 16 128 output/sphere_debug
 - `render.mode`：`constant` 或 `dispersion`；波长范围在 380–780 nm 内，默认 10 nm 步长，包含两端点的梯形积分共 41 节点，最后一段允许短于步长。
 - `render.thread_count`：null 使用 Rayon 默认线程数，正整数创建专用池；`max_spectral_blocks` 控制光源采样块，独立于线程数。
 - `scene.camera`：位置、目标、up 和垂直 FOV；世界 +Z 向上，位置以米计。
-- `scene.objects`：配置流程支持至多一个三棱镜、一个接收地面及多个球体；地面可用 `ground_margin_m` 在 receiver 四边外扩，默认 0.5 m。代码可构建额外三角形/漫反射物体。
+- `scene.objects`：配置流程支持至多一个光谱三棱镜、一个接收地面及多个球体/倒角三棱镜；地面可用 `ground_margin_m` 在 receiver 四边外扩，默认 0.5 m。代码可构建额外三角形/漫反射物体。
 - `scene.light`：平行光方向、水平矩形发射窗口、高度和总通量；`receiver` 只限制光子图范围，不限制解析太阳照明。相机超出有限地面的边缘看到背景。
 - `scene.ground_checkerboard`：世界 x/y 的棋盘格，按 floor 处理负坐标；比例在每个地面顶点各应用一次，不改变光子图。缺省/null 关闭。
 
@@ -129,6 +129,46 @@ GGX Metal 使用相对于空气的三个 RGB 复折射率 `eta + i*k`：eta 有�
 `alpha=roughness²`，实现各向同性 Trowbridge–Reitz D、height-correlated Smith G、精确非偏振导体 Fresnel。采样完整半球 NDF `p(h)=D(h)|n·h|`，反射 PDF 为 `p(h)/(4|wo·h|)`，不是 VNDF；错误半向量/背半球反射保留零贡献，不补采或重归一化。`roughness≤0.001` 统一切换为理想镜面，Fresnel RGB 权重、事件与 PDF 随之切换，无连续密度。公式参考 [PBRT 微表面模型](https://www.pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory) 和 [导体 BRDF](https://www.pbr-book.org/4ed/Reflection_Models/Conductor_BRDF)。
 
 只模拟微表面单次散射，不做多次散射能量补偿；粗糙时能量损失符合此模型的简化。eta/k 是 RGB 参数，不将其插值为真实光谱；GGX 的 Spectral 求值返回零，光谱焦散算法不使用它。没有 RoughDielectric、Plastic、各向异性或通用金属焦散；灰 GGX 地面也不能绑定缺少入射方向信息的当前辐照度图，可使用独立 RGB 相机渲染。
+
+### 仅倒三条长棱的三棱镜
+
+[configs/beveled_prism.json](configs/beveled_prism.json) 保留默认场景的相机、HDRI 和太阳，将原三棱镜替换为 `beveled_prism`，默认截取长度 0.035 m，并显式设置 `scene.debug_object_id=0`。用现有主程序运行即可；debug 构建另输出路径 AOV：
+
+```sh
+cargo run --release --locked -- configs/beveled_prism.json
+cargo run --locked -- configs/beveled_prism.json
+```
+
+```json
+{
+  "type": "beveled_prism",
+  "cross_section_m": [[-0.5,0.03],[0.5,0.03],[0.0,0.83]],
+  "y_min_m": -1.0,
+  "y_max_m": 1.0,
+  "bevel_size_m": 0.035,
+  "material": {"type":"dielectric","ior":1.52}
+}
+```
+
+构造函数为 `BeveledPrism::new([Vector2<f64>;3], y_min, y_max, bevel_size) -> Option<Self>`；Vector2 表示 `(x,z)`，所有长度以米计。支持 0.02–0.05 m，也接受其他满足几何条件的正长度。每条三角形原边必须严格长于 `2*bevel_size`；零倒角、截取段重合、退化三角形、非有限参数、`y_min>=y_max`、溢出或低于坐标精度的截取返回失败。要保留尖棱时使用原 `Prism`。
+
+输入截面先统一为逆时针 `A→B→C`（顺时针输入会交换 B/C，A 保留）。设 `u(P,Q)` 为从 P 到 Q 的单位向量、`b=bevel_size`，六边形顶点按如下顺序排列：
+
+```text
+Q0 = A + b*u(A,B)    Q1 = B + b*u(B,A)
+Q2 = B + b*u(B,C)    Q3 = C + b*u(C,B)
+Q4 = C + b*u(C,A)    Q5 = A + b*u(A,C)
+```
+
+`Q0→Q1→…→Q5` 保持逆时针；Q1–Q2、Q3–Q4、Q5–Q0 是三个平面倒角。前截面顶点 `Vi=(Qi.x,y_min,Qi.z)`，后截面 `V(i+6)=(Qi.x,y_max,Qi.z)`，每点只计算一次并由索引共享：
+
+- 六个侧矩形：`[i,i+6,j+6]`、`[i,j+6,j]`，`i=0…5`、`j=(i+1)%6`，共 12 片。
+- 前端面：`[0,k,k+1]`，`k=1…4`，法线 −y；后端面：`[6,6+k+1,6+k]`，法线 +y，各 4 片。
+- 总计 12 顶点、30 条 mesh 边、20 个三角形；每条 mesh 边由两个方向相反的三角形共享，无 T 接点。`vertices()`、`triangle_indices()` 提供只读 indexed mesh。
+
+构建时逐片验证三角形有效性。此物体为凸体，求交使用六个侧面和两个端面的外向平面做区间裁剪，避免共享三角形边的重心坐标舍入缝；最近入口/出口保留朝外法线。这个实现只属于 `BeveledPrism`，原 Prism、Triangle、Dielectric、Mirror 和 GGX 均不改动。
+
+Scene 沿用 `add_with_material` 绑定，支持原有玻璃/Mirror/GGX 及 `debug_path`。它不会被登记为 `prism_id`，没有倒角三棱镜的光源端光谱焦散；光源端仍将其作为遮挡物。三个倒角面为平面，沿 y 的两端边仍为锐边，本阶段没有圆弧倒角或平滑法线。
 
 ## API 与模块
 

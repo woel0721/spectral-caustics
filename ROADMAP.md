@@ -15,6 +15,32 @@
 - [x] Breaking Cleanup：统一当前算法，移除冻结算法、历史适配层和调试流程。
 - [x] Path Debug AOV 第一阶段：在真实相机路径上记录事件、内部 TIR、地面命中与独立终止原因，输出四张统计图和像素 JSON。
 - [x] Sphere RGB 材质测试：内外求交、固定朝外法线及独立可配置 Debug 物体 ID；不增加球体光源焦散。
+- [x] BeveledPrism：三角截面截角成六边形，只倒三条 y 方向长棱，封闭 indexed mesh 与 RGB/Debug AOV 测试。
+
+## 三条长棱的平面倒角（2026-11-03）
+
+起点为已同步远端的 main `72f84a8`，工作区干净；修改前 325 项单元 + 52 项集成测试，共 377 项全部通过。实施前已说明截面 Q0…Q5 的生成顺序和前后/侧面三角形 winding；完整方案与 API 见 [README.md](README.md#仅倒三条长棱的三棱镜)。
+
+- 新增 `geometry/beveled_prism.rs`：`BeveledPrism::new(cross_section, y_min, y_max, bevel_size)` 接收三组 `(x,z)`，将顺时针输入统一为逆时针；每个原角沿两邻边各截取指定米数。支持 0.02/0.035/0.05 m，其他合法正长度也可使用；要求截面非退化且所有原边严格长于两倍截取长度。
+- indexed mesh 含 12 个共享顶点、30 条边和 20 个同向外法线三角形：六侧矩形各拆两片，前后六边形各用四片扇形三角化，无端面中心点或 T 接点。只读 `vertices()` / `triangle_indices()` 可检查实际网格。
+- 单独的 Triangle 求交在精确共享边测试中出现浮点重心边界漏交，因此新几何使用凸体八个外向平面的区间裁剪；保留最近入口/出口和朝外法线，并只在浮点舍入量级容忍边界误差。构造时仍逐片验证所有 mesh 三角形有效。原 `Prism` 和 `Triangle` 文件未改动。
+- JSON 新增 `ObjectConfig::BeveledPrism`，字段为 `cross_section_m`、`y_min_m`、`y_max_m`、`bevel_size_m`、`material`；通过现有 `Scene::add_with_material` 构建。`configs/beveled_prism.json` 使用 0.035 m 与 `debug_object_id=0`。不登记为 `prism_id`，只复用 RGB 相机材质/路径和现有 AOV；没有接入光源端双界面光谱焦散，光源端仍将它作为遮挡物。
+- 没有修改 Dielectric、Mirror、GGX、相机积分器、Debug recorder、光子算法或原有测试；没有新依赖、兼容分支或通用 mesh 框架。删除文件/函数/测试均为 0；没有执行算法去重，保留现有几何及光学数值参考。
+
+新增 8 项几何测试和 4 项集成测试，最终 333 项单元 + 56 项集成，共 389 项全部通过，无失败或 ignored。新增覆盖：两侧反向共边/Euler 拓扑、截取长度、所有 20 片外向法线与截角体积、三处倒角的内外求交、精确顶点/共享边/侧面与端面对角线无漏交、表面自交过滤、切线/移除原角/无效输入，以及 Camera 中心光线在 0.02/0.05 m 下命中三处倒角。配置/路径测试验证 JSON 往返与校验、材质绑定、光谱/调试编号独立、四种材质在 Balance/Power、深度 0/1/4、Rayon 1/2/4/重复 1 线程下的 XYZ/调试统计一致性、三分量可加和 debug 开关不改变图像。
+
+实际执行 `cargo fmt`；`cargo fmt --check`、`cargo build --locked --all-targets`、`cargo test --locked`、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 均通过。
+
+| 实跑 | 参数与结果 |
+| --- | --- |
+| 新几何 JSON 主程序（release） | 384²、128 SPP、0.035 m、4 线程；玻璃相机与主图/相反 IOR 预览成功。检查了 Combined PNG；结果保存在 `output/beveled_prism_preview/`。 |
+| 四材质 JSON 主程序（debug） | 128²、16 SPP、0.035 m、2 线程；玻璃、Mirror、GGX 0/0.4 各输出三分量、四张 AOV 与 JSON。验证目标 ID/终止计数、各材质事件、Caustics 全黑与 Direct=Combined；检查 Mirror 法线 AOV 的窄倒角面，输出在 `output/beveled_prism_debug/`。 |
+| 原 `camera_direct_caustics -- 8`（release） | 默认三棱镜 512²，三张相机图成功。 |
+| 原 `diffuse_indirect -- 8`（release） | 320×240，深度 0/1/4 成功输出。 |
+| 原 `camera_parallel_benchmark -- 8 48`（release） | 光源和三个相机 XYZ 在 1/2/4/6 线程逐位一致。 |
+| 原 `refract_ray`（release） | 双界面出射方向和落点成功输出。 |
+
+范围限制：这是单个平面的截角，不是圆弧倒角或平滑法线；前后端面的各条棱保持锐利。倒角几何尚无光源端光谱焦散；没有改变既有二值玻璃阴影、32 次 Delta 上限或嵌套介质限制。未执行默认 512²/256 SPP 的全尺寸倒角配置，也未据此判定原图反射/折射不连续的全部成因。
 
 ## Sphere 几何与材质对照验收（2026-11-03）
 
