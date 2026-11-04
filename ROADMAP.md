@@ -20,7 +20,7 @@
 
 `configs/sphere.json` 为主要光谱测试场景，显式启用玻璃球的 `caustics` 和 Cauchy 模型，输出 Sphere 的 Direct/Caustics/Combined。默认三球对照 JSON 仍关闭光源焦散。旧 Prism 配置、独立 IOR 实验入口与 Debug 目标选择保留；相机 RGB BSDF 采样不随光源色散设置变化。
 
-`configs/sphere_spectral.json` 为独立光谱相机场景（256×256、512 总路径、Packet=4、128 个空间样本）。`render.camera_mode` 默认 `rgb`，设为 `spectral` 后独立输出主图；`render.mode` 选择 Constant/Dispersion。太阳使用连续归一化 D65；RGB HDRI/天空/背景使用独立 PBRT Illuminant 基谱与 D65 白点校准，保留 HDR 强度。源数据与近似边界见颜色数据说明。
+`configs/sphere_spectral.json` 为独立光谱相机场景，当前实验配置为 256×256、4096 总路径、Packet=4、1024 个空间样本，使用 `monochrome_studio_04_4k.hdr`、线性反射率 0.18 的中性灰地面，棋盘格关闭。`render.camera_mode` 默认 `rgb`，设为 `spectral` 后独立输出主图；`render.mode` 选择 Constant/Dispersion。太阳使用连续归一化 D65；RGB HDRI/天空/背景使用独立 PBRT Illuminant 基谱与 D65 白点校准，保留 HDR 强度。源数据与近似边界见颜色数据说明。
 
 ## 当前限制
 
@@ -37,7 +37,7 @@ Packet 公共随机数（CRN）续改，2026-11-04。
 - Packet=4 在每个空间样本建立玻璃前缀、首次环境 NEE、续追三类初始 RNG 状态；各 Lane 从相同状态的独立副本开始。波长层内抖动继续按 Lane 分开，Packet=1 保留原随机序列，SPP、PDF、XYZ 权重、Fresnel 和 RR 补偿保持原样。
 - 只复用随机序列，不共享可变 RNG 或标量路径状态；提前结束或额外消费不影响其他 Lane。路径分叉后不强制同步物理事件或方向，未加入按反弹/事件固定维度的采样器。
 - 保留原有全部 429 项测试，新增 2 项集成测试，当前 **341 项单元 + 90 项集成 = 431 项全部通过**；fmt、fmt check、locked 全目标构建、完整测试、严格 Clippy、diff check 均通过。新增测试检查真实积分器的环境/续追 CRN 对齐、Constant IOR 的共同玻璃事件，以及 Dispersion 下不同折射方向；加强玻璃前缀公共随机数断言，原提前结束隔离、能量与 1/2/4 线程确定性测试继续通过。
-- 按本次要求仅做正确性回归，没有运行新的效果或性能实验。没有新增依赖、删除文件/API/测试；保留工作区已有的场景配置调整。
+- CRN 实现阶段按要求仅做正确性回归；后续场景单图试渲染尚未构成 CRN 效果或性能的定量对照。没有新增依赖、删除文件/API/测试；保留工作区已有的场景配置调整。
 
 以下保留此前独立 Lane 随机流版本的 Packet 初版验收记录，其实验数据不代表当前 CRN 的效果。
 
@@ -48,6 +48,6 @@ Packet 公共随机数（CRN）续改，2026-11-04。
 - 改动前 **420** 项基线全部通过；保留全部原测试，新增 **3 项单元 + 6 项集成**，当前 **341 项单元 + 88 项集成 = 429 项测试全部通过**，无失败或 ignored。fmt、fmt check、locked 全目标构建、完整测试、严格全目标 Clippy、diff check 均通过；release 光谱相机的 22 项测试及 Packet 的 2 项边界/RNG 单元测试也通过。
 - 测试覆盖 4/16/512 个细分层各访问一次、浮点右端边界、共享主射线、Lane 提前结束/额外随机消耗的隔离、独立标量贡献、D65 白点/能量、Constant/Dispersion 折射、非法配置和溢出。两种 Packet、两种 IOR、Balance/Power、深度 0/4、1/2/4 线程及重复结果逐位一致；RGB、光源焦散和三个分量继续兼容。
 - 修改前后保存的 12 张线性 XYZ 小图（Constant/Dispersion、SPP=1/7/16、深度 0/4）在 Packet=1 下逐字节相同，SHA-256 为 `3a22a5b0c72e4f8cd8df6d805691d0987be2aec1a7a17e937935782e59a91c4c`。未保留冻结旧算法作为测试实现。
-- 实跑新 `spectral_packet_compare`：256×256、512 总路径、三种子、10 线程，完成两种 IOR 的 Packet=1/4 以及独立 4096 SPP 参考。球内色度方差的三种子估计降低约 4.14% / 1.28%，耗时增加约 27.2% / 22.8%；轮廓 Y 方差上升，彩色噪点仍明显。指标、定义、有限参考与少量种子的限制见 README。
+- 调整配置前的 HDRI/棋盘格实验实跑 `spectral_packet_compare`：256×256、512 总路径、三种子、10 线程，完成两种 IOR 的 Packet=1/4 以及独立 4096 SPP 参考。球内色度方差的三种子估计降低约 4.14% / 1.28%，耗时增加约 27.2% / 22.8%；轮廓 Y 方差上升，彩色噪点仍明显。指标、定义、有限参考与少量种子的限制见 README。
 - 主程序实跑原光谱球配置：256×256、512 总路径、Packet=4、Dispersion，成功输出，约 23.8 秒（与完整回归并行，不用于性能对比）。原 `camera_direct_caustics -- 8` 与 `camera_parallel_benchmark -- 8 48` 成功；后者 1/2/4/6 线程 XYZ 逐位一致。另实跑 96×96、8 SPP 的 RGB Sphere 配置，输出非零光源焦散及 Direct/Caustics/Combined。
 - 新增可重复的对比示例与说明；没有新增依赖，没有删除文件、函数或测试。没有改变 RGB 或光源传输算法，也未引入 SIMD、通用 Packet 状态、去噪、BDPT、Photon Mapping 或 GPU。

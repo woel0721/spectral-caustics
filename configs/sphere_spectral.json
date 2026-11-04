@@ -3,7 +3,7 @@
     "width": 256,
     "height": 256,
     "samples_per_pixel_axis": 4,
-    "camera_spp": 512,
+    "camera_spp": 4096,
     "spectral_packet_size": 4,
     "mode": "dispersion",
     "wavelength_min_nm": 380.0,
@@ -37,33 +37,29 @@
       "fov_y_degrees": 35.0
     },
     "background_linear_rgb": [
-      0.08,
-      0.1,
-      0.14
+      1.0,
+      1.0,
+      1.0
     ],
     "environment": {
-      "map_path": "assets/HDRI/herkulessaulen_4k.hdr",
+      "map_path": "assets/HDRI/monochrome_studio_04_4k.hdr",
       "rotation_degrees": 0.0,
       "intensity": 1.0,
       "horizon_linear_rgb": [
-        0.16,
-        0.2,
-        0.28
+        1.0,
+        1.0,
+        1.0
       ],
       "zenith_linear_rgb": [
-        0.04,
-        0.08,
-        0.18
+        1.0,
+        1.0,
+        1.0
       ]
     },
     "environment_samples": 8,
     "environment_mis_heuristic": "power",
     "max_diffuse_bounces": 4,
-    "ground_checkerboard": {
-      "cell_size_m": 0.5,
-      "even_scale": 1.0,
-      "odd_scale": 0.25
-    },
+    "ground_checkerboard": null,
     "ground_margin_m": 0.5,
     "objects": [
       {
@@ -90,9 +86,9 @@
         "material": {
           "type": "lambertian",
           "albedo": [
-            0.8,
-            0.8,
-            0.8
+            0.18,
+            0.18,
+            0.18
           ]
         }
       }
