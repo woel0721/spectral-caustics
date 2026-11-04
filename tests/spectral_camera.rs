@@ -21,7 +21,8 @@ use spectral_caustics::{
         spectrum::{cie_xyz, rgb_reflectance},
     },
     render::{
-        Render, SpectralPathState, framebuffer::Framebuffer, render_camera_glass,
+        Render, SpectralPathState, framebuffer::Framebuffer,
+        integrator::spectral::render_fixed_wavelength_camera, render_camera_glass,
         render_spectral_camera, render_spectral_camera_with_packet, trace_spectral_camera_path,
     },
     scene::{Environment, Scene},
@@ -456,6 +457,86 @@ fn terminating_one_lane_preserves_other_lane_wavelengths_rays_rngs_and_radiance(
             cie_xyz(nm).unwrap() * (packet_probe_weight(nm) * d65_spectrum(nm).unwrap() * 25.0);
     }
     assert!((image.pixels[0] - expected).norm() < 1e-13);
+}
+
+#[test]
+fn fixed_wavelength_camera_shares_rays_crn_and_keeps_scalar_radiance_units() {
+    let (scene, records) = packet_probe_scene(false);
+    let wavelengths = [450.0, 550.0, 650.0];
+    let images =
+        render_fixed_wavelength_camera(&scene, 1, 1, 7, 42, IorMode::Dispersion, &wavelengths)
+            .unwrap();
+    let records = records.lock().unwrap();
+    assert_eq!(records.len(), 21);
+    for packet in records.as_chunks::<3>().0 {
+        for (lane, record) in packet.iter().enumerate() {
+            assert_eq!(record.0, wavelengths[lane]);
+            assert_eq!(record.1, packet[0].1);
+            assert_eq!(record.2, packet[0].2);
+        }
+    }
+    assert_ne!(records[0].1, records[3].1);
+    assert_ne!(records[0].2, records[3].2);
+    for (image, &nm) in images.iter().zip(&wavelengths) {
+        assert_eq!((image.width, image.height, image.wavelength_nm), (1, 1, nm));
+        let expected = packet_probe_weight(nm) * d65_spectrum(nm).unwrap();
+        assert!((image.radiance[0] - expected).abs() < 1e-14);
+    }
+}
+
+#[test]
+fn fixed_wavelength_camera_is_thread_invariant_and_rejects_invalid_work() {
+    let mut c = Config::from_json(include_str!("../configs/sphere_spectral.json")).unwrap();
+    c.scene.environment_samples = 2;
+    let scene = Scene::from_config(&c.scene).unwrap();
+    let wavelengths = [450.0, 550.0, 650.0, 550.0];
+    for mode in [IorMode::Constant, IorMode::Dispersion] {
+        let mut reference = None;
+        for threads in [1, 2, 4, 1] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let images = pool
+                .install(|| {
+                    render_fixed_wavelength_camera(&scene, 16, 12, 8, 42, mode, &wavelengths)
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap();
+            assert_eq!(images[1].radiance, images[3].radiance);
+            let bits: Vec<_> = images
+                .iter()
+                .flat_map(|image| image.radiance.iter().map(|v| v.to_bits()))
+                .collect();
+            if let Some(previous) = &reference {
+                assert_eq!(&bits, previous);
+            }
+            reference = Some(bits);
+        }
+    }
+    for wavelengths in [&[][..], &[f64::NAN][..], &[379.0][..], &[781.0][..]] {
+        assert!(
+            render_fixed_wavelength_camera(&scene, 1, 1, 1, 42, IorMode::Dispersion, wavelengths)
+                .is_err()
+        );
+    }
+    assert!(
+        render_fixed_wavelength_camera(&scene, 1, 1, 0, 42, IorMode::Dispersion, &[550.0]).is_err()
+    );
+    assert!(
+        render_fixed_wavelength_camera(
+            &scene,
+            1,
+            1,
+            usize::MAX,
+            42,
+            IorMode::Dispersion,
+            &[450.0, 550.0, 650.0]
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("溢出")
+    );
 }
 
 #[test]

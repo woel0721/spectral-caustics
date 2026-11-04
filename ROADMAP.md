@@ -13,7 +13,7 @@
 | 光谱相机 | 单波长或四波长 Packet，共享主射线和公共路径随机数、独立标量路径；总 SPP 个完整细分波长层；Dielectric/Lambertian/Mirror；CIE 与 1/pλ 的 XYZ Monte Carlo 积分 |
 | 照明 | 解析太阳、HDRI/渐变环境、重要性采样、固定配额 Balance/Power MIS |
 | 光源焦散 | 显式选择理想 Dielectric Sphere/Prism；材质 Constant/Cauchy IOR、双界面 Snell/Fresnel、地面 XYZ 双线性累积、CIE/D65 积分 |
-| 调试 | debug 构建可输出四张路径 AOV 与 JSON，目标物体独立可选 |
+| 调试 | debug 构建可输出四张路径 AOV 与 JSON，目标物体独立可选；固定波长相机与灯带亚像素投影诊断 |
 | 工程 | JSON 校验、固定 seed、独立 RNG 流、Rayon 线程一致性、XYZ → 线性 RGB → 曝光/简化 ACES → sRGB PNG |
 
 默认展示使用 768×432、256 SPP、8 个环境样本、Power MIS、4 次连续连接及随附 HDRI。Rust 内置默认值与展示 JSON 的区别见 README。
@@ -31,6 +31,15 @@
 - 尚无环境/金属焦散、通用 Photon Mapping、BVH/KD-Tree、GUI 或 GPU。圆角仍由平面段近似，未使用平滑法线。
 
 ## 最近一次实现验收
+
+固定波长相机投影诊断，2026-11-04。
+
+- 新增 `render::integrator::spectral::render_fixed_wavelength_camera()`，多个固定波长共享每条初始相机射线和三类 CRN，独立进行标量路径追踪。每张图各自使用指定 SPP，返回原始 Lλ，不进行波长积分；原 Packet/RGB 路径保持原样，仅共用原有输入校验。
+- 新示例 `spectral_wavelength_projection` 固定 450/550/650 nm，输出 D65 归一化灰度图、伪彩位置叠加、原始中央剖面及球内灯带投影 CSV/JSON。半高边界从色调映射前的剖面线性插值，原点在左上，像素中心为 x+0.5/y+0.5；选取球内中央区域排除直接背景灯带和侧面反射。
+- 433 项回归测试及示例的 2 项投影测试通过；fmt、locked 全目标构建、完整测试、严格 Clippy、diff check 通过。验证共享射线/CRN、单波长辐亮度单位、重复波长逐位一致、1/2/4 线程一致、非法波长/采样/溢出，以及亚像素边界和无效剖面处理。原测试全部保留，没有新增依赖。
+- 实跑当前 512×512 场景，每波长 2048 SPP、seed=42、Dispersion，三张图使用同一组 536,870,912 条主射线，分别独立追踪。中央扫描线 y=256.5 px 的灯带中心分别为 285.3533、285.8566、286.1116 px，450→650 nm 中心向右移动约 0.7582 px。该数值是本场景的半高边界插值估计；64×64 Constant IOR 对照的三波长投影位置一致。
+
+以下保留此前 CRN 实现的验收记录。
 
 Packet 公共随机数（CRN）续改，2026-11-04。
 

@@ -1,8 +1,10 @@
 //! 单波长/四波长 Packet 相机：共享主射线和路径随机序列，独立标量路径与 XYZ 积分。
 
+mod diagnostic;
 mod lighting;
 mod path;
 mod state;
+pub use diagnostic::{FixedWavelengthImage, render_fixed_wavelength_camera};
 pub use path::trace_spectral_camera_path;
 pub use state::SpectralPathState;
 
@@ -53,26 +55,7 @@ pub fn render_spectral_camera_with_packet(
     ior_mode: IorMode,
 ) -> Result<Framebuffer, Box<dyn Error>> {
     let (spatial_spp, total_paths) = spectral_sample_counts(spp, packet_size)?;
-    camera_lighting_setup(scene, width, height)?;
-    scene
-        .light
-        .sunlight()
-        .ok_or("光谱相机要求有效的向下平行太阳")?;
-    width
-        .checked_mul(height)
-        .and_then(|n| n.checked_mul(total_paths))
-        .and_then(|n| n.checked_mul(scene.environment_samples))
-        .and_then(|n| n.checked_mul(scene.max_diffuse_bounces + 1))
-        .ok_or("光谱相机工作量溢出")?;
-    for object in &scene.objects {
-        let material = object
-            .material_id()
-            .and_then(|id| scene.material(id))
-            .ok_or("光谱场景存在未绑定材质的物体")?;
-        if !material.supports_spectral() {
-            return Err("光谱相机暂不支持 GGX Metal 或其他无光谱采样接口的材质".into());
-        }
-    }
+    validate_spectral_camera(scene, width, height, total_paths)?;
     let mut image = Framebuffer::new(width, height);
     let result: Result<(), String> =
         image
@@ -150,6 +133,35 @@ pub fn render_spectral_camera_with_packet(
             });
     result.map_err(Box::<dyn Error>::from)?;
     Ok(image)
+}
+
+fn validate_spectral_camera(
+    scene: &Scene,
+    width: usize,
+    height: usize,
+    total_paths: usize,
+) -> Result<(), Box<dyn Error>> {
+    camera_lighting_setup(scene, width, height)?;
+    scene
+        .light
+        .sunlight()
+        .ok_or("光谱相机要求有效的向下平行太阳")?;
+    width
+        .checked_mul(height)
+        .and_then(|n| n.checked_mul(total_paths))
+        .and_then(|n| n.checked_mul(scene.environment_samples))
+        .and_then(|n| n.checked_mul(scene.max_diffuse_bounces + 1))
+        .ok_or("光谱相机工作量溢出")?;
+    for object in &scene.objects {
+        let material = object
+            .material_id()
+            .and_then(|id| scene.material(id))
+            .ok_or("光谱场景存在未绑定材质的物体")?;
+        if !material.supports_spectral() {
+            return Err("光谱相机暂不支持 GGX Metal 或其他无光谱采样接口的材质".into());
+        }
+    }
+    Ok(())
 }
 
 fn packet_rng(seed: u64, pixel: usize, sample: usize, lane: usize, stream: u64) -> StdRng {

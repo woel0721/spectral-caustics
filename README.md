@@ -163,6 +163,16 @@ cargo run --release --locked --example refract_ray
 
 `sphere_wavelengths [SPP] [边长] [输出目录]` 读取当前 `configs/sphere.json`，分别输出 450/550/650 nm 的相机焦散及地面俯视焦散，默认目录为 `output/sphere/wavelengths/`。三个波长保留相同几何、发射网格、seed、采样块和曝光，因此逐条发射位置相同；每条路径使用材质的 `n(λ)` 和双界面 Fresnel 权重。图像为对应 D65 积分节点的真实 CIE XYZ 贡献（当前节点宽度 10 nm），使用完整光谱的共同归一化，不分别调整各波长亮度；相机仍使用原来的 RGB 材质。示例的两项独立验证可运行 `cargo test --locked --example sphere_wavelengths`。
 
+固定波长相机的灯带投影诊断（与 `sphere_wavelengths` 的 RGB 相机焦散诊断不同）：
+
+```sh
+cargo run --release --locked --example spectral_wavelength_projection -- 2048 512 output/fixed_wavelength_projection
+```
+
+可选参数依次为 `[每波长SPP] [边长] [输出目录] [配置路径]`，默认读取 `configs/sphere_spectral.json`。固定 450/550/650 nm，每个空间样本只生成一次主射线，三个波长使用相同的 CRN 副本并独立追踪；这里每张图各有 2048 SPP，总路径数为三倍，不是三波长 Packet 的总 SPP。`render::integrator::spectral::render_fixed_wavelength_camera()` 返回原始标量 Lλ，不乘 CIE、400 或波长积分权重。
+
+输出三张 `camera_450nm.png` / `camera_550nm.png` / `camera_650nm.png` 灰度图，显示量为 `Lλ/D65(λ)`，共用原曝光/ACES；`overlay_650_550_450.png` 是 R=650、G=550、B=450 的伪彩位置叠加，不代表全光谱积分颜色。`projection.json` 给出球体中央扫描线的左右半高边界、中心和相对 550 nm 的位移；`projection_positions.csv` 记录球体中央 1/4 高度内的扫描线，`central_profiles.csv` 保留未经曝光的中央亮度剖面。坐标原点在左上，像素中心为 `(x+0.5,y+0.5)`；测量排除直接背景灯带及球体两侧的反射边缘，仅定位球内最长的亮条。工具针对当前亮度 6 的单灯带，找不到有效灯带时会报错，不编造位置。
+
 生成专门检查玻璃色散的测试 HDRI：
 
 ```sh
