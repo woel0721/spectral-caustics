@@ -7,6 +7,7 @@ use nalgebra::{Vector2, Vector3};
 pub use crate::environment::Environment;
 
 /// 平行太阳光；水平窗口仅用于有限数量的光子采样，不裁切解析直射光。
+#[derive(Debug, Clone)]
 pub struct ParallelLight {
     pub height_m: f64,
     pub direction: Vector3<f64>,

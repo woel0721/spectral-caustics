@@ -1,4 +1,4 @@
-//! 分层随机发射平行光，将地面落点累积为线性 XYZ。
+//! 分层随机发射平行光/圆盘面光，将地面落点累积为线性 XYZ。
 //! CIE/D65 光谱积分与 Fresnel 加权的直射/焦散分量。
 
 use super::{framebuffer::Framebuffer, utils::bilinear_weights};
@@ -7,7 +7,7 @@ use crate::{
     geometry::ray::Ray,
     optics::{
         iormode::IorMode,
-        spectrum::{d65_normalization, d65_spd, wavelength_to_xyz},
+        spectrum::{d65_spd, wavelength_to_xyz},
     },
     scene::{GroundReceiver, Scene, take_photon_from_hit},
 };
@@ -21,15 +21,15 @@ mod wavelength;
 pub use wavelength::{SpectralCausticsMap, render_wavelength_caustics};
 
 /// 同一批光源样本的两种落地贡献，均为未曝光的 XYZ 辐照度。
-/// direct 用于光源通量检查；相机直射使用无限远太阳，不读取 direct 图。
+/// direct 用于光源通量检查；相机直射使用解析太阳/圆盘 NEE，不读取 direct 图。
 pub struct SpectralLighting {
     pub direct: Framebuffer,
     pub caustics: Framebuffer,
     /// 生成图时的坐标范围，只限制焦散数据查询。
     pub receiver: GroundReceiver,
-    /// 指向太阳的单位向量。
+    /// 指向太阳的单位向量；圆盘时此太阳兼容字段为 +Z，且太阳强度为零。
     pub light_wi: Vector3<f64>,
-    /// 光束法向辐照度，使用与光子相同的 D65/波长积分和相对通量标尺。
+    /// 平行光束法向辐照度，使用与光子相同的 D65/波长积分和相对通量标尺；圆盘为零。
     pub sun_irradiance_xyz: Vector3<f64>,
 }
 
@@ -131,10 +131,7 @@ pub fn render_spectral_lighting(
     ground_id: usize,
     settings: &RenderSetting,
 ) -> Result<SpectralLighting, Box<dyn Error>> {
-    let (light_wi, strength) = scene
-        .light
-        .sunlight()
-        .ok_or("太阳光要求有效的向下方向、窗口与通量")?;
+    let (light_wi, strength) = scene.light.analytic_sun()?.unwrap_or((Vector3::z(), 0.0));
     let receiver = scene.receiver;
     let span = receiver.max_m - receiver.min_m;
     if receiver
@@ -197,14 +194,17 @@ fn render_spectral_buffers(
     let ray_count = samples_x.checked_mul(samples_y).ok_or("光线数量溢出")?;
 
     let area = scene.receiver.area();
-    let total_flux = scene.light.total_flux;
+    let total_flux = scene.light.total_flux();
     let flux_per_ray = total_flux / ray_count as f64;
     let pixel_area = area / pixel_count as f64;
     let spatial_weight = flux_per_ray / pixel_area;
 
     let samples = settings.wavelength_samples()?;
     // 归一化只取决于完整发射光谱，在追踪/丢弃光子之前计算。
-    let k = d65_normalization(&samples).ok_or("D65 光谱归一化失败")?;
+    let k = scene
+        .light
+        .spectral_normalization(&samples)
+        .ok_or("D65 光谱归一化失败")?;
     // 显式选择的非介质仍作二值遮挡，不生成光谱焦散。
     let caustics_object_id = caustics_object_id.filter(|&id| scene.supports_ideal_caustics(id));
     let constant_ior = match mode {
@@ -243,6 +243,7 @@ fn render_spectral_buffers(
         samples_y,
         settings.seed,
         settings.max_spectral_blocks,
+        scene.light.emission_dimensions(),
     )
     .into_par_iter()
     .map(|(rows, mut rng)| {
@@ -346,16 +347,17 @@ fn spectral_sample_blocks(
     samples_y: usize,
     seed: u64,
     max_blocks: usize,
+    random_dimensions: usize,
 ) -> Vec<(Range<usize>, ChaCha12Rng)> {
     let rows_per_block = samples_y.div_ceil(max_blocks);
     let mut blocks = Vec::new();
     for start in (0..samples_y).step_by(rows_per_block) {
         let end = start.saturating_add(rows_per_block).min(samples_y);
         let mut rng = ChaCha12Rng::seed_from_u64(seed);
-        // 一个 f64 消耗两个 u32 word，每条光线的 X/Y 两个偏移合计消耗四个。
-        // u128 避免大采样数乘以 4 时在 usize 中溢出。
+        // 一个 f64 消耗两个 u32 word；平行光两维、圆盘位置/方向共四维。
+        // u128 避免大采样数在 usize 中溢出。
         let first_sample = start as u128 * samples_x as u128;
-        rng.set_word_pos(first_sample * 4);
+        rng.set_word_pos(first_sample * random_dimensions as u128 * 2);
         blocks.push((start..end, rng));
     }
     blocks
@@ -370,18 +372,19 @@ fn for_each_emitted_hit(
     rng: &mut ChaCha12Rng,
     mut visit: impl FnMut(Ray, crate::geometry::hit::Hit) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
-    let span = scene.light.aperture_max_m - scene.light.aperture_min_m;
+    let area = scene.light.as_disk().is_some();
     for sample_y in rows {
         for sample_x in 0..samples_x {
-            let origin_x = scene.light.aperture_min_m.x
-                + (sample_x as f64 + rng.random::<f64>()) / samples_x as f64 * span.x;
-            let origin_y = scene.light.aperture_min_m.y
-                + (sample_y as f64 + rng.random::<f64>()) / samples_y as f64 * span.y;
-            let ray = Ray::new(
-                Vector3::new(origin_x, origin_y, scene.light.height_m),
-                scene.light.direction,
-            )
-            .ok_or("平行光线构造失败")?;
+            let u = [
+                (sample_x as f64 + rng.random::<f64>()) / samples_x as f64,
+                (sample_y as f64 + rng.random::<f64>()) / samples_y as f64,
+            ];
+            let v = if area {
+                [rng.random::<f64>(), rng.random::<f64>()]
+            } else {
+                [0.0; 2]
+            };
+            let ray = scene.light.emission_ray(u, v).ok_or("光源发射采样失败")?;
             if let Some(hit) = scene.intersect(&ray) {
                 visit(ray, hit)?;
             }
@@ -424,13 +427,14 @@ fn splat_spectral_xyz(
 
 #[cfg(test)]
 mod tests {
+    use crate::optics::spectrum::d65_normalization;
     const SAMPLING_SEED: u64 = 42;
     const MAX_SPECTRAL_BLOCKS: usize = 16;
 
     // 这些能量/落点参考值使用垂直光源，独立于展示场景的默认斜射光。
     fn vertical_light_scene() -> Scene {
         let mut scene = Scene::new();
-        scene.light.direction = -Vector3::z();
+        scene.light.as_parallel_mut().unwrap().direction = -Vector3::z();
         scene
     }
 
@@ -463,6 +467,26 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    #[test]
+    fn emission_blocks_seek_both_parallel_and_disk_random_dimensions_exactly() {
+        for dimensions in [2, 4] {
+            for max_blocks in [1, 2, 7] {
+                let mut reference = StdRng::seed_from_u64(SAMPLING_SEED);
+                for (rows, mut rng) in
+                    spectral_sample_blocks(3, 9, SAMPLING_SEED, max_blocks, dimensions)
+                {
+                    for _ in rows {
+                        for _ in 0..3 {
+                            for _ in 0..dimensions {
+                                assert_eq!(reference.random::<f64>(), rng.random::<f64>());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn render_weighted_landing_points(
         scene: &Scene,
         _ground_id: usize,
@@ -471,22 +495,25 @@ mod tests {
     ) -> Result<Framebuffer, Box<dyn Error>> {
         let nx = settings.width * settings.samples_per_pixel_axis;
         let ny = settings.height * settings.samples_per_pixel_axis;
-        let weight = scene.light.total_flux / (nx * ny) as f64
+        let weight = scene.light.as_parallel().unwrap().total_flux / (nx * ny) as f64
             * (settings.width * settings.height) as f64
             / scene.receiver.area();
-        let span = scene.light.aperture_max_m - scene.light.aperture_min_m;
+        let span = scene.light.as_parallel().unwrap().aperture_max_m
+            - scene.light.as_parallel().unwrap().aperture_min_m;
         let mut rng = StdRng::seed_from_u64(settings.seed);
         let mut image = Framebuffer::new(settings.width, settings.height);
         for y in 0..ny {
             for x in 0..nx {
                 let origin = Vector3::new(
-                    scene.light.aperture_min_m.x
+                    scene.light.as_parallel().unwrap().aperture_min_m.x
                         + (x as f64 + rng.random::<f64>()) / nx as f64 * span.x,
-                    scene.light.aperture_min_m.y
+                    scene.light.as_parallel().unwrap().aperture_min_m.y
                         + (y as f64 + rng.random::<f64>()) / ny as f64 * span.y,
-                    scene.light.height_m,
+                    scene.light.as_parallel().unwrap().height_m,
                 );
-                if let Some(p) = landing(Ray::new(origin, scene.light.direction).unwrap()) {
+                if let Some(p) =
+                    landing(Ray::new(origin, scene.light.as_parallel().unwrap().direction).unwrap())
+                {
                     splat_spectral_xyz(
                         &mut image,
                         p.position,
@@ -553,7 +580,7 @@ mod tests {
     #[test]
     fn oblique_sun_and_photon_flux_share_the_horizontal_window_scale() {
         let mut scene = Scene::new();
-        scene.light.direction = Vector3::new(-3.0, 0.0, -4.0);
+        scene.light.as_parallel_mut().unwrap().direction = Vector3::new(-3.0, 0.0, -4.0);
         // 整个发射窗口的落点平移 -3*3/4=-2.25 米；接收窗口一起平移。
         scene.receiver.min_m.x -= 2.25;
         scene.receiver.max_m.x -= 2.25;
@@ -564,8 +591,12 @@ mod tests {
             * scene.receiver.area()
             / (settings.width * settings.height) as f64;
         let analytic_e = lighting.sun_irradiance_xyz.y * lighting.light_wi.z;
-        assert!((photon_flux - scene.light.total_flux).abs() < 1e-12);
-        assert!((analytic_e - scene.light.total_flux / scene.receiver.area()).abs() < 1e-12);
+        assert!((photon_flux - scene.light.as_parallel().unwrap().total_flux).abs() < 1e-12);
+        assert!(
+            (analytic_e - scene.light.as_parallel().unwrap().total_flux / scene.receiver.area())
+                .abs()
+                < 1e-12
+        );
         assert!((lighting.sun_irradiance_xyz.y - 0.625).abs() < 1e-12);
     }
 
@@ -580,10 +611,10 @@ mod tests {
             Vector3::zeros(),
             Vector3::repeat(f64::NAN),
         ] {
-            scene.light.direction = direction;
+            scene.light.as_parallel_mut().unwrap().direction = direction;
             assert!(render_spectral_lighting(&scene, None, ground, &settings).is_err());
         }
-        scene.light.direction = -Vector3::z();
+        scene.light.as_parallel_mut().unwrap().direction = -Vector3::z();
         let mut lighting = render_spectral_lighting(&scene, None, ground, &settings).unwrap();
         lighting.caustics.pixels[0].x = f64::NAN;
         assert!(lighting.combined().is_err());
@@ -597,7 +628,7 @@ mod tests {
     fn spectral_blocks_cover_every_row_and_replay_the_original_random_sequence() {
         for (samples_x, samples_y) in [(1, 1), (7, 5), (3, 17), (5, 33)] {
             let blocks =
-                spectral_sample_blocks(samples_x, samples_y, SAMPLING_SEED, MAX_SPECTRAL_BLOCKS);
+                spectral_sample_blocks(samples_x, samples_y, SAMPLING_SEED, MAX_SPECTRAL_BLOCKS, 2);
             assert!(blocks.len() <= MAX_SPECTRAL_BLOCKS);
             let mut serial_rng = StdRng::seed_from_u64(SAMPLING_SEED);
             let mut next_row = 0;
@@ -760,7 +791,10 @@ mod tests {
                     let flux: Vector3<f64> = image.pixels.iter().copied().sum::<Vector3<f64>>()
                         * scene.receiver.area()
                         / (width * height) as f64;
-                    assert!((flux - white_xyz * scene.light.total_flux).norm() < 2e-12);
+                    assert!(
+                        (flux - white_xyz * scene.light.as_parallel().unwrap().total_flux).norm()
+                            < 2e-12
+                    );
                 }
             }
         }

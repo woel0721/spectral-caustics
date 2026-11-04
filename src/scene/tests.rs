@@ -101,31 +101,31 @@ fn sky_gradient_uses_world_z_hdr_and_constant_background() {
 #[test]
 fn sunlight_uses_projected_window_area_and_rejects_degenerate_inputs() {
     let mut light = Scene::new().light;
-    light.direction = -Vector3::z();
+    light.as_parallel_mut().unwrap().direction = -Vector3::z();
     assert_eq!(light.sunlight(), Some((Vector3::z(), 0.5)));
-    light.direction = Vector3::new(-3.0, 0.0, -4.0);
+    light.as_parallel_mut().unwrap().direction = Vector3::new(-3.0, 0.0, -4.0);
     let (wi, strength) = light.sunlight().unwrap();
     assert!((wi - Vector3::new(0.6, 0.0, 0.8)).norm() < 1e-12);
     assert_eq!(strength, 0.625);
-    light.direction *= 10.0;
+    light.as_parallel_mut().unwrap().direction *= 10.0;
     assert_eq!(light.sunlight(), Some((wi, strength)));
-    light.aperture_min_m *= 2.0;
-    light.aperture_max_m *= 2.0;
-    light.total_flux *= 4.0;
+    light.as_parallel_mut().unwrap().aperture_min_m *= 2.0;
+    light.as_parallel_mut().unwrap().aperture_max_m *= 2.0;
+    light.as_parallel_mut().unwrap().total_flux *= 4.0;
     assert_eq!(light.sunlight(), Some((wi, strength)));
-    light.total_flux = 0.0;
+    light.as_parallel_mut().unwrap().total_flux = 0.0;
     assert_eq!(light.sunlight(), Some((wi, 0.0)));
     for flux in [-1.0, f64::NAN, f64::INFINITY] {
-        light.total_flux = flux;
+        light.as_parallel_mut().unwrap().total_flux = flux;
         assert!(light.sunlight().is_none());
     }
-    light.total_flux = 8.0;
-    light.direction = Vector3::new(1.0, 0.0, -PARALLEL_EPSILON / 2.0);
+    light.as_parallel_mut().unwrap().total_flux = 8.0;
+    light.as_parallel_mut().unwrap().direction = Vector3::new(1.0, 0.0, -PARALLEL_EPSILON / 2.0);
     assert!(light.sunlight().is_none());
-    light.direction = -Vector3::z();
-    light.aperture_max_m = light.aperture_min_m;
+    light.as_parallel_mut().unwrap().direction = -Vector3::z();
+    light.as_parallel_mut().unwrap().aperture_max_m = light.as_parallel().unwrap().aperture_min_m;
     assert!(light.sunlight().is_none());
-    light.aperture_max_m = Vector2::repeat(f64::INFINITY);
+    light.as_parallel_mut().unwrap().aperture_max_m = Vector2::repeat(f64::INFINITY);
     assert!(light.sunlight().is_none());
 }
 use crate::geometry::{ground::Ground, prism::Prism, ray::Ray};
@@ -547,11 +547,26 @@ fn empty_and_configured_scenes_preserve_distinct_defaults_and_shared_fields() {
         (Some(0), Some(1))
     );
     assert_eq!(empty.background_color, configured.background_color);
-    assert_eq!(empty.light.direction, configured.light.direction);
-    assert_eq!(empty.light.height_m, configured.light.height_m);
-    assert_eq!(empty.light.aperture_min_m, configured.light.aperture_min_m);
-    assert_eq!(empty.light.aperture_max_m, configured.light.aperture_max_m);
-    assert_eq!(empty.light.total_flux, configured.light.total_flux);
+    assert_eq!(
+        empty.light.as_parallel().unwrap().direction,
+        configured.light.as_parallel().unwrap().direction
+    );
+    assert_eq!(
+        empty.light.as_parallel().unwrap().height_m,
+        configured.light.as_parallel().unwrap().height_m
+    );
+    assert_eq!(
+        empty.light.as_parallel().unwrap().aperture_min_m,
+        configured.light.as_parallel().unwrap().aperture_min_m
+    );
+    assert_eq!(
+        empty.light.as_parallel().unwrap().aperture_max_m,
+        configured.light.as_parallel().unwrap().aperture_max_m
+    );
+    assert_eq!(
+        empty.light.as_parallel().unwrap().total_flux,
+        configured.light.as_parallel().unwrap().total_flux
+    );
     assert_eq!(empty.receiver.min_m, configured.receiver.min_m);
     assert_eq!(empty.receiver.max_m, configured.receiver.max_m);
     for direction in [Vector3::x(), Vector3::y(), Vector3::z()] {

@@ -1,11 +1,11 @@
 //! Scene 的默认构建、JSON 转换与几何/材质实例化。
 
-use super::{Checkerboard, Environment, GroundReceiver, ParallelLight, Scene};
+use super::{Checkerboard, Environment, GroundReceiver, Light, Scene};
 use crate::{
     camera::Camera,
     config::sceneconfig::{ObjectConfig, SceneConfig},
     geometry::{
-        beveled_prism::BeveledPrism, ground::Ground, prism::Prism, ray::Ray, sphere::Sphere,
+        beveled_prism::BeveledPrism, ground::Ground, prism::Prism, sphere::Sphere,
         vertical_prism::VerticalPrism,
     },
     material,
@@ -36,6 +36,7 @@ impl Scene {
                 .map(Environment::try_from)
                 .transpose()?,
             environment_samples: config.environment_samples,
+            light_samples: config.light_samples,
             environment_mis_heuristic: config.environment_mis_heuristic,
             max_diffuse_bounces: config.max_diffuse_bounces,
             ground_checkerboard: config
@@ -45,15 +46,7 @@ impl Scene {
                 .transpose()?,
             objects: Vec::new(),
             materials: Vec::new(),
-            light: ParallelLight {
-                height_m: config.light.height_m,
-                direction: Ray::new(Vector3::zeros(), Vector3::from(config.light.direction))
-                    .ok_or("光源方向无法归一化")?
-                    .direction,
-                aperture_min_m: Vector2::from(config.light.aperture_min_m),
-                aperture_max_m: Vector2::from(config.light.aperture_max_m),
-                total_flux: config.light.total_flux,
-            },
+            light: Light::try_from(&config.light)?,
             receiver: GroundReceiver {
                 min_m: Vector2::from(config.receiver.min_m),
                 max_m: Vector2::from(config.receiver.max_m),
@@ -114,7 +107,11 @@ impl Scene {
                     if scene.ground_id.is_some() {
                         return Err("当前场景只支持一个接收地面".into());
                     }
-                    if *height_m >= config.light.height_m {
+                    if config
+                        .light
+                        .as_parallel()
+                        .is_some_and(|light| *height_m >= light.height_m)
+                    {
                         return Err("光源发射面必须高于接收地面".into());
                     }
                     scene.ground_id = Some(

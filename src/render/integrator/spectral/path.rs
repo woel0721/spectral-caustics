@@ -1,8 +1,9 @@
+use super::super::area::AreaLightSampler;
 use super::super::{offset_ray_origin, path::MAX_DELTA_EVENTS};
 use super::{SpectralPathState, lighting};
 use crate::{
     geometry::ray::Ray,
-    material::unit_vector,
+    material::{BsdfValue, EvaluateMode, unit_vector},
     optics::{emission::rgb_emission, iormode::IorMode},
     render::caustics::SpectralCausticsMap,
     scene::Scene,
@@ -77,6 +78,7 @@ pub fn trace_spectral_camera_path_with_caustics(
     if scene.environment_samples == 0 {
         return Err("环境样本数必须为正".into());
     }
+    let mut area = AreaLightSampler::new(scene, prefix_rng);
     loop {
         state.validate()?;
         if state.throughput == 0.0 {
@@ -120,7 +122,14 @@ pub fn trace_spectral_camera_path_with_caustics(
             let scale = scene
                 .ground_reflectance_scale(&hit)
                 .ok_or("光谱棋盘格坐标无效")?;
-            let direct = lighting::direct_sun(scene, &hit, material, wo, state.wavelength_nm)?;
+            let direct = if state.debug_disable_ground_sun
+                && scene.ground_id.is_some()
+                && hit.object_id == scene.ground_id
+            {
+                0.0
+            } else {
+                lighting::direct_sun(scene, &hit, material, wo, state.wavelength_nm)?
+            };
             let environment = lighting::environment_lighting(
                 scene,
                 &hit,
@@ -135,6 +144,21 @@ pub fn trace_spectral_camera_path_with_caustics(
                 },
             )?;
             state.radiance += state.throughput * (direct + environment) * scale;
+            let BsdfValue::Spectral(area_direct) = area.lighting(
+                scene,
+                &hit,
+                material,
+                wo,
+                EvaluateMode::Spectral {
+                    wavelength_nm: state.wavelength_nm,
+                },
+            )?
+            else {
+                return Err("面积光源光谱模式无效".into());
+            };
+            if area_direct != 0.0 {
+                state.radiance += state.throughput * area_direct * scale;
+            }
             if !state.has_non_delta_vertex
                 && state.non_delta_bounces == 0
                 && let Some(map) = caustics

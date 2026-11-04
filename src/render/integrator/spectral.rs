@@ -64,7 +64,15 @@ pub fn render_spectral_camera_with_packet(
         mode: ior_mode,
         ..RenderSetting::default()
     };
-    Ok(render_spectral_camera_buffers(scene, &settings, None, false)?.combined)
+    render_spectral_camera_without_caustics(scene, &settings)
+}
+
+/// Render 的单图入口保留完整相机设置，包括调试开关；不分配分量图或光源图集。
+pub(crate) fn render_spectral_camera_without_caustics(
+    scene: &Scene,
+    settings: &RenderSetting,
+) -> Result<Framebuffer, Box<dyn Error>> {
+    Ok(render_spectral_camera_buffers(scene, settings, None, false)?.combined)
 }
 
 /// 一批 Hero/Packet 样本积分为 Direct、Caustics、Combined 的未曝光线性 XYZ。
@@ -165,6 +173,7 @@ fn render_spectral_camera_buffers(
                     packet_wavelength_nm(i, spatial_spp, lane, u)
                 };
                 let mut state = SpectralPathState::new(ray, nm, scene.max_diffuse_bounces)?;
+                state.debug_disable_ground_sun = settings.spectral_debug_disable_ground_sun;
                 trace_spectral_camera_path_with_caustics(
                     scene,
                     &mut state,
@@ -233,10 +242,13 @@ fn validate_spectral_camera(
     total_paths: usize,
 ) -> Result<(), Box<dyn Error>> {
     camera_lighting_setup(scene, width, height)?;
-    scene
-        .light
-        .sunlight()
-        .ok_or("光谱相机要求有效的向下平行太阳")?;
+    width
+        .checked_mul(height)
+        .and_then(|n| n.checked_mul(total_paths))
+        .and_then(|n| n.checked_mul(scene.light_samples))
+        .and_then(|n| n.checked_mul(scene.max_diffuse_bounces + 1))
+        .ok_or("有限光源样本总数溢出")?;
+    scene.light.validate_emission()?;
     width
         .checked_mul(height)
         .and_then(|n| n.checked_mul(total_paths))

@@ -3,10 +3,7 @@
 use super::{for_each_emitted_hit, ground_splat_weights, spectral_sample_blocks};
 use crate::{
     config::rendersetting::RenderSetting,
-    optics::{
-        iormode::IorMode,
-        spectrum::{d65_normalization, d65_spd},
-    },
+    optics::{iormode::IorMode, spectrum::d65_spd},
     scene::{GroundReceiver, Scene, take_photon_from_hit},
 };
 use nalgebra::Vector3;
@@ -112,7 +109,7 @@ pub fn render_wavelength_caustics(
     {
         return Err("光谱焦散要求有效的 Lambertian 地面".into());
     }
-    scene.light.sunlight().ok_or("光谱焦散太阳参数无效")?;
+    scene.light.validate_emission()?;
     let receiver = scene.receiver;
     let span = receiver.max_m - receiver.min_m;
     if receiver
@@ -146,8 +143,12 @@ pub fn render_wavelength_caustics(
         .ok_or("焦散采样数溢出")?;
     let rays = nx.checked_mul(ny).ok_or("焦散光线数量溢出")?;
     // 与原光源图完全相同：每条空间光线的通量 / 地面像素面积。
-    let spatial_weight = (scene.light.total_flux / rays as f64) / (receiver.area() / count as f64);
-    let k = d65_normalization(&samples).ok_or("D65 光谱归一化失败")?;
+    let spatial_weight =
+        (scene.light.total_flux() / rays as f64) / (receiver.area() / count as f64);
+    let k = scene
+        .light
+        .spectral_normalization(&samples)
+        .ok_or("D65 光谱归一化失败")?;
     let geometry_layer = |nm: f64| -> Result<Vec<f64>, &'static str> {
         let ior = scene
             .photon_ior(object_id, Some(nm), settings.mode)
@@ -158,9 +159,13 @@ pub fn render_wavelength_caustics(
             .map_err(|_| "无法分配单波长焦散层")?;
         pixels.resize(count, 0.0);
         // 每层以同一固定顺序累加同一批空间样本；线程数不改变浮点分组。
-        for (rows, mut rng) in
-            spectral_sample_blocks(nx, ny, settings.seed, settings.max_spectral_blocks)
-        {
+        for (rows, mut rng) in spectral_sample_blocks(
+            nx,
+            ny,
+            settings.seed,
+            settings.max_spectral_blocks,
+            scene.light.emission_dimensions(),
+        ) {
             for_each_emitted_hit(scene, nx, ny, rows, &mut rng, |ray, hit| {
                 if hit.object_id != Some(object_id) {
                     return Ok(());

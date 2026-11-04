@@ -9,6 +9,7 @@ mod photon;
 use crate::{camera::Camera, config::sceneconfig::EnvironmentMisHeuristic, material::Material};
 use nalgebra::Vector3;
 
+pub use crate::light::{DiskAreaLight, Light};
 pub use checkerboard::Checkerboard;
 pub use lighting::{Environment, GroundReceiver, ParallelLight};
 pub use objects::SceneObject;
@@ -24,6 +25,8 @@ pub struct Scene {
     pub environment: Option<Environment>,
     /// 每个漫反射终点的环境方向样本数，与相机 SPP 独立。
     pub environment_samples: usize,
+    /// 有限面光源在每个连续着色顶点的独立面积样本数，默认 1。
+    pub light_samples: usize,
     /// HDRI 固定配额的 MIS 启发式，不影响单样本或渐变天空。
     pub environment_mis_heuristic: EnvironmentMisHeuristic,
     /// 有限的额外 Lambertian 反弹数；独立于玻璃上限，缺省为 0。
@@ -34,7 +37,7 @@ pub struct Scene {
     pub objects: Vec<SceneObject>,
     /// 场景拥有材质，Hit.material_id 只保存本表的下标。
     materials: Vec<Box<dyn Material>>,
-    pub light: ParallelLight,
+    pub light: Light,
     pub receiver: GroundReceiver,
     /// 显式开启 caustics 的理想介质物体；与几何种类、集合顺序及 Debug 目标独立。
     pub caustics_object_id: Option<usize>,

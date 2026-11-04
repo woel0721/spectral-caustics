@@ -41,7 +41,9 @@ pub(super) fn direct_sun(
     wo: Vector3<f64>,
     wavelength_nm: f64,
 ) -> Result<f64, Box<dyn Error>> {
-    let (wi, strength) = scene.light.sunlight().ok_or("光谱太阳参数无效")?;
+    let Some((wi, strength)) = scene.light.analytic_sun()? else {
+        return Ok(0.0);
+    };
     let normal = unit_vector(hit.normal).ok_or("光谱表面法线无效")?;
     let cosine = normal.dot(&wi).max(0.0);
     let f = evaluate(material, wi, wo, normal, wavelength_nm)?;

@@ -191,24 +191,25 @@ mod tests {
         let k = d65_normalization(&samples).unwrap();
         let nx = c.render.width * c.render.samples_per_pixel_axis;
         let ny = c.render.height * c.render.samples_per_pixel_axis;
-        let spatial_weight = scene.light.total_flux
+        let spatial_weight = scene.light.as_parallel().unwrap().total_flux
             / (nx * ny) as f64
             / (scene.receiver.area() / (c.render.width * c.render.height) as f64);
         let mut expected =
             WAVELENGTHS_NM.map(|_| Framebuffer::new(c.render.width, c.render.height));
         let mut rng = ChaCha12Rng::seed_from_u64(c.render.seed);
-        let span = scene.light.aperture_max_m - scene.light.aperture_min_m;
+        let span = scene.light.as_parallel().unwrap().aperture_max_m
+            - scene.light.as_parallel().unwrap().aperture_min_m;
         for y in 0..ny {
             for x in 0..nx {
                 let ray = Ray::new(
                     Vector3::new(
-                        scene.light.aperture_min_m.x
+                        scene.light.as_parallel().unwrap().aperture_min_m.x
                             + (x as f64 + rng.random::<f64>()) / nx as f64 * span.x,
-                        scene.light.aperture_min_m.y
+                        scene.light.as_parallel().unwrap().aperture_min_m.y
                             + (y as f64 + rng.random::<f64>()) / ny as f64 * span.y,
-                        scene.light.height_m,
+                        scene.light.as_parallel().unwrap().height_m,
                     ),
-                    scene.light.direction,
+                    scene.light.as_parallel().unwrap().direction,
                 )
                 .unwrap();
                 if scene

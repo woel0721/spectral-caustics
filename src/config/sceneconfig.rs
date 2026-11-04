@@ -1,5 +1,6 @@
 //! 可保存为 JSON 的场景描述；几何数据在运行时再转换为 Hittable 对象。
 
+pub use super::lightconfig::{DiskAreaLightConfig, LightConfig};
 use super::{cameraconfig::CameraConfig, materialconfig::MaterialConfig};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -27,6 +28,9 @@ pub struct SceneConfig {
     /// 每条相机路径在漫反射终点采样的环境方向数，默认 1。
     #[serde(default = "default_environment_samples")]
     pub environment_samples: usize,
+    /// 圆盘 Direct NEE 的每顶点面积样本数；平行光不抽取这些样本。
+    #[serde(default = "default_environment_samples")]
+    pub light_samples: usize,
     /// HDRI 多样本 MIS 权重；省略字段时缺省为 Balance。
     #[serde(default)]
     pub environment_mis_heuristic: EnvironmentMisHeuristic,
@@ -43,7 +47,8 @@ pub struct SceneConfig {
     #[serde(default)]
     pub debug_object_id: Option<usize>,
     pub objects: Vec<ObjectConfig>,
-    pub light: ParallelLightConfig,
+    #[serde(deserialize_with = "super::lightconfig::deserialize_light")]
+    pub light: LightConfig,
     pub receiver: GroundReceiverConfig,
 }
 
@@ -223,6 +228,7 @@ impl Default for SceneConfig {
             background_linear_rgb: [0.08, 0.10, 0.14],
             environment: Some(EnvironmentConfig::default()),
             environment_samples: default_environment_samples(),
+            light_samples: 1,
             environment_mis_heuristic: EnvironmentMisHeuristic::default(),
             max_diffuse_bounces: 0,
             ground_checkerboard: Some(CheckerboardConfig::default()),
@@ -246,7 +252,7 @@ impl Default for SceneConfig {
                     material: MaterialConfig::default(),
                 },
             ],
-            light: ParallelLightConfig::default(),
+            light: LightConfig::default(),
             receiver: GroundReceiverConfig::default(),
         }
     }
@@ -306,6 +312,9 @@ impl SceneConfig {
         }
         if self.environment_samples == 0 {
             return Err("scene.environment_samples 必须大于零".into());
+        }
+        if self.light_samples == 0 {
+            return Err("scene.light_samples 必须大于零".into());
         }
         validate_diffuse_bounces(self.max_diffuse_bounces)?;
         if let Some(checkerboard) = &self.ground_checkerboard {
@@ -443,17 +452,7 @@ impl SceneConfig {
         {
             return Err("scene.debug_object_id 必须是 objects 中有效的零基下标".into());
         }
-        let direction_norm_squared: f64 = self.light.direction.iter().map(|v| v * v).sum();
-        if !self.light.height_m.is_finite()
-            || !direction_norm_squared.is_finite()
-            || direction_norm_squared <= 0.0
-            || !self.light.total_flux.is_finite()
-            || self.light.total_flux < 0.0
-        {
-            return Err("scene.light 的高度须有限、方向须有限且非零、总通量须有限且非负".into());
-        }
-        validate_bounds(self.light.aperture_min_m, self.light.aperture_max_m)
-            .map_err(|message| format!("scene.light 发射孔径：{message}"))?;
+        self.light.validate()?;
         self.ground_bounds()?;
         Ok(())
     }
@@ -471,7 +470,7 @@ fn default_environment_intensity() -> f64 {
     1.0
 }
 
-fn validate_bounds(min: [f64; 2], max: [f64; 2]) -> Result<(), &'static str> {
+pub(super) fn validate_bounds(min: [f64; 2], max: [f64; 2]) -> Result<(), &'static str> {
     let spans = [max[0] - min[0], max[1] - min[1]];
     let area = spans[0] * spans[1];
     if min.iter().chain(max.iter()).any(|v| !v.is_finite())

@@ -1,5 +1,6 @@
 //! 通用 RGB 相机路径：按 BSDF 事件推进，局部 NEE 与 Delta 链逃逸分开计光。
 use super::{
+    area::AreaLightSampler,
     debug::{PathDebugSample, PathTermination},
     diffuse::{russian_roulette, sample_scatter_ray, secondary_direct_lighting},
     direct::first_surface_lighting,
@@ -7,7 +8,10 @@ use super::{
     ground::GroundLighting,
     types::{CameraPathRngs, CameraPathState},
 };
-use crate::{material::unit_vector, scene::Scene};
+use crate::{
+    material::{BsdfValue, EvaluateMode, unit_vector},
+    scene::Scene,
+};
 use nalgebra::Vector3;
 use std::error::Error;
 
@@ -34,6 +38,7 @@ pub(super) fn trace_camera_path_impl(
     mut debug: Option<&mut PathDebugSample>,
 ) -> Result<(), Box<dyn Error>> {
     crate::config::sceneconfig::validate_diffuse_bounces(scene.max_diffuse_bounces)?;
+    let mut area = AreaLightSampler::new(scene, rngs.camera);
     let termination = loop {
         if !state.throughput.iter().all(|v| v.is_finite() && *v >= 0.0) {
             return Err("路径吞吐量必须有限且非负".into());
@@ -77,6 +82,17 @@ pub(super) fn trace_camera_path_impl(
             let normal = unit_vector(hit.normal).ok_or("表面法线无效")?;
             if normal.dot(&wo) <= 0.0 && !material.has_delta() {
                 break PathTermination::Backface;
+            }
+            let BsdfValue::Rgb(area_direct) =
+                area.lighting(scene, &hit, material, wo, EvaluateMode::Rgb)?
+            else {
+                return Err("面积光源 RGB 模式无效".into());
+            };
+            if area_direct != Vector3::zeros() {
+                let scale = scene
+                    .ground_reflectance_scale(&hit)
+                    .ok_or("地面棋盘格坐标无效")?;
+                state.radiance.direct += state.throughput.component_mul(&area_direct) * scale;
             }
             if state.has_non_delta_vertex || state.non_delta_bounces > 0 {
                 let direct = secondary_direct_lighting(

@@ -441,7 +441,7 @@ fn reference_radiance(
 
 fn diffuse_scene(hdr: &TemporaryHdr) -> Scene {
     let mut scene = hdr.scene(37.0);
-    scene.light.total_flux = 0.0;
+    scene.light.as_parallel_mut().unwrap().total_flux = 0.0;
     scene.ground_checkerboard = None;
     scene.camera = Camera::from_config(&CameraConfig {
         position: [0.0, 0.0, 2.0],

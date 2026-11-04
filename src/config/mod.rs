@@ -2,6 +2,7 @@
 //! 这里只返回配置数据，不创建 Scene、Render 或分配运行时物体集合。
 
 pub mod cameraconfig;
+pub mod lightconfig;
 pub mod materialconfig;
 pub mod rendersetting;
 pub mod sceneconfig;
@@ -51,6 +52,13 @@ impl Config {
                 })
             })
             .ok_or("环境方向样本总数溢出")?;
+        self.render
+            .width
+            .checked_mul(self.render.height)
+            .and_then(|n| n.checked_mul(self.render.camera_spp))
+            .and_then(|n| n.checked_mul(self.scene.light_samples))
+            .and_then(|n| n.checked_mul(self.scene.max_diffuse_bounces + 1))
+            .ok_or("有限光源样本总数溢出")?;
         Ok(())
     }
 
@@ -154,7 +162,7 @@ mod tests {
         expected.scene.environment.as_mut().unwrap().map_path =
             Some(PathBuf::from("assets/HDRI/herkulessaulen_4k.hdr"));
         assert_eq!(config, expected);
-        assert_eq!(config.scene.light.total_flux, 8.0);
+        assert_eq!(config.scene.light.as_parallel().unwrap().total_flux, 8.0);
         assert_eq!(
             Config::from_json(&config.to_json().unwrap()).unwrap(),
             config
@@ -560,7 +568,7 @@ mod tests {
         config.render.seed = 7;
         config.render.thread_count = Some(4);
         config.render.output_path = PathBuf::from("output/中文 焦散.png");
-        config.scene.light.height_m = 4.0;
+        config.scene.light.as_parallel_mut().unwrap().height_m = 4.0;
         config.scene.camera.position = [-2.0, 3.0, 4.0];
         config.scene.camera.target = [0.0, 0.0, 1.2];
         config.scene.camera.fov_y_degrees = 60.0;

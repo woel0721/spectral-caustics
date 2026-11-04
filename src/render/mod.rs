@@ -64,16 +64,8 @@ impl Render {
             return Ok(self.render_spectral_camera_components(scene)?.combined);
         }
         let work = || {
-            integrator::render_spectral_camera_with_packet(
-                scene,
-                self.settings.width,
-                self.settings.height,
-                self.settings.camera_spp,
-                self.settings.spectral_packet_size,
-                self.settings.seed,
-                self.settings.mode,
-            )
-            .map_err(|e| e.to_string())
+            integrator::spectral::render_spectral_camera_without_caustics(scene, &self.settings)
+                .map_err(|e| e.to_string())
         };
         match &self.pool {
             Some(pool) => pool.install(work),

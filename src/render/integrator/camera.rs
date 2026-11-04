@@ -103,6 +103,12 @@ fn render_camera_buffers(
     let (light_wi, light) = camera_lighting_setup(scene, width, height)?;
     width
         .checked_mul(height)
+        .and_then(|n| n.checked_mul(spp))
+        .and_then(|n| n.checked_mul(scene.light_samples))
+        .and_then(|n| n.checked_mul(scene.max_diffuse_bounces + 1))
+        .ok_or("有限光源样本总数溢出")?;
+    width
+        .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(spp))
         .and_then(|paths| paths.checked_mul(scene.environment_samples))
         .and_then(|samples| {

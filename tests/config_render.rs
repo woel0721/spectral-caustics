@@ -86,7 +86,7 @@ fn small_config() -> Config {
     let mut config = Config::default();
     config.scene.environment = None; // 原有太阳/光子回归测试显式关闭天空。
     config.scene.ground_checkerboard = None;
-    config.scene.light.direction = [0.0, 0.0, -1.0];
+    config.scene.light.as_parallel_mut().unwrap().direction = [0.0, 0.0, -1.0];
     config.render.width = 24;
     config.render.height = 12;
     config.render.samples_per_pixel_axis = 2;
@@ -116,7 +116,7 @@ fn sky_from_json_is_added_once_in_all_camera_entries_without_changing_sun_or_pho
     config.scene.camera.position = [0.0, 0.0, 2.0];
     config.scene.camera.target = [0.0; 3];
     config.scene.camera.up = [0.0, 1.0, 0.0];
-    config.scene.light.direction = [-3.0, 0.0, -4.0];
+    config.scene.light.as_parallel_mut().unwrap().direction = [-3.0, 0.0, -4.0];
     let renderer = Render::new(config.render.clone()).unwrap();
     let unlit = Scene::from_config(&config.scene).unwrap();
     let mut lighting = renderer.render_lighting(&unlit).unwrap();
@@ -354,7 +354,7 @@ fn finite_ground_keeps_lighting_beyond_receiver_and_shows_sky_beyond_its_edge() 
 #[test]
 fn ground_larger_than_receiver_preserves_photon_energy_maps() {
     let mut config = small_config();
-    config.scene.light.direction = [0.45, 0.0, -1.0];
+    config.scene.light.as_parallel_mut().unwrap().direction = [0.45, 0.0, -1.0];
     let scene = Scene::from_config(&config.scene).unwrap();
     let mut infinite_reference = Scene::from_config(&config.scene).unwrap();
     infinite_reference.objects[scene.ground_id.unwrap()].geometry =
@@ -665,10 +665,10 @@ fn runtime_scene_builds_configured_vertices_ground_light_receiver_and_ids() {
     config.objects.reverse();
     config.camera.fov_y_degrees = 65.0;
     config.background_linear_rgb = [0.1, 0.2, 0.3];
-    config.light.height_m = 4.0;
-    config.light.direction = [0.4, 0.0, -2.0];
-    config.light.aperture_min_m = [-1.0, -0.5];
-    config.light.aperture_max_m = [1.0, 0.5];
+    config.light.as_parallel_mut().unwrap().height_m = 4.0;
+    config.light.as_parallel_mut().unwrap().direction = [0.4, 0.0, -2.0];
+    config.light.as_parallel_mut().unwrap().aperture_min_m = [-1.0, -0.5];
+    config.light.as_parallel_mut().unwrap().aperture_max_m = [1.0, 0.5];
     config.receiver.min_m = [-3.0, -2.0];
     config.receiver.max_m = [3.0, 2.0];
     let scene = Scene::from_config(&config).unwrap();
@@ -676,9 +676,9 @@ fn runtime_scene_builds_configured_vertices_ground_light_receiver_and_ids() {
     assert_eq!(scene.prism_id, Some(1));
     assert_eq!(scene.camera.fov_y_degrees(), 65.0);
     assert_eq!(scene.background_color, Vector3::new(0.1, 0.2, 0.3));
-    assert_eq!(scene.light.height_m, 4.0);
-    assert!((scene.light.direction.norm() - 1.0).abs() < 1e-12);
-    assert_eq!(scene.light.aperture_min_m.x, -1.0);
+    assert_eq!(scene.light.as_parallel().unwrap().height_m, 4.0);
+    assert!((scene.light.as_parallel().unwrap().direction.norm() - 1.0).abs() < 1e-12);
+    assert_eq!(scene.light.as_parallel().unwrap().aperture_min_m.x, -1.0);
     let ray = Ray::new(Vector3::new(1.0, 0.4, 4.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
     let hit = scene.intersect(&ray).unwrap();
     assert_eq!(hit.object_id, scene.prism_id);
@@ -703,11 +703,11 @@ fn aperture_direction_height_flux_receiver_and_sampling_control_energy_and_posit
         height_m: -0.5,
         material: Default::default(),
     }];
-    config.scene.light.height_m = 4.0;
-    config.scene.light.direction = [0.2, 0.0, -1.0];
-    config.scene.light.aperture_min_m = [-1.0, -0.5];
-    config.scene.light.aperture_max_m = [1.0, 0.5];
-    config.scene.light.total_flux = 6.0;
+    config.scene.light.as_parallel_mut().unwrap().height_m = 4.0;
+    config.scene.light.as_parallel_mut().unwrap().direction = [0.2, 0.0, -1.0];
+    config.scene.light.as_parallel_mut().unwrap().aperture_min_m = [-1.0, -0.5];
+    config.scene.light.as_parallel_mut().unwrap().aperture_max_m = [1.0, 0.5];
+    config.scene.light.as_parallel_mut().unwrap().total_flux = 6.0;
     config.scene.receiver.min_m = [-3.0, -2.0];
     config.scene.receiver.max_m = [3.0, 2.0];
     config.render.seed = 7;
@@ -721,12 +721,12 @@ fn aperture_direction_height_flux_receiver_and_sampling_control_energy_and_posit
         assert!((total_y(&render(&changed)) - expected).abs() < 1e-10);
     }
     let mut changed = config.clone();
-    changed.scene.light.total_flux *= 2.0;
+    changed.scene.light.as_parallel_mut().unwrap().total_flux *= 2.0;
     for (pixel, doubled) in image.pixels.iter().zip(render(&changed).pixels) {
         assert!((pixel * 2.0 - doubled).norm() < 1e-12);
     }
     changed = config.clone();
-    changed.scene.light.total_flux = 0.0;
+    changed.scene.light.as_parallel_mut().unwrap().total_flux = 0.0;
     assert!(
         render(&changed)
             .pixels
@@ -740,9 +740,16 @@ fn aperture_direction_height_flux_receiver_and_sampling_control_energy_and_posit
     for light_change in 0..3 {
         changed = config.clone();
         match light_change {
-            0 => changed.scene.light.direction = [0.0, 0.0, -1.0],
-            1 => changed.scene.light.height_m = 3.0,
-            _ => changed.scene.light.aperture_max_m = [1.5, 0.75],
+            0 => changed.scene.light.as_parallel_mut().unwrap().direction = [0.0, 0.0, -1.0],
+            1 => changed.scene.light.as_parallel_mut().unwrap().height_m = 3.0,
+            _ => {
+                changed
+                    .scene
+                    .light
+                    .as_parallel_mut()
+                    .unwrap()
+                    .aperture_max_m = [1.5, 0.75]
+            }
         }
         assert_ne!(render(&changed).pixels, image.pixels);
     }

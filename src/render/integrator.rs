@@ -1,5 +1,6 @@
 //! 独立 RGB / Hero Wavelength 相机路径、MIS 环境照明与 XYZ 输出。
 
+mod area;
 mod camera;
 pub mod debug;
 mod diffuse;

@@ -19,6 +19,8 @@ pub struct SpectralPathState {
     pub non_delta_bounces: usize,
     pub max_non_delta_bounces: usize,
     pub has_non_delta_vertex: bool,
+    /// 仅用于观察焦散：所有地面顶点忽略解析太阳，环境与 Caustics 继续累计。
+    pub debug_disable_ground_sun: bool,
 }
 
 impl SpectralPathState {
@@ -34,6 +36,7 @@ impl SpectralPathState {
             non_delta_bounces: 0,
             max_non_delta_bounces,
             has_non_delta_vertex: false,
+            debug_disable_ground_sun: false,
         };
         state.validate()?;
         Ok(state)

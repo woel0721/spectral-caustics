@@ -32,6 +32,10 @@ pub struct RenderSetting {
     /// 仅 debug 构建可开启路径统计 AOV；release 忽略此开关，不影响辐亮度或随机流。
     #[serde(default)]
     pub debug_path: bool,
+    /// 光谱相机调试：跳过所有地面顶点的解析太阳直射，保留环境与源端焦散。
+    /// 默认关闭，debug/release 均有效；RGB 相机忽略此开关。
+    #[serde(default)]
+    pub spectral_debug_disable_ground_sun: bool,
     /// 光源端/光谱相机的 IOR 模式；RGB 相机始终使用材质的常数 ior。
     pub mode: IorMode,
     /// 光源端离散积分的波长范围和步长，单位 nm；Hero 相机固定为 380..780 nm。
@@ -88,6 +92,7 @@ impl Default for RenderSetting {
             camera_spp: default_camera_spp(),
             spectral_packet_size: default_spectral_packet_size(),
             debug_path: false,
+            spectral_debug_disable_ground_sun: false,
             mode: IorMode::Dispersion,
             wavelength_min_nm: 380.0,
             wavelength_max_nm: 780.0,
@@ -198,6 +203,27 @@ impl RenderSetting {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spectral_ground_sun_debug_defaults_off_roundtrips_and_requires_bool() {
+        let mut value = serde_json::to_value(RenderSetting::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("spectral_debug_disable_ground_sun");
+        let old: RenderSetting = serde_json::from_value(value.clone()).unwrap();
+        assert!(!old.spectral_debug_disable_ground_sun);
+        value["spectral_debug_disable_ground_sun"] = serde_json::json!(true);
+        let enabled: RenderSetting = serde_json::from_value(value.clone()).unwrap();
+        assert!(enabled.spectral_debug_disable_ground_sun);
+        assert_eq!(
+            serde_json::from_str::<RenderSetting>(&serde_json::to_string(&enabled).unwrap())
+                .unwrap(),
+            enabled
+        );
+        value["spectral_debug_disable_ground_sun"] = serde_json::json!("true");
+        assert!(serde_json::from_value::<RenderSetting>(value).is_err());
+    }
 
     #[test]
     fn wavelength_nodes_include_short_last_interval_and_keep_trapezoid_energy() {

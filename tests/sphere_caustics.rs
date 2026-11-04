@@ -275,9 +275,9 @@ fn photon_flux_is_normalized_once_across_spatial_and_wavelength_sample_counts() 
     let mut c = config();
     c.render.width = 20;
     c.render.height = 20;
-    c.scene.light.direction = [0.0, 0.0, -1.0];
-    c.scene.light.aperture_min_m = [-1.0; 2];
-    c.scene.light.aperture_max_m = [1.0; 2];
+    c.scene.light.as_parallel_mut().unwrap().direction = [0.0, 0.0, -1.0];
+    c.scene.light.as_parallel_mut().unwrap().aperture_min_m = [-1.0; 2];
+    c.scene.light.as_parallel_mut().unwrap().aperture_max_m = [1.0; 2];
     c.scene.receiver.min_m = [-4.0; 2];
     c.scene.receiver.max_m = [4.0; 2];
     set_glass(&mut c, 1.0, None);
@@ -298,7 +298,7 @@ fn photon_flux_is_normalized_once_across_spatial_and_wavelength_sample_counts() 
                 .chain(&lighting.caustics.pixels)
                 .map(|p| p.y * pixel_area)
                 .sum();
-            assert!((flux - c.scene.light.total_flux).abs() < 1e-11);
+            assert!((flux - c.scene.light.as_parallel().unwrap().total_flux).abs() < 1e-11);
             assert!(lighting.caustics.pixels.iter().any(|p| p.y > 0.0));
         }
     }
@@ -315,7 +315,7 @@ fn photon_flux_is_normalized_once_across_spatial_and_wavelength_sample_counts() 
         .iter()
         .map(|p| p.y * scene.receiver.area() / 400.0)
         .sum();
-    assert!(flux > 0.0 && flux < c.scene.light.total_flux);
+    assert!(flux > 0.0 && flux < c.scene.light.as_parallel().unwrap().total_flux);
 }
 
 #[test]

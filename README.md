@@ -1,6 +1,6 @@
 # Spectral Caustics Renderer
 
-Rust CPU 离线渲染器，支持理想 Dielectric Sphere/Prism 的光源端光谱焦散、独立 Hero Wavelength 光谱相机，以及 HDRI、MIS、有界 RGB BSDF 路径和 Rayon 并行。默认展示 Glass、Mirror、GGX 三个球体；光源焦散场景为 [configs/sphere.json](configs/sphere.json)，光谱相机场景为 [configs/sphere_spectral.json](configs/sphere_spectral.json)。当前能力与开发边界见 [ROADMAP.md](ROADMAP.md)。
+Rust CPU 离线渲染器，支持平行光/圆盘面光源、理想 Dielectric Sphere/Prism 的光源端光谱焦散、独立 Hero Wavelength 光谱相机，以及 HDRI、MIS、有界 RGB BSDF 路径和 Rayon 并行。默认展示 Glass、Mirror、GGX 三个球体；光源焦散场景为 [configs/sphere.json](configs/sphere.json)，光谱相机场景为 [configs/sphere_spectral.json](configs/sphere_spectral.json)。当前能力与开发边界见 [ROADMAP.md](ROADMAP.md)。
 
 ## 运行与输出
 
@@ -34,9 +34,12 @@ ACES 对曝光后的每个线性 RGB 通道应用 `x=max(x,0)`、`clamp(x*(2.51*
 | `render.spectral_packet_size` | 1 | 默认展示省略；光谱球场景为 4 |
 | `render.camera_mode` | `rgb` | 默认展示为 `rgb`，光谱相机场景为 `spectral` |
 | `scene.environment_samples` | 1 | 8 |
+| `scene.light.type` | `parallel` | 旧 JSON 省略；圆盘测试为 `disk_area` |
+| `scene.light_samples` | 1 | 圆盘面光源测试场景为 8；平行光不抽取面积样本 |
 | `scene.environment_mis_heuristic` | `balance` | `power` |
 | `scene.max_diffuse_bounces` | 0 | 4 |
 | `render.debug_path` | `false` | `false` |
+| `render.spectral_debug_disable_ground_sun` | `false` | 省略；仅观察暗地面焦散时开启 |
 
 `Config::default()` 保留单三棱镜实验场景和渐变天空；主程序加载上述 JSON。JSON 省略 `scene.environment` 或设为 `null` 会关闭环境照明，使用常量背景；环境中的 `map_path` 省略/null 时使用渐变，否则加载 HDR。`rotation_degrees` 绕 +Z 旋转，`intensity` 在线性空间缩放。
 
@@ -120,6 +123,41 @@ cargo run --release --locked -- output/vertical_prism/spectral_caustics/compare/
 cargo test --locked --test spectral_caustics
 ```
 
+## 圆盘面光源与光谱焦散
+
+[configs/vertical_prism_area_light.json](configs/vertical_prism_area_light.json) 使用单面 Lambertian 圆盘代替太阳：半径 0.01 m、总相对通量 20，位置 `(1.3714,-1.0286,1.55)` m、朝向 `(-0.8,0.6,-0.35)`，关闭环境和背景，地面反射率 0.18。256×256、256 总光谱 SPP、Packet=4、8 个 Direct 面积样本；光源每轴分层 8（每个波长 4,194,304 条发射光线）。曝光 8 仅用于显示，未曝光 XYZ 与源端通量不随曝光改变。
+
+```sh
+cargo run --release --locked -- configs/vertical_prism_area_light.json
+cargo test --locked --test disk_area_light
+```
+
+输出 `output/vertical_prism/area_light/camera_direct.png`、`camera_caustics.png`、`camera_combined.png`。三图共享路径和曝光，在原始 XYZ 中满足分量相加。单独 Caustics 图便于观察被 Direct 亮底削弱的色散边缘；小圆盘仍是向整个半球发散的光源，当前结果呈扇形照明和焦散边缘。`receiver=[(-2,1.5),(1,4.8)]` m 覆盖当前相机可见区域；有限区域之外的光子不重分配通量。减少波长步长和增加源端采样可改善细色边与光子噪声，`camera_spp` 控制相机的独立采样噪声，`light_samples` 控制 Direct/软阴影噪声。
+
+圆盘 JSON 参数放在 `scene.light` 中，`light_samples` 位于 `scene`：
+
+```json
+"light": {
+  "type": "disk_area",
+  "center": [1.371428571428572, -1.028571428571429, 1.55],
+  "normal": [-0.8, 0.6, -0.35],
+  "radius": 0.01,
+  "total_flux": 20.0
+},
+"light_samples": 8
+```
+
+世界坐标和半径的单位为米，normal 在构建时归一化；非法法线、非正半径、负通量、面积/PDF/辐亮度溢出会报错。旧 `scene.light` 省略 `type` 继续解析为 `parallel`，显式 `"type":"parallel"` 也有效，原高度、方向、孔径字段不变。Rust 的 `Scene.light` / `SceneConfig.light` 现在分别为 `Light` / `LightConfig` 枚举；原 `ParallelLight`、`ParallelLightConfig` 类型保留，通过 `.into()` 构造枚举或 `.as_parallel()` / `.as_parallel_mut()` 访问平行光参数。
+
+面积 `A=πr²`，单面辐亮度系数 `Le=Φ/(πA)`。这里 Φ 沿用项目的 D65/Y 相对通量标尺，没有绝对瓦特标定；新圆盘的光谱密度为 `Leλ=Le*Sλ`，`Sλ=d65_spectrum(λ)` 使用 Hero 已有的 380–780 nm 连续归一化（`∫Sλ*ybar(λ)dλ=1`）。RGB Direct 使用同一连续 D65 白光的 XYZ→RGB 积分，光谱 Direct 在当前 λ 求值；两者共用位置、距离、余弦和可见性算法。模型与 [PBRT 的单面面光源约定](https://pbr-book.org/4ed/Light_Sources/Area_Lights) 一致。
+
+- Direct 在圆盘上均匀采点，`pA=1/A`，估计 `fr*Leλ*cos_x*cos_y/(distance²*pA)` 并按 `light_samples` 平均。代码中 `Le/pA=Φ/π` 解析抵消，避免小半径下分别形成巨大辐亮度和巨大 PDF；保留正确的距离平方与两个余弦。背面/遮挡样本贡献零并计入配额分母，不补采；阴影只检查表面至采样点的有限线段，光源后方的物体不遮挡它。
+- Photon 的位置 PDF 同样为 `1/A`，方向为完整单面余弦半球 `pω=cos_y/π`。匹配发射权重 `Leλ*cos_y/(N*pA*pω)=Φ*Sλ/N`，所以空间权重仍是 `Φ/N/pixel_area`。normal 决定发光半球，不把方向裁剪到玻璃；未命中玻璃、TIR、遮挡和超出接收范围的通量直接丢失。源端两个透射界面的 `(1-F_enter)*(1-F_exit)` 只乘一次，不加相机 radiance 的 eta 平方因子。
+- `SpectralCausticsMap` 继续保存不含 CIE/Δλ 的每 nm 标量 Eλ；源端 XYZ 节点求积乘一次梯形 Δλ，相机仅使用原有 `400/SPP`，不再乘节点宽度。圆盘的连续 D65 归一化固定，改变步长或缩窄图集波段不会改变保留节点的发射密度；离散 XYZ 求积仍有数值误差（纯 D65 的 10 nm 白光 Y 误差约 0.0095%，17 nm 约 0.229%）。旧平行光保留离散节点 Y=1 的归一化约定与原渲染行为。
+- 相机仍仅在首次 non-delta 顶点为地面时查询 Eλ，玻璃前缀有效；保留 Lambertian 光谱 BSDF、环境 MIS、RR 和三个分量。圆盘 NEE 在路径开始时从前缀抽一次固定种子，随后使用独立 RNG；改变 `light_samples` 不消费玻璃、首次环境或续追流。Packet 的各 Lane 从共同前缀获得相同面积采样序列，各自持有独立游标；Parallel 不新增随机抽取。光子采样块按光源的 2/4 个随机维度定位，保持 Rayon 确定性，图集仍不按块复制。
+
+当前圆盘是**不可被相机/BSDF 路径直接命中的发射器**，也不作为遮挡几何加入场景。因此 Area Direct 由专用 NEE 唯一估计，不与环境 NEE/MIS 或发光面命中重复计光；Camera→Glass→Disk、镜面中看到圆盘本体等路径尚未实现。玻璃对局部面积 shadow ray 继续采用二值遮挡，Light→Glass→Ground 的双透射由独立光子图提供，未扩展为透明阴影或通用 Photon Mapping。`spectral_debug_disable_ground_sun` 只关闭平行太阳项，保留圆盘 Direct。
+
 ## Hero Wavelength 光谱相机
 
 `render.camera_mode="spectral"` 将每个像素的 380–780 nm 范围按总 SPP 等宽细分，整条标量路径保持各自的波长。`spectral_packet_size` 缺省为 1，保留旧的波长、抖动及路径随机序列；设为 4 时，每个空间样本只生成一次子像素偏移和初始 Camera Ray，分别追踪四条独立路径：
@@ -141,11 +179,13 @@ cargo test --locked --test spectral_caustics
 
 启用理想介质光源焦散时，主程序先构建只读 `SpectralCausticsMap`，同一批 Hero/Packet 样本分别累计 Direct 和 Caustics 的线性 XYZ，再逐像素相加为 Combined。主图仍保存到 `output_path`，同目录另有标准三分量文件；自定义主图名称时还保存 `camera_combined.png`，重名时保护主图。没有选中焦散物体时不构建图集，保留原有主图与随机序列。光谱模式仍不生成路径调试 AOV。
 
-`SpectralCausticsMap` 每节点保存标量地面辐照度 `Eλ`（相对通量/m²/nm），完全来自光子双透射，不从 XYZ 反推。每条空间光线的标尺为 `total_flux / ray_count / pixel_area`，再乘两个界面的 Fresnel 透射率及 `k * D65(λ)`；`k=1/Σ D65(λ) ybar(λ) Δλ` 与既有光源端相同，丢失光子不重新归一化。层内不含 CIE 或 `Δλ`：按节点的梯形宽度积分能还原原光源 XYZ 图；Hero 只在最终积分乘一次 `400/SPP`。这也保留原光源离散归一化与 Hero 解析太阳连续 D65 归一化的区别；二者的数值差随光源波长步长收敛，无经验亮度系数。
+`SpectralCausticsMap` 每节点保存标量地面辐照度 `Eλ`（相对通量/m²/nm），完全来自光子双透射，不从 XYZ 反推。每条空间光线的标尺为 `total_flux / ray_count / pixel_area`，再乘两个界面的 Fresnel 透射率及 `k * D65(λ)`；平行光的 `k=1/Σ D65(λ) ybar(λ) Δλ` 保留既有节点归一化，圆盘则采用与 Hero 一致的固定连续 D65 归一化；两者均不对丢失光子重新归一化。层内不含 CIE 或 `Δλ`：按节点的梯形宽度积分能还原原光源 XYZ 图；Hero 只在最终积分乘一次 `400/SPP`。平行光仍保留原离散归一化与 Hero 解析太阳连续 D65 归一化的区别，其数值差随步长收敛；圆盘两阶段使用同一发射光谱，只有节点/空间近似和求积误差。
 
 查询使用世界 x/y 的像素中心双线性采样和相邻波长线性插值，接收范围/配置发射波段外返回零。有限节点间插值会平滑窄焦散色边，缩小 `wavelength_step_nm` 可提高精度；连续 Hero 积分和原节点梯形积分有不同的求积误差。图集大小为 `波长节点数 × width × height × 8` 字节；256²、10 nm 的 41 层约 20.5 MiB。按波长并行、每层只分配一个标量图；Constant 另用一张临时几何通量图，只追踪一次。Dispersion 各层重放同一发射序列，不为每个采样块复制图集，也不缓存全部光子路径，代价是逐层重做首次求交。
 
 路径仅在**第一个 non-delta 着色顶点为地面**时累加 `throughput * (rhoλ/π) * Eλ`；玻璃/镜面 Delta 前缀仍可读取。反射率由原有光谱 Lambertian 求值一次，棋盘格尺度施加一次；图中已含光源强度、源端 Fresnel 和折射可见性，不再使用太阳 shadow ray 遮挡，不在后续地面顶点重复读取。Direct Sun、Environment MIS、RR 和三类 CRN 的顺序保持原样。
+
+临时观察暗地面上的彩虹时，可在 `render` 中设置 `"spectral_debug_disable_ground_sun": true`。默认 `false`，debug/release 均生效；仅光谱 Camera 的所有地面着色顶点跳过解析太阳 Direct，其他物体的太阳直射、环境照明、背景、光源端 Caustics 生成和相机焦散叠加保持原样。Direct 图仍可能含环境与其他顶点的照明，不必全黑；Combined 仍由未曝光的 Direct + Caustics 得到。该调试开关不消耗随机数，也不改变光源通量、光子图、MIS、RR 或 Packet 配额，RGB 相机忽略它。低层路径调用者可设置 `SpectralPathState.debug_disable_ground_sun`；配置入口通过 `Render::render_camera()` / `render_spectral_camera_components()` 传递。
 
 `Render::render_camera()` 按配置选择 RGB 或光谱；`Render::render_spectral_camera()` 遵循 Packet 配置并按需接入焦散，`Render::render_spectral_camera_components()` 返回三张未曝光 XYZ 图。低层 `render_spectral_camera()` / `render_spectral_camera_with_packet()` / `trace_spectral_camera_path()` 保留无焦散语义与原签名。需要复用预计算数据时，调用 `caustics::render_wavelength_caustics(scene,settings)`，再将 `Option<&SpectralCausticsMap>` 传给 `render_spectral_camera_components(scene,settings,map)` 或 `trace_spectral_camera_path_with_caustics()`；`SpectralPathState.radiance` 保留 Direct，新增 `caustics_radiance`，`combined_radiance()` 返回两者之和。原 RGB 入口继续保持 RGB 语义。当前实验场景为 512×512、2048 总路径、Packet=4（512 个空间样本）、曝光 0.4，使用单灯带 HDRI（旋转 127.0546°）、线性反射率 0.18 的中性灰地面，棋盘格关闭；临时采用 Cauchy A=1.4907、B=0.0084 μm²，550 nm 的 IOR 约为 1.518469。
 

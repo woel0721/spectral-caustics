@@ -98,11 +98,15 @@ fn vertical_sides_refract_the_same_ray_to_separate_spectral_ground_positions() {
     let light = &c.scene.light;
     let ray = Ray::new(
         Vector3::new(
-            (light.aperture_min_m[0] + light.aperture_max_m[0]) * 0.5,
-            (light.aperture_min_m[1] + light.aperture_max_m[1]) * 0.5,
-            light.height_m,
+            (light.as_parallel().unwrap().aperture_min_m[0]
+                + light.as_parallel().unwrap().aperture_max_m[0])
+                * 0.5,
+            (light.as_parallel().unwrap().aperture_min_m[1]
+                + light.as_parallel().unwrap().aperture_max_m[1])
+                * 0.5,
+            light.as_parallel().unwrap().height_m,
         ),
-        light.direction.into(),
+        light.as_parallel().unwrap().direction.into(),
     )
     .unwrap();
     let entry = scene.intersect(&ray).unwrap();
@@ -210,7 +214,7 @@ fn vertical_prism_ground_caustics_are_additive_colored_and_thread_deterministic(
                 .iter()
                 .map(|p| p.y * pixel_area)
                 .sum();
-            assert!(flux > 0.0 && flux < c.scene.light.total_flux);
+            assert!(flux > 0.0 && flux < c.scene.light.as_parallel().unwrap().total_flux);
             let white = lighting.sun_irradiance_xyz / lighting.sun_irradiance_xyz.y;
             let chroma = lighting
                 .caustics

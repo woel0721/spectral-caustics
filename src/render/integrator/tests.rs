@@ -47,7 +47,8 @@ fn ground_scene() -> Scene {
         light: ParallelLightConfig {
             direction: [0.0, 0.0, -1.0],
             ..Default::default()
-        },
+        }
+        .into(),
         camera: CameraConfig {
             position: [0.0, 0.0, 2.0],
             target: [0.0; 3],
@@ -72,7 +73,8 @@ fn neutral_ground_scene(rho: f64) -> Scene {
         light: ParallelLightConfig {
             direction: [0.0, 0.0, -1.0],
             ..Default::default()
-        },
+        }
+        .into(),
         camera: CameraConfig {
             position: [0.0, 0.0, 2.0],
             target: [0.0; 3],
@@ -145,7 +147,7 @@ fn constant_environment_recovers_albedo_for_every_surface_orientation_and_sample
     let environment = scene.environment;
     let mut scene = ground_scene();
     scene.environment = environment;
-    scene.light.total_flux = 0.0;
+    scene.light.as_parallel_mut().unwrap().total_flux = 0.0;
     for samples in [1, 8] {
         scene.environment_samples = samples;
         for spp in [1, 8] {
@@ -477,7 +479,7 @@ fn analytic_direct_is_continuous_across_receiver_and_window_without_double_count
     scene.receiver.min_m = Vector2::repeat(-0.1);
     scene.receiver.max_m = Vector2::repeat(0.1);
     // 斜射光同样以水平窗口 Phi/A 为水平地面辐照度。
-    scene.light.direction = Vector3::new(-3.0, 0.0, -4.0);
+    scene.light.as_parallel_mut().unwrap().direction = Vector3::new(-3.0, 0.0, -4.0);
     let mut lighting = split_ground_map(&scene);
     assert!(
         lighting
@@ -991,12 +993,12 @@ fn glass_renderer_reaches_diffuse_light_and_retains_binary_shadows() {
         Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.5)))),
     );
     // 斜向 shadow ray 绕过有限玻璃面；概率与余弦不能再乘到吞吐量上。
-    scene.light.direction = Vector3::new(0.8, 0.0, -0.6);
+    scene.light.as_parallel_mut().unwrap().direction = Vector3::new(0.8, 0.0, -0.6);
     let rgb = trace_center_pixel(&scene, 42);
     let expected = Vector3::new(0.2, 0.5, 0.8) * (0.5 * 0.6 * 0.5 / PI);
     assert!((rgb - expected).norm() < 1e-12);
     // 向上的 shadow ray 被玻璃遮挡，仍按现有的二值硬阴影处理。
-    scene.light.direction = -Vector3::z();
+    scene.light.as_parallel_mut().unwrap().direction = -Vector3::z();
     assert_eq!(trace_center_pixel(&scene, 42), Vector3::zeros());
 }
 
@@ -1087,7 +1089,7 @@ fn glass_renderer_handles_failed_samples_and_rejects_invalid_values() {
     ] {
         assert!(render_camera_glass(&scene, width, height, 1, 42).is_err());
     }
-    scene.light.direction = Vector3::zeros();
+    scene.light.as_parallel_mut().unwrap().direction = Vector3::zeros();
     assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
 }
 
@@ -1100,9 +1102,9 @@ fn direct_lambertian_matches_albedo_light_and_one_cosine_without_clipping() {
         (Vector3::z(), 0.0),
         (Vector3::x(), 0.0),
     ] {
-        scene.light.direction = direction;
+        scene.light.as_parallel_mut().unwrap().direction = direction;
         for flux in [0.0, 8.0, 64.0] {
-            scene.light.total_flux = flux;
+            scene.light.as_parallel_mut().unwrap().total_flux = flux;
             let image = render_camera_glass(&scene, 3, 2, 1, 42).unwrap();
             assert_eq!((image.width, image.height), (3, 2));
             // 孔径为 4×4 米，Lambertian 为 albedo/π；只乘一次 cosθ。
@@ -1113,9 +1115,9 @@ fn direct_lambertian_matches_albedo_light_and_one_cosine_without_clipping() {
         }
     }
     // 保持总通量，孔径面积减半使当前相对方向光强度加倍。
-    scene.light.direction = -Vector3::z();
-    scene.light.total_flux = 8.0;
-    scene.light.aperture_max_m.x = 0.0;
+    scene.light.as_parallel_mut().unwrap().direction = -Vector3::z();
+    scene.light.as_parallel_mut().unwrap().total_flux = 8.0;
+    scene.light.as_parallel_mut().unwrap().aperture_max_m.x = 0.0;
     let image = render_camera_glass(&scene, 1, 1, 1, 42).unwrap();
     let rgb = xyz_to_linear_srgb(*image.get(0, 0).unwrap()).unwrap();
     assert!((rgb - Vector3::new(0.2, 0.5, 0.8) / PI).norm() < 1e-12);
@@ -1129,7 +1131,8 @@ fn shadow_ray_blocks_light_through_glass_without_hiding_the_ground_from_camera()
         light: ParallelLightConfig {
             direction: [0.0, 0.0, -1.0],
             ..Default::default()
-        },
+        }
+        .into(),
         ..SceneConfig::default()
     };
     // 相机位于 3 cm 间隙内，只有向上的 shadow ray 命中玻璃。
@@ -1234,20 +1237,31 @@ fn camera_lighting_rejects_invalid_dimensions_and_light() {
         Vector3::repeat(f64::INFINITY),
         Vector3::repeat(f64::MAX),
     ] {
-        scene.light.direction = direction;
+        scene.light.as_parallel_mut().unwrap().direction = direction;
         assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
     }
-    scene.light.direction = -Vector3::z();
+    scene.light.as_parallel_mut().unwrap().direction = -Vector3::z();
     for flux in [-1.0, f64::NAN, f64::INFINITY] {
-        scene.light.total_flux = flux;
+        scene.light.as_parallel_mut().unwrap().total_flux = flux;
         assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
     }
-    scene.light.total_flux = 8.0;
-    scene.light.aperture_max_m = scene.light.aperture_min_m;
+    scene.light.as_parallel_mut().unwrap().total_flux = 8.0;
+    scene.light.as_parallel_mut().unwrap().aperture_max_m =
+        scene.light.as_parallel().unwrap().aperture_min_m;
     assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
-    scene.light.aperture_min_m.fill(0.0);
-    scene.light.aperture_max_m.fill(1e-150);
-    scene.light.total_flux = f64::MAX;
+    scene
+        .light
+        .as_parallel_mut()
+        .unwrap()
+        .aperture_min_m
+        .fill(0.0);
+    scene
+        .light
+        .as_parallel_mut()
+        .unwrap()
+        .aperture_max_m
+        .fill(1e-150);
+    scene.light.as_parallel_mut().unwrap().total_flux = f64::MAX;
     assert!(render_camera_glass(&scene, 1, 1, 1, 42).is_err());
 }
 

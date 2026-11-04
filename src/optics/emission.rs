@@ -44,6 +44,25 @@ pub fn d65_spectrum(wavelength_nm: f64) -> Option<f64> {
     Some(d65_spd(wavelength_nm)? * *D65_SCALE)
 }
 
+/// 380..780 nm 连续 D65 的归一化 k；与 Hero 直射使用同一固定发射光谱。
+pub fn d65_normalization_continuous() -> f64 {
+    *D65_SCALE
+}
+
+/// 与 d65_spectrum 相同连续归一化的白光 XYZ；RGB 圆盘 NEE 共用此标尺。
+pub fn d65_white_xyz() -> Vector3<f64> {
+    static WHITE: LazyLock<Vector3<f64>> = LazyLock::new(|| {
+        let f = |nm| cie_xyz(nm).unwrap() * d65_spectrum(nm).unwrap();
+        (380..780)
+            .map(|nm| {
+                let nm = f64::from(nm);
+                (f(nm) + f(nm + 0.5) * 4.0 + f(nm + 1.0)) / 6.0
+            })
+            .sum()
+    });
+    *WHITE
+}
+
 /// PBRT 的独立 Illuminant 七基谱，按 RGB 通道排序组合，再相对其白基谱校准为 D65。
 /// RGB→光谱不唯一：这是发光近似，不保证重建 XYZ 精确还原任意 RGB 色度。
 /// 先分离 max(RGB) 作为 HDR 强度，再重建色度；负 RGB、非有限输入及溢出返回 None。

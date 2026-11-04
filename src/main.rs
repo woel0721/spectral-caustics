@@ -41,6 +41,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     if config.render.camera_mode == spectral_caustics::config::rendersetting::CameraMode::Spectral {
+        if config.render.spectral_debug_disable_ground_sun {
+            println!("光谱调试：地面解析太阳 Direct 已关闭，环境照明与光源端 Caustics 保留");
+        }
         if scene.caustics_object_id.is_some() {
             let images = renderer.render_spectral_camera_components(&scene)?;
             renderer.save(&images.combined, &config.render.output_path)?;

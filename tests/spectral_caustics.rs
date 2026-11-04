@@ -88,7 +88,7 @@ fn scalar_nodes_reintegrate_to_original_xyz_flux_and_resolve_dispersion() {
         }
         let area = scene.receiver.area() / integral.len() as f64;
         let flux = integral.iter().map(|xyz| xyz.y * area).sum::<f64>();
-        assert!(flux > 0.0 && flux < scene.light.total_flux);
+        assert!(flux > 0.0 && flux < scene.light.as_parallel().unwrap().total_flux);
         let nodes: Vec<_> = [450.0, 550.0, 650.0]
             .map(|nm| {
                 atlas
@@ -140,7 +140,7 @@ fn source_flux_does_not_gain_a_wavelength_width_or_spatial_sample_count_factor()
             assert!((geometric_flux(&map, &c.render) / expected - 1.0).abs() < 2e-4);
         }
     }
-    c.scene.light.total_flux *= 2.0;
+    c.scene.light.as_parallel_mut().unwrap().total_flux *= 2.0;
     let doubled = Scene::from_config(&c.scene).unwrap();
     c.render.samples_per_pixel_axis = 1;
     c.render.wavelength_step_nm = 10.0;
@@ -195,7 +195,7 @@ fn glass_prefix_receives_caustics_once_with_scalar_throughput_and_no_shadow_or_r
         let map = render_wavelength_caustics(&scene, &c.render)
             .unwrap()
             .unwrap();
-        let l = &scene.light;
+        let l = scene.light.as_parallel().unwrap();
         let ray = Ray::new(
             Vector3::new(
                 (l.aperture_min_m.x + l.aperture_max_m.x) * 0.5,
@@ -499,6 +499,111 @@ fn disabled_or_absent_source_preserves_old_spectral_camera_and_skips_atlas() {
                 .all(|v| *v == Vector3::zeros())
         );
     }
+}
+
+#[test]
+fn ground_sun_debug_preserves_source_maps_caustics_rgb_and_packet_thread_results() {
+    let mut c = config();
+    c.render.width = 12;
+    c.render.height = 12;
+    c.scene.max_diffuse_bounces = 4;
+    let scene = Scene::from_config(&c.scene).unwrap();
+    let map = render_wavelength_caustics(&scene, &c.render)
+        .unwrap()
+        .unwrap();
+    let rgb_source = Render::new(c.render.clone())
+        .unwrap()
+        .render_lighting(&scene)
+        .unwrap();
+    c.render.spectral_debug_disable_ground_sun = true;
+    let debug_map = render_wavelength_caustics(&scene, &c.render)
+        .unwrap()
+        .unwrap();
+    for i in 0..map.wavelength_samples().len() {
+        assert_eq!(map.layer_irradiance(i), debug_map.layer_irradiance(i));
+    }
+    let debug_source = Render::new(c.render.clone())
+        .unwrap()
+        .render_lighting(&scene)
+        .unwrap();
+    same(&rgb_source.direct, &debug_source.direct);
+    same(&rgb_source.caustics, &debug_source.caustics);
+    for packet in [1, 4] {
+        c.render.spectral_packet_size = packet;
+        c.render.spectral_debug_disable_ground_sun = false;
+        let baseline = render_spectral_camera_components(&scene, &c.render, Some(&map)).unwrap();
+        c.render.spectral_debug_disable_ground_sun = true;
+        let mut reference: Option<spectral_caustics::render::CameraLightingImages> = None;
+        for threads in [1, 2, 4, 1] {
+            c.render.thread_count = Some(threads);
+            let images = Render::new(c.render.clone())
+                .unwrap()
+                .render_camera(&scene)
+                .unwrap();
+            let split = render_spectral_camera_components(&scene, &c.render, Some(&map)).unwrap();
+            same(&images, &split.combined);
+            same(&baseline.caustics, &split.caustics);
+            assert!(split.caustics.pixels.iter().any(|p| p.y > 0.0));
+            assert!(
+                split.direct.pixels.iter().any(|p| p.y > 0.0),
+                "保留环境照明"
+            );
+            assert!(
+                split
+                    .direct
+                    .pixels
+                    .iter()
+                    .zip(&baseline.direct.pixels)
+                    .all(|(d, b)| d.y < b.y)
+            );
+            for ((d, k), sum) in split
+                .direct
+                .pixels
+                .iter()
+                .zip(&split.caustics.pixels)
+                .zip(&split.combined.pixels)
+            {
+                assert_eq!(*d + *k, *sum);
+            }
+            if let Some(old) = &reference {
+                same(&split.direct, &old.direct);
+                same(&split.combined, &old.combined);
+            }
+            reference = Some(split);
+        }
+    }
+    c.render.camera_mode = spectral_caustics::config::rendersetting::CameraMode::Rgb;
+    c.render.spectral_debug_disable_ground_sun = false;
+    let baseline = Render::new(c.render.clone())
+        .unwrap()
+        .render_camera_glass_components(&scene, &rgb_source, c.render.camera_spp, c.render.seed)
+        .unwrap();
+    c.render.spectral_debug_disable_ground_sun = true;
+    let debug = Render::new(c.render.clone())
+        .unwrap()
+        .render_camera_glass_components(&scene, &rgb_source, c.render.camera_spp, c.render.seed)
+        .unwrap();
+    same(&baseline.direct, &debug.direct);
+    same(&baseline.caustics, &debug.caustics);
+    same(&baseline.combined, &debug.combined);
+    // 没有焦散目标时的单图入口也应传递调试开关，不依赖光源图集。
+    c.render.camera_mode = spectral_caustics::config::rendersetting::CameraMode::Spectral;
+    c.scene.environment = None;
+    if let ObjectConfig::VerticalPrism { caustics, .. } = &mut c.scene.objects[0] {
+        *caustics = false;
+    }
+    let scene = Scene::from_config(&c.scene).unwrap();
+    let dark = Render::new(c.render.clone())
+        .unwrap()
+        .render_camera(&scene)
+        .unwrap();
+    assert!(dark.pixels.iter().all(|p| *p == Vector3::zeros()));
+    c.render.spectral_debug_disable_ground_sun = false;
+    let lit = Render::new(c.render)
+        .unwrap()
+        .render_camera(&scene)
+        .unwrap();
+    assert!(lit.pixels.iter().any(|p| p.y > 0.0));
 }
 
 #[test]

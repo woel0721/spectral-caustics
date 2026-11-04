@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         up: [0.0, 0.0, 1.0],
         fov_y_degrees: 42.0,
     })?;
-    scene.light.direction = Vector3::new(1.0, 0.0, -1.0).normalize();
+    scene.light.as_parallel_mut().unwrap().direction = Vector3::new(1.0, 0.0, -1.0).normalize();
     scene.ground_id = Some(scene.add_with_material(
         Box::new(Ground::with_bounds(0.0, Vector2::repeat(-2.5), Vector2::repeat(2.5)).unwrap()),
         Box::new(Lambertian::new(Vector3::repeat(0.7))?),

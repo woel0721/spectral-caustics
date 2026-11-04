@@ -93,7 +93,7 @@ fn empty() -> Scene {
     let mut scene = Scene::new();
     scene.environment = None;
     scene.background_color = Vector3::repeat(1.0);
-    scene.light.total_flux = 0.0;
+    scene.light.as_parallel_mut().unwrap().total_flux = 0.0;
     scene.ground_checkerboard = None;
     scene
 }
@@ -104,7 +104,7 @@ fn ground_scene() -> Scene {
         Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()),
     );
     scene.ground_id = Some(id);
-    scene.light.direction = -Vector3::z();
+    scene.light.as_parallel_mut().unwrap().direction = -Vector3::z();
     scene
 }
 fn probe(scene: &Scene, nm: f64, depth: usize) -> SpectralPathState {
@@ -122,6 +122,66 @@ fn probe(scene: &Scene, nm: f64, depth: usize) -> SpectralPathState {
     )
     .unwrap();
     state
+}
+
+#[test]
+fn ground_sun_debug_removes_only_ground_sun_at_every_vertex_and_preserves_rng() {
+    let mut scene = ground_scene();
+    scene.light.as_parallel_mut().unwrap().total_flux = 8.0;
+    scene.environment = Some(Environment::try_from(&EnvironmentConfig::default()).unwrap());
+    let run = |scene: &Scene, disabled, later| {
+        let mut state = SpectralPathState::new(
+            Ray::new(Vector3::new(0.2, 0.1, 3.0), -Vector3::z()).unwrap(),
+            550.0,
+            0,
+        )
+        .unwrap();
+        state.throughput = 0.37;
+        state.debug_disable_ground_sun = disabled;
+        state.has_non_delta_vertex = later;
+        let [mut prefix, mut environment, mut continuation] =
+            [42, 43, 44].map(StdRng::seed_from_u64);
+        trace_spectral_camera_path(
+            scene,
+            &mut state,
+            IorMode::Dispersion,
+            &mut prefix,
+            &mut environment,
+            &mut continuation,
+        )
+        .unwrap();
+        (
+            state,
+            [
+                prefix.next_u64(),
+                environment.next_u64(),
+                continuation.next_u64(),
+            ],
+        )
+    };
+    for later in [false, true] {
+        let (normal, rng) = run(&scene, false, later);
+        let (dark, debug_rng) = run(&scene, true, later);
+        let (_, strength) = scene.light.sunlight().unwrap();
+        let sun = 0.37 * rgb_reflectance(Vector3::repeat(0.8), 550.0).unwrap() / PI
+            * strength
+            * d65_spectrum(550.0).unwrap();
+        assert!((normal.radiance - dark.radiance - sun).abs() < 1e-14);
+        assert_eq!(rng, debug_rng);
+        assert_eq!(normal.throughput, dark.throughput);
+        assert!(dark.radiance > 0.0, "环境照明应保留");
+        // 独立的零通量太阳对照只用于确认被移除的是太阳项，调试实现本身不改光源。
+        scene.light.as_parallel_mut().unwrap().total_flux = 0.0;
+        let (environment_only, _) = run(&scene, false, later);
+        scene.light.as_parallel_mut().unwrap().total_flux = 8.0;
+        assert_eq!(dark.radiance.to_bits(), environment_only.radiance.to_bits());
+    }
+    // 同一 Lambertian 表面没有被绑定为接收地面时，仍正常接收太阳直射。
+    scene.ground_id = None;
+    let (normal, rng) = run(&scene, false, false);
+    let (debug, debug_rng) = run(&scene, true, false);
+    assert_eq!(normal.radiance.to_bits(), debug.radiance.to_bits());
+    assert_eq!(rng, debug_rng);
 }
 
 #[test]
@@ -823,7 +883,7 @@ fn lambertian_and_mirror_spectral_weights_come_from_reconstruction_and_match_the
 #[test]
 fn scalar_direct_sun_matches_spectral_lambertian_and_spatial_flux_normalization() {
     let mut scene = ground_scene();
-    scene.light.total_flux = 8.0;
+    scene.light.as_parallel_mut().unwrap().total_flux = 8.0;
     let strength = scene.light.sunlight().unwrap().1;
     for nm in [450.0, 550.0, 650.0] {
         let state = probe(&scene, nm, 0);

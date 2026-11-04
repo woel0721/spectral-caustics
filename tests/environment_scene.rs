@@ -403,7 +403,7 @@ fn all_camera_entries_integrate_hdr_with_lambertian_without_changing_photon_ligh
         renderer.render(&with_environment).unwrap().pixels
     );
 
-    config.light.total_flux = 0.0;
+    config.light.as_parallel_mut().unwrap().total_flux = 0.0;
     let mut scene = Scene::from_config(&config).unwrap();
     fs::remove_file(&hdr.0).unwrap();
     let lighting = renderer.render_lighting(&scene).unwrap();

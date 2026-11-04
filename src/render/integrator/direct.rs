@@ -50,6 +50,14 @@ pub(super) fn camera_lighting_setup(
     height: usize,
 ) -> Result<(Vector3<f64>, f64), Box<dyn Error>> {
     crate::config::sceneconfig::validate_diffuse_bounces(scene.max_diffuse_bounces)?;
+    if scene.light_samples == 0 {
+        return Err("光源样本数必须大于零".into());
+    }
+    width
+        .checked_mul(height)
+        .and_then(|n| n.checked_mul(scene.light_samples))
+        .and_then(|n| n.checked_mul(scene.max_diffuse_bounces + 1))
+        .ok_or("有限光源样本总数溢出")?;
     if scene.environment_samples == 0 {
         return Err("环境方向样本数必须大于零".into());
     }
@@ -74,26 +82,7 @@ pub(super) fn camera_lighting_setup(
         .and_then(|count| count.checked_mul(size_of::<Vector3<f64>>()))
         .filter(|&bytes| bytes <= isize::MAX as usize)
         .ok_or("相机光照图的像素缓冲大小溢出")?;
-    let direction_length = scene.light.direction.norm();
-    if !direction_length.is_finite() || direction_length == 0.0 {
-        return Err("光源方向必须有限且非零".into());
-    }
-    let wi = -scene.light.direction / direction_length;
-    let span = scene.light.aperture_max_m - scene.light.aperture_min_m;
-    let area = span.x * span.y;
-    if span.iter().any(|v| !v.is_finite() || *v <= 0.0)
-        || !area.is_finite()
-        || area <= 0.0
-        || !scene.light.total_flux.is_finite()
-        || scene.light.total_flux < 0.0
-    {
-        return Err("光源孔径面积须有限且为正，总通量须有限且非负".into());
-    }
-    let light = scene.light.total_flux / area;
-    if !light.is_finite() {
-        return Err("直接光照强度计算溢出".into());
-    }
-    Ok((wi, light))
+    Ok(scene.light.camera_parameters()?)
 }
 
 pub(super) fn direct_lighting(

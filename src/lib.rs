@@ -4,6 +4,7 @@ pub mod camera;
 pub mod config;
 pub mod environment;
 pub mod geometry;
+pub mod light;
 pub mod material;
 pub mod optics;
 pub mod render;
