@@ -158,6 +158,21 @@ cargo test --locked --test disk_area_light
 
 当前圆盘是**不可被相机/BSDF 路径直接命中的发射器**，也不作为遮挡几何加入场景。因此 Area Direct 由专用 NEE 唯一估计，不与环境 NEE/MIS 或发光面命中重复计光；Camera→Glass→Disk、镜面中看到圆盘本体等路径尚未实现。玻璃对局部面积 shadow ray 继续采用二值遮挡，Light→Glass→Ground 的双透射由独立光子图提供，未扩展为透明阴影或通用 Photon Mapping。`spectral_debug_disable_ground_sun` 只关闭平行太阳项，保留圆盘 Direct。
 
+### 三棱镜与玻璃球展示预览
+
+两组预览均为 384×384、512 总 SPP、Packet=4、Dispersion、seed=42，圆盘半径 0.01 m、通量 20、曝光 8。源端每轴分层 8，Direct 面积样本 8；极弱中性天空用于显示玻璃轮廓，Caustics 分量只来自圆盘光源。配置保留各自的光源位置和取景，重新渲染仍输出到忽略的 `output/disk_preview/`；本次最终 PNG 快照保存在 [assets/previews/disk_area_light](assets/previews/disk_area_light/)。
+
+| 竖直三棱柱 | 玻璃球 |
+| --- | --- |
+| ![圆盘光源下的三棱柱](assets/previews/disk_area_light/prism/camera_combined.png) | ![圆盘光源下的玻璃球](assets/previews/disk_area_light/sphere/camera_combined.png) |
+| [Direct](assets/previews/disk_area_light/prism/camera_direct.png) / [Caustics](assets/previews/disk_area_light/prism/camera_caustics.png) | [Direct](assets/previews/disk_area_light/sphere/camera_direct.png) / [Caustics](assets/previews/disk_area_light/sphere/camera_caustics.png) |
+| [可重载配置](configs/vertical_prism_area_light_preview.json) | [可重载配置](configs/sphere_area_light_preview.json) |
+
+```sh
+cargo run --release --locked -- configs/vertical_prism_area_light_preview.json
+cargo run --release --locked -- configs/sphere_area_light_preview.json
+```
+
 ## Hero Wavelength 光谱相机
 
 `render.camera_mode="spectral"` 将每个像素的 380–780 nm 范围按总 SPP 等宽细分，整条标量路径保持各自的波长。`spectral_packet_size` 缺省为 1，保留旧的波长、抖动及路径随机序列；设为 4 时，每个空间样本只生成一次子像素偏移和初始 Camera Ray，分别追踪四条独立路径：
