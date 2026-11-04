@@ -1,4 +1,4 @@
-//! 单波长/四波长 Packet 相机：共享主射线，独立标量路径，线性 XYZ Monte Carlo 积分。
+//! 单波长/四波长 Packet 相机：共享主射线和路径随机序列，独立标量路径与 XYZ 积分。
 
 mod lighting;
 mod path;
@@ -98,12 +98,24 @@ pub fn render_spectral_camera_with_packet(
                         .camera
                         .ray_for_pixel_sample(index % width, index / width, width, height, offset)
                         .ok_or("光谱相机子像素光线无效")?;
+                    // CRN：每个 Packet 只初始化一组路径流，各 Lane 从相同状态的副本开始。
+                    // 仍隔离前缀、首次环境与续追；Packet=1 不改变原有像素流。
+                    let common_path_rngs = (packet_size == 4).then(|| {
+                        [
+                            packet_rng(seed, index, i, 0, PREFIX_STREAM),
+                            packet_rng(seed, index, i, 0, ENVIRONMENT_STREAM),
+                            packet_rng(seed, index, i, 0, DIFFUSE_STREAM),
+                        ]
+                    });
                     for lane in 0..packet_size {
-                        if packet_size == 4 {
+                        if let Some([common_prefix, common_environment, common_scattering]) =
+                            &common_path_rngs
+                        {
+                            // 波长层内抖动独立；路径流共享随机值，不共享可变游标。
                             wavelength = packet_rng(seed, index, i, lane, WAVELENGTH_STREAM);
-                            prefix = packet_rng(seed, index, i, lane, PREFIX_STREAM);
-                            environment = packet_rng(seed, index, i, lane, ENVIRONMENT_STREAM);
-                            scattering = packet_rng(seed, index, i, lane, DIFFUSE_STREAM);
+                            prefix.clone_from(common_prefix);
+                            environment.clone_from(common_environment);
+                            scattering.clone_from(common_scattering);
                         }
                         let u = wavelength.random::<f64>();
                         let nm = if packet_size == 1 {

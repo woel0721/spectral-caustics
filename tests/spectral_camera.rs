@@ -249,6 +249,15 @@ fn packet_probe_weight(nm: f64) -> f64 {
     (((nm - 380.0) / 100.0).floor() + 1.0) * 0.2
 }
 fn packet_probe_scene(stop_blue: bool) -> (Scene, PacketRecords) {
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let scene = downward_plane_scene(Box::new(PacketProbe {
+        records: records.clone(),
+        stop_blue,
+    }));
+    (scene, records)
+}
+
+fn downward_plane_scene(material: Box<dyn Material>) -> Scene {
     let mut scene = empty();
     scene.camera = spectral_caustics::camera::Camera::from_config(
         &spectral_caustics::config::cameraconfig::CameraConfig {
@@ -259,15 +268,8 @@ fn packet_probe_scene(stop_blue: bool) -> (Scene, PacketRecords) {
         },
     )
     .unwrap();
-    let records = Arc::new(Mutex::new(Vec::new()));
-    scene.add_with_material(
-        Box::new(Ground::new(0.0).unwrap()),
-        Box::new(PacketProbe {
-            records: records.clone(),
-            stop_blue,
-        }),
-    );
-    (scene, records)
+    scene.add_with_material(Box::new(Ground::new(0.0).unwrap()), material);
+    scene
 }
 
 #[test]
@@ -282,9 +284,13 @@ fn packet_four_shares_primary_rays_visits_every_fine_stratum_and_integrates_inde
         let mut visits = vec![0; spp];
         let mut expected = Vector3::zeros();
         for (i, packet) in records.as_chunks::<4>().0.iter().enumerate() {
-            for (lane, &(nm, wo, _)) in packet.iter().enumerate() {
+            for (lane, &(nm, wo, draw)) in packet.iter().enumerate() {
                 // Camera origin 固定于 position；相同 wo 即完整相同的 Primary Ray。
                 assert_eq!(wo, packet[0].1);
+                assert_eq!(
+                    draw, packet[0].2,
+                    "同一 Packet 的玻璃前缀必须使用公共随机数"
+                );
                 let stratum = lane * (spp / 4) + i;
                 let lo = 380.0 + 400.0 * stratum as f64 / spp as f64;
                 let hi = 380.0 + 400.0 * (stratum + 1) as f64 / spp as f64;
@@ -295,10 +301,142 @@ fn packet_four_shares_primary_rays_visits_every_fine_stratum_and_integrates_inde
             }
             if i > 0 {
                 assert_ne!(packet[0].1, records[(i - 1) * 4].1);
+                assert_ne!(packet[0].2, records[(i - 1) * 4].2);
             }
         }
         assert!(visits.iter().all(|&n| n == 1));
         assert!((image.pixels[0] - expected).norm() < 1e-13);
+    }
+}
+
+#[test]
+fn packet_common_random_numbers_align_environment_and_continuation_samples() {
+    struct CaptureDiffuse {
+        inner: Lambertian,
+        records: PacketRecords,
+    }
+    impl Material for CaptureDiffuse {
+        fn supports_spectral(&self) -> bool {
+            true
+        }
+        fn evaluate(
+            &self,
+            wi: Vector3<f64>,
+            wo: Vector3<f64>,
+            n: Vector3<f64>,
+            mode: EvaluateMode,
+        ) -> BsdfValue {
+            self.inner.evaluate(wi, wo, n, mode)
+        }
+        fn pdf(&self, wi: Vector3<f64>, wo: Vector3<f64>, n: Vector3<f64>) -> f64 {
+            self.inner.pdf(wi, wo, n)
+        }
+        fn sample_spectral(
+            &self,
+            wo: Vector3<f64>,
+            n: Vector3<f64>,
+            nm: f64,
+            mode: IorMode,
+            rng: &mut dyn RngCore,
+        ) -> Option<SpectralBsdfSample> {
+            let draw = rng.next_u64();
+            let sample = self.inner.sample_spectral(wo, n, nm, mode, rng)?;
+            self.records.lock().unwrap().push((nm, sample.wi, draw));
+            Some(sample)
+        }
+    }
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let mut scene = downward_plane_scene(Box::new(CaptureDiffuse {
+        inner: Lambertian::new(Vector3::repeat(0.8)).unwrap(),
+        records: records.clone(),
+    }));
+    scene.environment = Some(Environment::try_from(&EnvironmentConfig::default()).unwrap());
+    scene.environment_samples = 3;
+    scene.max_diffuse_bounces = 1;
+    let image =
+        render_spectral_camera_with_packet(&scene, 1, 1, 8, 4, 42, IorMode::Constant).unwrap();
+    assert!(image.pixels[0].y > 0.0);
+    let records = records.lock().unwrap();
+    // 每个 Lane 三次环境 BSDF 采样，再做一次续追 BSDF 采样；共两个 Packet。
+    assert_eq!(records.len(), 32);
+    for packet in records.as_chunks::<16>().0 {
+        for lane in 1..4 {
+            for sample in 0..4 {
+                assert_eq!(packet[lane * 4 + sample].1, packet[sample].1);
+                assert_eq!(packet[lane * 4 + sample].2, packet[sample].2);
+            }
+        }
+        assert_ne!(packet[0].2, packet[1].2, "环境流仍须前进");
+        assert_ne!(packet[0].2, packet[3].2, "环境和续追仍是不同的流");
+    }
+    assert_ne!(
+        records[0].2, records[16].2,
+        "不同 Packet 不能重复同一随机序列"
+    );
+}
+
+#[test]
+fn packet_common_fresnel_draws_align_constant_ior_without_forcing_dispersion_directions() {
+    type GlassRecords = Arc<Mutex<Vec<(f64, SpectralBsdfSample)>>>;
+    struct CaptureGlass {
+        inner: Dielectric,
+        records: GlassRecords,
+    }
+    impl Material for CaptureGlass {
+        fn supports_spectral(&self) -> bool {
+            true
+        }
+        fn has_delta(&self) -> bool {
+            true
+        }
+        fn has_non_delta(&self) -> bool {
+            false
+        }
+        fn evaluate(
+            &self,
+            wi: Vector3<f64>,
+            wo: Vector3<f64>,
+            n: Vector3<f64>,
+            mode: EvaluateMode,
+        ) -> BsdfValue {
+            self.inner.evaluate(wi, wo, n, mode)
+        }
+        fn sample_spectral(
+            &self,
+            wo: Vector3<f64>,
+            n: Vector3<f64>,
+            nm: f64,
+            mode: IorMode,
+            rng: &mut dyn RngCore,
+        ) -> Option<SpectralBsdfSample> {
+            let sample = self.inner.sample_spectral(wo, n, nm, mode, rng)?;
+            self.records.lock().unwrap().push((nm, sample));
+            Some(sample)
+        }
+    }
+    for mode in [IorMode::Constant, IorMode::Dispersion] {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let scene = downward_plane_scene(Box::new(CaptureGlass {
+            inner: Dielectric::with_dispersion(1.52, Some(Cauchy::default())).unwrap(),
+            records: records.clone(),
+        }));
+        render_spectral_camera_with_packet(&scene, 1, 1, 16, 4, 42, mode).unwrap();
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), 16);
+        if mode == IorMode::Constant {
+            for packet in records.as_chunks::<4>().0 {
+                for lane in &packet[1..] {
+                    assert_ne!(lane.0, packet[0].0);
+                    assert_eq!(lane.1, packet[0].1);
+                }
+            }
+        } else {
+            assert!(records.as_chunks::<4>().0.iter().any(|packet| {
+                packet[0].1.event == ScatterType::SpecularTransmission
+                    && packet[2].1.event == ScatterType::SpecularTransmission
+                    && (packet[0].1.wi - packet[2].1.wi).norm() > 1e-5
+            }));
+        }
     }
 }
 

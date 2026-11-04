@@ -86,7 +86,7 @@ ACES 对曝光后的每个线性 RGB 通道应用 `x=max(x,0)`、`clamp(x*(2.51*
 | 单波长路径数 | 512 | 512 |
 | 波长分层 | 全范围 512 层 | 四个 100 nm 波段各 128 层 |
 
-四个 Lane 分别在 380–480、480–580、580–680、680–780 nm 内再按空间样本数细分；每个细分层恰取一个均匀波长。仅共享初始射线和只读 Scene，各 Lane 新建 `SpectralPathState`，独立维护波长、throughput、radiance、散射事件、PDF 和深度，Dielectric 按各自 `n(λ)` 计算后续方向。Packet=4 的波长、玻璃前缀、首次环境 NEE、续追随机流由 seed、像素、空间样本、Lane 和 Stream ID 确定；相机流只按空间样本生成一次。某条 Lane 提前结束不会改变其他路径的随机状态。后续玻璃/连续 BSDF、环境与 RR 仍只使用续追流；Rayon 不改变像素内累积顺序。
+四个 Lane 分别在 380–480、480–580、580–680、680–780 nm 内再按空间样本数细分；每个细分层恰取一个均匀波长。共享初始射线和只读 Scene，各 Lane 新建 `SpectralPathState`，独立维护波长、throughput、radiance、散射事件、PDF 和深度，Dielectric 按各自 `n(λ)` 计算后续方向。Packet=4 的波长层内抖动仍由 seed、像素、空间样本、Lane 和 WAVELENGTH_STREAM 确定。玻璃前缀、首次环境 NEE、续追三类路径流采用公共随机数（CRN）：每个 Packet 为各类流建立一份初始状态，四个 Lane 各自复制同一初始状态后追踪，公共路径种子不依赖 Lane。相机流仍只生成一次主射线。各 Lane 的可变 RNG 游标独立，提前结束或额外抽样不会消耗其他 Lane 的序列；不同 Packet、像素及三类流之间仍隔离。后续 BSDF、玻璃、环境与 RR 只消费续追流。CRN 复用各流的第 k 个随机数，不按反弹/事件固定维度；路径分叉后，随机数对应的物理事件可能错位，不强制同步方向或分支。Rayon 不改变像素内累积顺序。
 
 各层等配额混合的边缘 PDF 为 `1/400 nm⁻¹`。总路径数 `N=(SPP/packet_size)*packet_size=SPP`，最终直接累积 `Σ cie_xyz(λ)*Lλ/(pλ*N)`，每项积分权重均为 `400/SPP`；不额外乘 `Δλ`，也不再次除以 Packet 大小。所有贡献累积为同一个线性 XYZ 像素，最后才曝光、ACES 和 sRGB 编码。
 
@@ -99,7 +99,7 @@ ACES 对曝光后的每个线性 RGB 通道应用 `x=max(x,0)`、`clamp(x*(2.51*
 
 `Render::render_camera()` 按配置选择 RGB 或光谱；`Render::render_spectral_camera()` 遵循配置中的 Packet 大小。公开函数 `render_spectral_camera()` 保留原签名并固定 Packet=1；新增 `render_spectral_camera_with_packet(scene,width,height,spp,packet_size,seed,ior_mode)`。`trace_spectral_camera_path()` 保持单波长接口。原 RGB 入口继续保持 RGB 语义。示例场景为 256×256、512 总路径、Packet=4。
 
-Packet=4 将独立空间样本数减为四分之一，可能降低颜色方差，也可能增加轮廓或纹理边缘的空间噪声；独立 Lane 的 Fresnel、环境和漫反射采样仍产生噪声，不保证每个场景都优于 Packet=1。
+Packet=4 将独立空间样本数减为四分之一，可能降低颜色方差，也可能增加轮廓或纹理边缘的空间噪声；公共随机数只改变 Lane 间的相关性，各单波长估计的 PDF、Fresnel/RR 补偿、400/SPP 权重和总路径预算保持原样；不保证每个场景都优于 Packet=1。
 
 ```sh
 cargo run --release --locked --example spectral_camera_compare
@@ -116,6 +116,8 @@ cargo run --release --locked --example spectral_packet_compare -- 512 256 output
 依次对比 Constant/Dispersion 的 Packet=1/4，种子从 42 递增；参考图为 Packet=1、独立种子 20261104。输出 PNG、可重载配置、线性 `.xyz64`（行优先 little-endian f64 XYZ）和 `metrics.json`。统计曝光前的 XYZ 方差/MSE、xy 色度方差、球内部/轮廓边缘，并单独计时相机渲染。参考图仍含有限 SPP 噪声，少量种子不能代表所有场景。
 
 2026-11-04 实跑上述命令：256×256、每像素 512 条光谱路径（每帧 33,554,432 条）、10 线程、种子 42/43/44，分别使用两种 IOR 模式的 4096 SPP 参考。球内部为中心射线命中球体、排除四邻域轮廓的 11,880 像素；轮廓包含两侧的 708 像素。色度方差是跨种子的像素 `Var(X/(X+Y+Z))+Var(Y/(X+Y+Z))`，下表方差/MSE 再对球内部像素取均值。MSE 使用曝光前 XYZ，三个通道取均值；耗时只计相机渲染。
+
+下表为 `31bb1b6` 的独立 Lane 随机流版本结果，不代表当前 CRN 的效果。本次 CRN 改动仅做正确性回归，未运行效果或性能实验。
 
 | IOR | Packet | 球内 xy 方差 | 球内 XYZ MSE | 平均耗时 |
 | --- | --- | --- | --- | --- |

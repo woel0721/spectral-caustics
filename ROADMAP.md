@@ -10,7 +10,7 @@
 | 几何 | 米制 Z-up、有限地面、Sphere、Prism、三条长棱各 8 段圆角的 BeveledPrism；材质绑定与最近交点 |
 | RGB 材质 | Lambertian、Dielectric、Mirror、各向同性 GgxMetal，统一 `BsdfSample` 接口 |
 | 相机路径 | 独立 RGB / Hero Wavelength 标量路径，最多 32 次 Delta、0..1024 次额外连接与补偿 Russian Roulette |
-| 光谱相机 | 单波长或四波长 Packet，共享主射线、独立标量路径；总 SPP 个完整细分波长层；Dielectric/Lambertian/Mirror；CIE 与 1/pλ 的 XYZ Monte Carlo 积分 |
+| 光谱相机 | 单波长或四波长 Packet，共享主射线和公共路径随机数、独立标量路径；总 SPP 个完整细分波长层；Dielectric/Lambertian/Mirror；CIE 与 1/pλ 的 XYZ Monte Carlo 积分 |
 | 照明 | 解析太阳、HDRI/渐变环境、重要性采样、固定配额 Balance/Power MIS |
 | 光源焦散 | 显式选择理想 Dielectric Sphere/Prism；材质 Constant/Cauchy IOR、双界面 Snell/Fresnel、地面 XYZ 双线性累积、CIE/D65 积分 |
 | 调试 | debug 构建可输出四张路径 AOV 与 JSON，目标物体独立可选 |
@@ -31,6 +31,15 @@
 - 尚无环境/金属焦散、通用 Photon Mapping、BVH/KD-Tree、GUI 或 GPU。圆角仍由平面段近似，未使用平滑法线。
 
 ## 最近一次实现验收
+
+Packet 公共随机数（CRN）续改，2026-11-04。
+
+- Packet=4 在每个空间样本建立玻璃前缀、首次环境 NEE、续追三类初始 RNG 状态；各 Lane 从相同状态的独立副本开始。波长层内抖动继续按 Lane 分开，Packet=1 保留原随机序列，SPP、PDF、XYZ 权重、Fresnel 和 RR 补偿保持原样。
+- 只复用随机序列，不共享可变 RNG 或标量路径状态；提前结束或额外消费不影响其他 Lane。路径分叉后不强制同步物理事件或方向，未加入按反弹/事件固定维度的采样器。
+- 保留原有全部 429 项测试，新增 2 项集成测试，当前 **341 项单元 + 90 项集成 = 431 项全部通过**；fmt、fmt check、locked 全目标构建、完整测试、严格 Clippy、diff check 均通过。新增测试检查真实积分器的环境/续追 CRN 对齐、Constant IOR 的共同玻璃事件，以及 Dispersion 下不同折射方向；加强玻璃前缀公共随机数断言，原提前结束隔离、能量与 1/2/4 线程确定性测试继续通过。
+- 按本次要求仅做正确性回归，没有运行新的效果或性能实验。没有新增依赖、删除文件/API/测试；保留工作区已有的场景配置调整。
+
+以下保留此前独立 Lane 随机流版本的 Packet 初版验收记录，其实验数据不代表当前 CRN 的效果。
 
 4-Wavelength Packet 光谱相机，2026-11-04；核心实现提交 `1cc29e9`。
 
