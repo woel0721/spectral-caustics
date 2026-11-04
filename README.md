@@ -163,6 +163,22 @@ cargo run --release --locked --example refract_ray
 
 `sphere_wavelengths [SPP] [边长] [输出目录]` 读取当前 `configs/sphere.json`，分别输出 450/550/650 nm 的相机焦散及地面俯视焦散，默认目录为 `output/sphere/wavelengths/`。三个波长保留相同几何、发射网格、seed、采样块和曝光，因此逐条发射位置相同；每条路径使用材质的 `n(λ)` 和双界面 Fresnel 权重。图像为对应 D65 积分节点的真实 CIE XYZ 贡献（当前节点宽度 10 nm），使用完整光谱的共同归一化，不分别调整各波长亮度；相机仍使用原来的 RGB 材质。示例的两项独立验证可运行 `cargo test --locked --example sphere_wavelengths`。
 
+生成专门检查玻璃色散的测试 HDRI：
+
+```sh
+cargo run --release --example generate_test_hdri
+cargo run --release --example generate_test_hdri -- stripes
+cargo run --release --example generate_test_hdri -- single_light_bar
+```
+
+默认/`stripes` 输出 `assets/HDRI/dispersion_stripes.hdr`，`single_light_bar` 输出 `assets/HDRI/dispersion_single_light_bar.hdr`，两种模式可同时保留。分辨率均为 2048×1024，按像素中心采样 equirectangular UV。背景线性 RGB 为 0.12；面板中心 `(0.5,0.5)`、半宽/半高 `(0.18,0.14)`。条纹模式在面板内绘制 12 条交替竖条（6 白、6 黑），白为 6.0，黑为 0.01。单灯带模式在同一黑色面板中央绘制一条等宽白条。参数集中在工具顶部常量中。
+
+HDR 使用 `image::codecs::hdr::HdrEncoder` 直接写入 `Rgb<f32>`，不经过曝光、Tone Mapping 或 sRGB；Radiance RGBE 格式会有正常的量化误差。项目环境贴图约定中，`u=0.5,v=0.5` 对应局部 +X 水平方向，可使用现有 `rotation_degrees` 转动面板。要在 `configs/sphere_spectral.json` 使用它，将现有 `scene.environment.map_path` 改为：
+
+```json
+"map_path": "assets/HDRI/dispersion_stripes.hdr"
+```
+
 ## 实现与物理边界
 
 - 入口流程见 [src/main.rs](src/main.rs)：`Config::load` → `Scene::from_config` → `Render::render_lighting` → `render_camera_glass_components` → `Render::save`。相机只读取光源图的 Caustics；sampled Direct 用于能量诊断，不能与解析太阳重复相加。
