@@ -9,7 +9,7 @@ use spectral_caustics::{
     },
     geometry::{ground::Ground, hit::Hit, object::Hittable, ray::Ray, sphere::Sphere},
     material::{
-        BsdfValue, EvaluateMode, Material, ScatterType,
+        BsdfValue, EvaluateMode, Material, ScatterType, SpectralBsdfSample,
         dielectric::{Dielectric, fresnel_dielectric},
         lambertian::Lambertian,
         mirror::Mirror,
@@ -22,7 +22,7 @@ use spectral_caustics::{
     },
     render::{
         Render, SpectralPathState, framebuffer::Framebuffer, render_camera_glass,
-        render_spectral_camera, trace_spectral_camera_path,
+        render_spectral_camera, render_spectral_camera_with_packet, trace_spectral_camera_path,
     },
     scene::{Environment, Scene},
 };
@@ -31,6 +31,7 @@ use std::{
     fs,
     path::PathBuf,
     process::Command,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -189,6 +190,277 @@ fn camera_visits_each_wavelength_stratum_once_including_one_and_odd_spp() {
                 "SPP={spp}, layer={i}, wavelength={nm}"
             );
         }
+    }
+}
+
+// 测试材质记录真实积分器传入的波长、入射方向及前缀随机数。
+// 各波段使用不同标量权重；可以让蓝 Lane 多抽随机数并提前结束。
+type PacketRecords = Arc<Mutex<Vec<(f64, Vector3<f64>, u64)>>>;
+struct PacketProbe {
+    records: PacketRecords,
+    stop_blue: bool,
+}
+impl Material for PacketProbe {
+    fn supports_spectral(&self) -> bool {
+        true
+    }
+    fn has_delta(&self) -> bool {
+        true
+    }
+    fn has_non_delta(&self) -> bool {
+        false
+    }
+    fn evaluate(
+        &self,
+        _wi: Vector3<f64>,
+        _wo: Vector3<f64>,
+        _n: Vector3<f64>,
+        mode: EvaluateMode,
+    ) -> BsdfValue {
+        match mode {
+            EvaluateMode::Spectral { .. } => BsdfValue::Spectral(0.0),
+            EvaluateMode::Rgb => BsdfValue::Rgb(Vector3::zeros()),
+        }
+    }
+    fn sample_spectral(
+        &self,
+        wo: Vector3<f64>,
+        _n: Vector3<f64>,
+        nm: f64,
+        _mode: IorMode,
+        rng: &mut dyn RngCore,
+    ) -> Option<SpectralBsdfSample> {
+        self.records.lock().unwrap().push((nm, wo, rng.next_u64()));
+        if self.stop_blue && nm < 480.0 {
+            for _ in 0..97 {
+                rng.next_u64();
+            }
+            return None;
+        }
+        Some(SpectralBsdfSample {
+            wi: Vector3::z(),
+            weight: packet_probe_weight(nm),
+            pdf: None,
+            event: ScatterType::SpecularReflection,
+        })
+    }
+}
+fn packet_probe_weight(nm: f64) -> f64 {
+    (((nm - 380.0) / 100.0).floor() + 1.0) * 0.2
+}
+fn packet_probe_scene(stop_blue: bool) -> (Scene, PacketRecords) {
+    let mut scene = empty();
+    scene.camera = spectral_caustics::camera::Camera::from_config(
+        &spectral_caustics::config::cameraconfig::CameraConfig {
+            position: [0.0, 0.0, 2.0],
+            target: [0.0; 3],
+            up: [0.0, 1.0, 0.0],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let records = Arc::new(Mutex::new(Vec::new()));
+    scene.add_with_material(
+        Box::new(Ground::new(0.0).unwrap()),
+        Box::new(PacketProbe {
+            records: records.clone(),
+            stop_blue,
+        }),
+    );
+    (scene, records)
+}
+
+#[test]
+fn packet_four_shares_primary_rays_visits_every_fine_stratum_and_integrates_independent_scalars() {
+    for spp in [4, 16, 512] {
+        let (scene, records) = packet_probe_scene(false);
+        let image =
+            render_spectral_camera_with_packet(&scene, 1, 1, spp, 4, 42, IorMode::Dispersion)
+                .unwrap();
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), spp);
+        let mut visits = vec![0; spp];
+        let mut expected = Vector3::zeros();
+        for (i, packet) in records.as_chunks::<4>().0.iter().enumerate() {
+            for (lane, &(nm, wo, _)) in packet.iter().enumerate() {
+                // Camera origin 固定于 position；相同 wo 即完整相同的 Primary Ray。
+                assert_eq!(wo, packet[0].1);
+                let stratum = lane * (spp / 4) + i;
+                let lo = 380.0 + 400.0 * stratum as f64 / spp as f64;
+                let hi = 380.0 + 400.0 * (stratum + 1) as f64 / spp as f64;
+                assert!(nm >= lo && nm < hi);
+                visits[((nm - 380.0) * spp as f64 / 400.0).floor() as usize] += 1;
+                expected += cie_xyz(nm).unwrap()
+                    * (packet_probe_weight(nm) * d65_spectrum(nm).unwrap() * (400.0 / spp as f64));
+            }
+            if i > 0 {
+                assert_ne!(packet[0].1, records[(i - 1) * 4].1);
+            }
+        }
+        assert!(visits.iter().all(|&n| n == 1));
+        assert!((image.pixels[0] - expected).norm() < 1e-13);
+    }
+}
+
+#[test]
+fn terminating_one_lane_preserves_other_lane_wavelengths_rays_rngs_and_radiance() {
+    let (scene, reference) = packet_probe_scene(false);
+    render_spectral_camera_with_packet(&scene, 1, 1, 16, 4, 42, IorMode::Constant).unwrap();
+    let (scene, terminated) = packet_probe_scene(true);
+    let image =
+        render_spectral_camera_with_packet(&scene, 1, 1, 16, 4, 42, IorMode::Constant).unwrap();
+    let reference = reference.lock().unwrap();
+    let terminated = terminated.lock().unwrap();
+    assert_eq!(*reference, *terminated);
+    let mut expected = Vector3::zeros();
+    for &(nm, _, _) in terminated.iter().filter(|s| s.0 >= 480.0) {
+        expected +=
+            cie_xyz(nm).unwrap() * (packet_probe_weight(nm) * d65_spectrum(nm).unwrap() * 25.0);
+    }
+    assert!((image.pixels[0] - expected).norm() < 1e-13);
+}
+
+#[test]
+fn packet_one_keeps_legacy_public_entry_and_seeded_primary_sampling() {
+    use rand::Rng;
+    let (scene, records) = packet_probe_scene(false);
+    let legacy = render_spectral_camera(&scene, 1, 1, 7, 42, IorMode::Constant).unwrap();
+    // pixel_seed(42, 0, CAMERA_STREAM=0) 的原种子；波长流和路径流不能扰动抖动。
+    let mut jitter = StdRng::seed_from_u64(12058926934050108962);
+    for &(_, wo, _) in records.lock().unwrap().iter() {
+        let ray = scene
+            .camera
+            .ray_for_pixel_sample(
+                0,
+                0,
+                1,
+                1,
+                nalgebra::Vector2::new(jitter.random(), jitter.random()),
+            )
+            .unwrap();
+        assert_eq!(-ray.direction, wo);
+    }
+    same(
+        &legacy,
+        &render_spectral_camera_with_packet(&scene, 1, 1, 7, 1, 42, IorMode::Constant).unwrap(),
+    );
+    same(
+        &legacy,
+        &Render::new(RenderSetting {
+            width: 1,
+            height: 1,
+            mode: IorMode::Constant,
+            ..settings(7)
+        })
+        .unwrap()
+        .render_camera(&scene)
+        .unwrap(),
+    );
+}
+
+#[test]
+fn packet_four_d65_white_and_energy_match_the_single_wavelength_integral() {
+    let scene = empty();
+    let expected = integrate(|nm| d65_spectrum(nm).unwrap());
+    let image = |spp, packet| {
+        Render::new(RenderSetting {
+            spectral_packet_size: packet,
+            ..settings(spp)
+        })
+        .unwrap()
+        .render_camera(&scene)
+        .unwrap()
+    };
+    let low = mean(&image(16, 4));
+    let high = mean(&image(16384, 4));
+    let hero = mean(&image(16384, 1));
+    assert!((high - expected).norm() < 0.012);
+    assert!((high - expected).norm() < (low - expected).norm() * 0.4);
+    assert!((high.y - 1.0).abs() < 0.01);
+    for c in 0..3 {
+        assert!((high[c] / hero[c] - 1.0).abs() < 0.01);
+    }
+    let sum = high.sum();
+    assert!((high.x / sum - 0.3127).abs() < 0.002);
+    assert!((high.y / sum - 0.3290).abs() < 0.002);
+}
+
+#[test]
+fn packet_validation_rejects_invalid_sizes_quotas_and_overflow_before_allocation() {
+    let scene = empty();
+    for packet in [0, 2, 3, 8, usize::MAX] {
+        assert!(
+            render_spectral_camera_with_packet(&scene, 1, 1, 16, packet, 42, IorMode::Constant)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("1 或 4")
+        );
+    }
+    for spp in [1, 2, 7] {
+        assert!(
+            render_spectral_camera_with_packet(&scene, 1, 1, spp, 4, 42, IorMode::Constant)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("整除")
+        );
+    }
+    assert!(render_spectral_camera_with_packet(&scene, 1, 1, 0, 4, 42, IorMode::Constant).is_err());
+    assert!(
+        render_spectral_camera_with_packet(&scene, 2, 1, usize::MAX - 3, 4, 42, IorMode::Constant)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("溢出")
+    );
+    let mut overflow = scene;
+    overflow.environment_samples = usize::MAX / 8;
+    assert!(
+        render_spectral_camera_with_packet(&overflow, 1, 1, 16, 4, 42, IorMode::Constant)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("溢出")
+    );
+}
+
+#[test]
+fn packet_setting_preserves_rgb_camera_and_source_caustic_components() {
+    let mut c = Config::from_json(include_str!("../configs/sphere.json")).unwrap();
+    c.render.width = 8;
+    c.render.height = 6;
+    c.render.camera_spp = 8;
+    c.render.samples_per_pixel_axis = 1;
+    c.render.thread_count = Some(1);
+    c.render.wavelength_step_nm = 100.0;
+    c.scene.environment = None;
+    c.scene.max_diffuse_bounces = 0;
+    let scene = Scene::from_config(&c.scene).unwrap();
+    let one = Render::new(c.render.clone()).unwrap();
+    c.render.spectral_packet_size = 4;
+    let four = Render::new(c.render.clone()).unwrap();
+    same(
+        &one.render_camera(&scene).unwrap(),
+        &four.render_camera(&scene).unwrap(),
+    );
+    let a = one.render_lighting(&scene).unwrap();
+    let b = four.render_lighting(&scene).unwrap();
+    same(&a.direct, &b.direct);
+    same(&a.caustics, &b.caustics);
+    assert!(a.caustics.pixels.iter().any(|p| p.y > 0.0));
+    let a = one
+        .render_camera_glass_components(&scene, &a, 8, c.render.seed)
+        .unwrap();
+    let b = four
+        .render_camera_glass_components(&scene, &b, 8, c.render.seed)
+        .unwrap();
+    for (x, y) in [
+        (&a.direct, &b.direct),
+        (&a.caustics, &b.caustics),
+        (&a.combined, &b.combined),
+    ] {
+        same(x, y);
     }
 }
 
@@ -484,35 +756,38 @@ fn spectral_modes_repeat_bitwise_across_threads_and_rgb_entry_stays_compatible()
     c.render.height = 10;
     c.render.camera_spp = 12;
     c.scene.environment.as_mut().unwrap().map_path = None;
-    let mut modes = Vec::new();
-    for ior_mode in [IorMode::Constant, IorMode::Dispersion] {
-        c.render.mode = ior_mode;
-        for heuristic in [
-            EnvironmentMisHeuristic::Balance,
-            EnvironmentMisHeuristic::Power,
-        ] {
-            c.scene.environment_mis_heuristic = heuristic;
-            for depth in [0, 4] {
-                c.scene.max_diffuse_bounces = depth;
-                let scene = Scene::from_config(&c.scene).unwrap();
-                let mut reference = None;
-                for threads in [1, 2, 4, 1] {
-                    c.render.thread_count = Some(threads);
-                    let image = Render::new(c.render.clone())
-                        .unwrap()
-                        .render_camera(&scene)
-                        .unwrap();
-                    assert!(image.pixels.iter().any(|p| p.y > 0.0));
-                    if let Some(previous) = &reference {
-                        same(&image, previous);
+    for packet_size in [1, 4] {
+        c.render.spectral_packet_size = packet_size;
+        let mut modes = Vec::new();
+        for ior_mode in [IorMode::Constant, IorMode::Dispersion] {
+            c.render.mode = ior_mode;
+            for heuristic in [
+                EnvironmentMisHeuristic::Balance,
+                EnvironmentMisHeuristic::Power,
+            ] {
+                c.scene.environment_mis_heuristic = heuristic;
+                for depth in [0, 4] {
+                    c.scene.max_diffuse_bounces = depth;
+                    let scene = Scene::from_config(&c.scene).unwrap();
+                    let mut reference = None;
+                    for threads in [1, 2, 4, 1] {
+                        c.render.thread_count = Some(threads);
+                        let image = Render::new(c.render.clone())
+                            .unwrap()
+                            .render_camera(&scene)
+                            .unwrap();
+                        assert!(image.pixels.iter().any(|p| p.y > 0.0));
+                        if let Some(previous) = &reference {
+                            same(&image, previous);
+                        }
+                        reference = Some(image);
                     }
-                    reference = Some(image);
+                    modes.push(reference.unwrap());
                 }
-                modes.push(reference.unwrap());
             }
         }
+        assert_ne!(modes[0].pixels, modes[4].pixels);
     }
-    assert_ne!(modes[0].pixels, modes[4].pixels);
     c.render.camera_mode = CameraMode::Rgb;
     let scene = Scene::from_config(&c.scene).unwrap();
     let image = Render::new(c.render.clone())

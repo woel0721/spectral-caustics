@@ -26,6 +26,9 @@ pub struct RenderSetting {
     /// 玻璃相机渲染的每像素路径总数，与光源每轴分层数独立。
     #[serde(default = "default_camera_spp")]
     pub camera_spp: usize,
+    /// 每条初始相机射线承载的独立光谱路径数，仅支持 1/4；camera_spp 仍为总路径数。
+    #[serde(default = "default_spectral_packet_size")]
+    pub spectral_packet_size: usize,
     /// 仅 debug 构建可开启路径统计 AOV；release 忽略此开关，不影响辐亮度或随机流。
     #[serde(default)]
     pub debug_path: bool,
@@ -50,6 +53,31 @@ fn default_camera_spp() -> usize {
     64
 }
 
+fn default_spectral_packet_size() -> usize {
+    1
+}
+
+/// 校验 Packet 配额并返回（空间样本数，总光谱路径数）；配置和直接渲染入口共用。
+pub(crate) fn spectral_sample_counts(
+    spp: usize,
+    packet_size: usize,
+) -> Result<(usize, usize), String> {
+    if spp == 0 {
+        return Err("render.camera_spp 必须大于零".into());
+    }
+    if !matches!(packet_size, 1 | 4) {
+        return Err("render.spectral_packet_size 仅支持 1 或 4".into());
+    }
+    if !spp.is_multiple_of(packet_size) {
+        return Err("render.camera_spp 必须能被 spectral_packet_size 整除".into());
+    }
+    let spatial_spp = spp / packet_size;
+    let total_paths = spatial_spp
+        .checked_mul(packet_size)
+        .ok_or("光谱 Packet 路径数量溢出")?;
+    Ok((spatial_spp, total_paths))
+}
+
 impl Default for RenderSetting {
     fn default() -> Self {
         Self {
@@ -58,6 +86,7 @@ impl Default for RenderSetting {
             height: 512,
             samples_per_pixel_axis: 4,
             camera_spp: default_camera_spp(),
+            spectral_packet_size: default_spectral_packet_size(),
             debug_path: false,
             mode: IorMode::Dispersion,
             wavelength_min_nm: 380.0,
@@ -121,12 +150,10 @@ impl RenderSetting {
         self.width
             .checked_mul(self.height)
             .ok_or("render 像素数量溢出")?;
-        if self.camera_spp == 0 {
-            return Err("render.camera_spp 必须大于零".into());
-        }
+        let (_, total_paths) = spectral_sample_counts(self.camera_spp, self.spectral_packet_size)?;
         self.width
             .checked_mul(self.height)
-            .and_then(|pixels| pixels.checked_mul(self.camera_spp))
+            .and_then(|pixels| pixels.checked_mul(total_paths))
             .ok_or("render 相机路径样本总数溢出")?;
         self.width
             .checked_mul(self.samples_per_pixel_axis)

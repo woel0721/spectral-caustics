@@ -11,7 +11,10 @@ pub use integrator::{
     CameraLightingImages, lambertian_radiance, render_camera_glass, render_camera_glass_components,
     sample_ground_irradiance,
 };
-pub use integrator::{SpectralPathState, render_spectral_camera, trace_spectral_camera_path};
+pub use integrator::{
+    SpectralPathState, render_spectral_camera, render_spectral_camera_with_packet,
+    trace_spectral_camera_path,
+};
 
 use self::{
     framebuffer::Framebuffer,
@@ -54,11 +57,12 @@ impl Render {
 
     pub fn render_spectral_camera(&self, scene: &Scene) -> Result<Framebuffer, Box<dyn Error>> {
         let work = || {
-            integrator::render_spectral_camera(
+            integrator::render_spectral_camera_with_packet(
                 scene,
                 self.settings.width,
                 self.settings.height,
                 self.settings.camera_spp,
+                self.settings.spectral_packet_size,
                 self.settings.seed,
                 self.settings.mode,
             )

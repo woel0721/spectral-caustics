@@ -188,6 +188,39 @@ mod tests {
     }
 
     #[test]
+    fn spectral_packet_defaults_roundtrips_and_rejects_bad_quotas_and_work_overflow() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../../configs/sphere_spectral.json")).unwrap();
+        json["render"]
+            .as_object_mut()
+            .unwrap()
+            .remove("spectral_packet_size");
+        let legacy = Config::from_json(&json.to_string()).unwrap();
+        assert_eq!(legacy.render.spectral_packet_size, 1);
+        assert_eq!(RenderSetting::default().spectral_packet_size, 1);
+        json["render"]["spectral_packet_size"] = json!(4);
+        let packet = Config::from_json(&json.to_string()).unwrap();
+        assert_eq!(
+            Config::from_json(&packet.to_json().unwrap()).unwrap(),
+            packet
+        );
+        for size in [json!(0), json!(2), json!(8), json!(-1), json!(1.5)] {
+            json["render"]["spectral_packet_size"] = size;
+            assert!(Config::from_json(&json.to_string()).is_err());
+        }
+        let mut bad = packet;
+        bad.render.camera_spp = 7;
+        assert!(bad.validate().unwrap_err().contains("整除"));
+        bad.render.width = 2;
+        bad.render.height = 1;
+        bad.render.camera_spp = usize::MAX - 3;
+        assert!(bad.validate().unwrap_err().contains("溢出"));
+        bad.render.camera_spp = 4;
+        bad.scene.environment_samples = usize::MAX;
+        assert!(bad.validate().unwrap_err().contains("溢出"));
+    }
+
+    #[test]
     fn diffuse_bounces_default_to_zero_and_accept_bounded_depths() {
         let mut json: serde_json::Value =
             serde_json::from_str(include_str!("../../configs/default.json")).unwrap();

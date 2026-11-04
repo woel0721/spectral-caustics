@@ -4,6 +4,7 @@
     "height": 256,
     "samples_per_pixel_axis": 4,
     "camera_spp": 512,
+    "spectral_packet_size": 4,
     "mode": "dispersion",
     "wavelength_min_nm": 380.0,
     "wavelength_max_nm": 780.0,

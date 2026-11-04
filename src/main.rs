@@ -44,9 +44,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         let image = renderer.render_camera(&scene)?;
         renderer.save(&image, &config.render.output_path)?;
         println!(
-            "Hero wavelength 光谱相机：{}，SPP={}，IOR={:?}",
+            "Hero wavelength 光谱相机：{}，总光谱路径/像素={}，Packet={}，空间样本/像素={}，IOR={:?}",
             config.render.output_path.display(),
             config.render.camera_spp,
+            config.render.spectral_packet_size,
+            config.render.camera_spp / config.render.spectral_packet_size,
             config.render.mode
         );
         println!("总耗时：{:.3} 秒", start.elapsed().as_secs_f64());
