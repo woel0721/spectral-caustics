@@ -9,22 +9,32 @@ use spectral_caustics::{
 use std::{error::Error, path::PathBuf, time::Instant};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut config = Config::load("configs/sphere_spectral.json")?;
-    let mut args = std::env::args().skip(1);
-    if let Some(spp) = args.next() {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.len() > 4 {
+        return Err(
+            "用法：spectral_camera_compare [SPP] [正方形边长] [输出目录] [配置路径]".into(),
+        );
+    }
+    let mut config = Config::load(
+        args.get(3)
+            .map(String::as_str)
+            .unwrap_or("configs/sphere_spectral.json"),
+    )?;
+    if let Some(spp) = args.first() {
         config.render.camera_spp = spp.parse()?;
     }
-    if let Some(size) = args.next() {
+    if let Some(size) = args.get(1) {
         config.render.width = size.parse()?;
         config.render.height = config.render.width;
     }
-    let directory = args
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| "output/sphere_spectral".into());
-    if args.next().is_some() {
-        return Err("用法：spectral_camera_compare [SPP] [正方形边长] [输出目录]".into());
-    }
+    let directory = args.get(2).map(PathBuf::from).unwrap_or_else(|| {
+        config
+            .render
+            .output_path
+            .parent()
+            .unwrap_or(std::path::Path::new("output"))
+            .to_path_buf()
+    });
     config.render.camera_mode = CameraMode::Spectral;
     let scene = Scene::from_config(&config.scene)?;
     std::fs::create_dir_all(&directory)?;

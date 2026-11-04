@@ -43,7 +43,7 @@ ACES 对曝光后的每个线性 RGB 通道应用 `x=max(x,0)`、`clamp(x*(2.51*
 - `camera_spp` 始终是每像素总路径数；光谱 `spectral_packet_size` 只支持 1/4，取 4 时 SPP 必须被 4 整除。RGB 和光源端的采样不受 Packet 设置影响。`samples_per_pixel_axis` 独立控制光源每轴分层采样。
 - `seed` 固定随机种子；`thread_count=null` 使用 Rayon 默认线程数，正整数创建专用池；`max_spectral_blocks` 控制光源采样块数。
 - `max_diffuse_bounces` 表示额外连续 BSDF 连接数，包含 Diffuse/Glossy，范围 0..1024；4 最多访问 5 个连续着色顶点。
-- 场景采用米制、Z-up；JSON 支持一个地面、至多一个三棱镜及多个球体/圆角三棱镜。Sphere/Prism 的 `caustics` 开关显式选择至多一个理想 Dielectric 焦散目标，不依赖物体下标或 `debug_object_id`。Sphere 缺省关闭；Prism 缺省开启以兼容旧配置，非介质 Prism 仍只遮挡光线。选择 Sphere 时应关闭其他 Prism 的开关；Sphere 开启时绑定非介质材质会报错。
+- 场景采用米制、Z-up；JSON 支持一个地面、至多一个 `Prism` 或 `VerticalPrism`，以及多个球体/圆角三棱镜。Sphere/Prism/VerticalPrism 的 `caustics` 开关显式选择至多一个理想 Dielectric 焦散目标，不依赖物体下标或 `debug_object_id`。Sphere/VerticalPrism 缺省关闭；Prism 缺省开启以兼容旧配置，非介质 Prism 仍只遮挡光线。Sphere/VerticalPrism 开启时绑定非介质材质会报错。
 - `receiver` 限制光子图范围，地面在其外扩 `ground_margin_m`，不限制解析太阳照明。
 - `render.mode=constant` 使用材质的 `ior`；`dispersion` 使用其 Cauchy 模型，未配置模型则仍为常数。它同时控制光源端与独立光谱相机的 IOR 模式；RGB 相机始终使用常数 `ior`。光子积分的波长范围/步长以 nm 配置，光谱相机固定在 380–780 nm 采样。
 
@@ -76,6 +76,41 @@ ACES 对曝光后的每个线性 RGB 通道应用 `x=max(x,0)`、`clamp(x*(2.51*
 
 完整球体配置见 [configs/sphere.json](configs/sphere.json)，圆角三棱镜见 [configs/beveled_prism.json](configs/beveled_prism.json)。圆角仅作用于三条长棱，每角固定 8 段；`bevel_size_m` 是沿原边的切点距离，每条边须长于它的两倍。实际求交使用分段几何法线，没有插值平滑法线。字段与校验见 [src/config](src/config)。
 
+## 竖直三棱柱测试
+
+新增 `vertical_prism`：用世界 XY 平面上的三点和 `z_min_m/z_max_m` 构建无倒角三棱柱。两个水平端面均为三角形，三个竖直侧面为矩形（各拆成两个三角形）；支持两种截面绕序，使用朝外几何法线。它仅复用通用凸三棱柱的面求交，不使用旧横向三棱镜的顶点。构造 API 为 `geometry::vertical_prism::VerticalPrism::new(section, z_min, z_max)`；退化、非有限或无效 Z 范围返回 `None`。
+
+```json
+{
+  "type": "vertical_prism",
+  "cross_section_m": [[-0.6, -0.34641016151377546], [0.6, -0.34641016151377546], [0.0, 0.6928203230275509]],
+  "z_min_m": 0.05,
+  "z_max_m": 1.85,
+  "caustics": false,
+  "material": {
+    "type": "dielectric", "ior": 1.52,
+    "dispersion": {"a": 1.4907, "b_um2": 0.0084}
+  }
+}
+```
+
+两套配置使用同一个边长 1.2 m、高 1.8 m 的等边三棱柱，下端离地 5 cm，避免底盖与地面重合；仅含现有理想玻璃和反射率 0.18 的中性灰地面。环境均为 `assets/HDRI/dispersion_stripes.hdr`，`ground_checkerboard=null`。
+
+| 配置 | 观察目标 | 默认设置 |
+| --- | --- | --- |
+| [vertical_prism_spectral.json](configs/vertical_prism_spectral.json) | 透过侧面的条纹扭曲、光谱色边 | 256×256、256 总 SPP、Packet=4、曝光 0.4；HDRI 旋转 95° |
+| [vertical_prism_caustics.json](configs/vertical_prism_caustics.json) | 太阳经竖直侧面双透射后的地面色散投影特写 | 256×256、64 相机 SPP、光源每轴分层 4；RGB 三分量流程、HDRI 强度 0.04 |
+
+```sh
+# 同一场景、seed=42、采样数和 CRN，分别运行 Constant / Dispersion
+cargo run --release --locked --example spectral_camera_compare -- 256 256 output/vertical_prism/through configs/vertical_prism_spectral.json
+
+# 太阳光源端光谱焦散，以及相机 Direct / Caustics / Combined
+cargo run --release --locked -- configs/vertical_prism_caustics.json
+```
+
+第一条命令输出 `output/vertical_prism/through/camera_constant.png`、`camera_dispersion.png` 和两份可重载 JSON；第二条输出 `output/vertical_prism/caustics/` 的三个分量。地面配置用窄太阳发射窗口分离各波长的投影，优先查看 `camera_caustics.png`：现有解析太阳不按发射窗口裁切，合成图里的直射地面会降低彩色投影对比度。条纹 HDRI 提供相机背景和环境照明；当前没有环境光源端焦散。光谱相机不读取已积分的 XYZ 焦散图，因此地面配置使用 RGB 相机显示光源端光谱积分结果。
+
 ## Hero Wavelength 光谱相机
 
 `render.camera_mode="spectral"` 将每个像素的 380–780 nm 范围按总 SPP 等宽细分，整条标量路径保持各自的波长。`spectral_packet_size` 缺省为 1，保留旧的波长、抖动及路径随机序列；设为 4 时，每个空间样本只生成一次子像素偏移和初始 Camera Ray，分别追踪四条独立路径：
@@ -105,7 +140,7 @@ Packet=4 将独立空间样本数减为四分之一，可能降低颜色方差�
 cargo run --release --locked --example spectral_camera_compare
 ```
 
-同一相机、seed 和波长采样配置下，输出 `output/sphere_spectral/camera_constant.png` 与 `camera_dispersion.png`，并保存两份可直接加载的配置。可传 `[SPP] [边长] [输出目录]`。
+同一相机、seed 和波长采样配置下，输出 `output/sphere_spectral/camera_constant.png` 与 `camera_dispersion.png`，并保存两份可直接加载的配置。可传 `[SPP] [边长] [输出目录] [配置路径]`；配置路径缺省为 `configs/sphere_spectral.json`，输出目录缺省取配置主图所在目录。
 
 公平预算、多种子和高 SPP 参考对比：
 

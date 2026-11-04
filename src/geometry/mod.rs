@@ -8,3 +8,4 @@ pub mod prism;
 pub mod ray;
 pub mod sphere;
 pub mod triangle;
+pub mod vertical_prism;

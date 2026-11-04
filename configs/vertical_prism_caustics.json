@@ -1,0 +1,135 @@
+{
+  "render": {
+    "width": 256,
+    "height": 256,
+    "samples_per_pixel_axis": 4,
+    "camera_spp": 64,
+    "spectral_packet_size": 4,
+    "mode": "dispersion",
+    "wavelength_min_nm": 380.0,
+    "wavelength_max_nm": 780.0,
+    "wavelength_step_nm": 10.0,
+    "exposure": 1.0,
+    "seed": 42,
+    "thread_count": null,
+    "max_spectral_blocks": 16,
+    "output_path": "output/vertical_prism/caustics/camera_combined.png",
+    "debug_path": false,
+    "camera_mode": "rgb"
+  },
+  "scene": {
+    "camera": {
+      "position": [
+        -0.5,
+        2.8,
+        3.0
+      ],
+      "target": [
+        -0.5,
+        3.15,
+        0.0
+      ],
+      "up": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "fov_y_degrees": 8
+    },
+    "background_linear_rgb": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "environment": {
+      "map_path": "assets/HDRI/dispersion_stripes.hdr",
+      "rotation_degrees": 80.0,
+      "intensity": 0.04,
+      "horizon_linear_rgb": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "zenith_linear_rgb": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "environment_samples": 4,
+    "environment_mis_heuristic": "power",
+    "max_diffuse_bounces": 0,
+    "ground_checkerboard": null,
+    "ground_margin_m": 4.0,
+    "objects": [
+      {
+        "type": "vertical_prism",
+        "cross_section_m": [
+          [
+            -0.6,
+            -0.34641016151377546
+          ],
+          [
+            0.6,
+            -0.34641016151377546
+          ],
+          [
+            0.0,
+            0.6928203230275509
+          ]
+        ],
+        "z_min_m": 0.05,
+        "z_max_m": 1.85,
+        "caustics": true,
+        "material": {
+          "type": "dielectric",
+          "ior": 1.52,
+          "dispersion": {
+            "a": 1.4907,
+            "b_um2": 0.0084
+          }
+        }
+      },
+      {
+        "type": "ground",
+        "height_m": 0.0,
+        "material": {
+          "type": "lambertian",
+          "albedo": [
+            0.18,
+            0.18,
+            0.18
+          ]
+        }
+      }
+    ],
+    "light": {
+      "height_m": 2.6,
+      "direction": [
+        -0.8,
+        0.6,
+        -0.35
+      ],
+      "aperture_min_m": [
+        3.756428571428572,
+        -2.8435714285714293
+      ],
+      "aperture_max_m": [
+        3.7864285714285724,
+        -2.813571428571429
+      ],
+      "total_flux": 0.009
+    },
+    "receiver": {
+      "min_m": [
+        -0.9,
+        2.7
+      ],
+      "max_m": [
+        -0.1,
+        3.6
+      ]
+    },
+    "debug_object_id": 0
+  }
+}

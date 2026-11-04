@@ -7,12 +7,12 @@
 | 范围 | 当前能力 |
 | --- | --- |
 | 主程序 | Glass、Mirror、GGX 三球同场景；共享路径输出 Direct/Caustics/Combined |
-| 几何 | 米制 Z-up、有限地面、Sphere、Prism、三条长棱各 8 段圆角的 BeveledPrism；材质绑定与最近交点 |
+| 几何 | 米制 Z-up、有限地面、Sphere、Prism、XY 截面沿 Z 挤出的无倒角 VerticalPrism、三条长棱各 8 段圆角的 BeveledPrism；材质绑定与最近交点 |
 | RGB 材质 | Lambertian、Dielectric、Mirror、各向同性 GgxMetal，统一 `BsdfSample` 接口 |
 | 相机路径 | 独立 RGB / Hero Wavelength 标量路径，最多 32 次 Delta、0..1024 次额外连接与补偿 Russian Roulette |
 | 光谱相机 | 单波长或四波长 Packet，共享主射线和公共路径随机数、独立标量路径；总 SPP 个完整细分波长层；Dielectric/Lambertian/Mirror；CIE 与 1/pλ 的 XYZ Monte Carlo 积分 |
 | 照明 | 解析太阳、HDRI/渐变环境、重要性采样、固定配额 Balance/Power MIS |
-| 光源焦散 | 显式选择理想 Dielectric Sphere/Prism；材质 Constant/Cauchy IOR、双界面 Snell/Fresnel、地面 XYZ 双线性累积、CIE/D65 积分 |
+| 光源焦散 | 显式选择理想 Dielectric Sphere/Prism/VerticalPrism；材质 Constant/Cauchy IOR、双界面 Snell/Fresnel、地面 XYZ 双线性累积、CIE/D65 积分 |
 | 调试 | debug 构建可输出四张路径 AOV 与 JSON，目标物体独立可选；固定波长相机与灯带亚像素投影诊断 |
 | 工程 | JSON 校验、固定 seed、独立 RNG 流、Rayon 线程一致性、XYZ → 线性 RGB → 曝光/简化 ACES → sRGB PNG |
 
@@ -22,15 +22,27 @@
 
 `configs/sphere_spectral.json` 为独立光谱相机场景，当前实验配置为 512×512、2048 总路径、Packet=4、512 个空间样本、曝光 0.4，使用单灯带 HDRI（旋转 127.0546°）、线性反射率 0.18 的中性灰地面，棋盘格关闭；临时使用 Cauchy A=1.4907、B=0.0084 μm²。`render.camera_mode` 默认 `rgb`，设为 `spectral` 后独立输出主图；`render.mode` 选择 Constant/Dispersion。太阳使用连续归一化 D65；RGB HDRI/天空/背景使用独立 PBRT Illuminant 基谱与 D65 白点校准，保留 HDR 强度。源数据与近似边界见颜色数据说明。
 
+`configs/vertical_prism_spectral.json` 与 `configs/vertical_prism_caustics.json` 使用 XY 等边三角形沿 Z 挤出的无倒角竖直三棱柱。前者是条纹 HDRI 的光谱相机折射对照，后者通过现有 RGB 三分量流程观察太阳双透射的地面光谱焦散特写；均关闭棋盘格、使用中性灰地面，配置及运行命令见 README。
+
 ## 当前限制
 
 - 两种相机均为有界路径估计器。RGB 保留首次地面读取 XYZ 焦散图的三分量流程；Hero 不读取已积分的 XYZ 图，也暂不输出 RGB 专用的三分量或路径 AOV。非 Delta 环境逃逸由局部 NEE/MIS 计光，不能重复累加背景。
 - Hero 相机的单波长 IOR 支持色散；GGX RGB eta/k 尚无光谱模型，会明确报错。RGB 发光重建仅是近似，不代表实测 HDRI 光谱，也不保证任意 RGB 色度精确还原。单波长 Monte Carlo 有颜色噪声，需要足够 SPP。
-- 光源端只追踪一个显式选中的理想介质 Sphere/Prism 的直接双透射，不追踪内部多次反射。BeveledPrism、Mirror、GGX 不生成光源端光谱焦散；默认三球对照场景的 Caustics 为零。
+- 光源端只追踪一个显式选中的理想介质 Sphere/Prism/VerticalPrism 的直接双透射，不追踪内部多次反射。BeveledPrism、Mirror、GGX 不生成光源端光谱焦散；默认三球对照场景的 Caustics 为零。
 - 玻璃对太阳/环境 shadow ray 仍为二值遮挡；尚无透明阴影、嵌套介质或体积。GGX 仅支持各向同性单次散射，尚无 RoughDielectric、Plastic、各向异性或多次散射补偿。
 - 尚无环境/金属焦散、通用 Photon Mapping、BVH/KD-Tree、GUI 或 GPU。圆角仍由平面段近似，未使用平滑法线。
 
 ## 最近一次实现验收
+
+无倒角竖直三棱柱与两套条纹场景，2026-11-04。
+
+- 新增 `VerticalPrism` / JSON `vertical_prism`，由 XY 三角形和 Z 范围直接构建三角形上下盖及矩形侧面，自动统一绕序与朝外法线。复用已有凸三棱柱的三角面求交、材质和光子双透射，不使用旧横向顶点；没有修改原有传输算法。
+- 新增光谱相机与地面焦散两份配置，均为等边截面、条纹 HDRI、中性灰地面、关闭棋盘格。比较示例增加可选配置路径，保持旧调用方式。实跑 256×256、256 总 SPP 的 Constant/Dispersion 相机对照，以及 256×256、64 相机 SPP 的地面三分量输出。
+- 同一条中心太阳射线在 Constant 下三波长落点相同；Dispersion 的 450/550/650 nm 地面落点约为 (-0.4497, 3.1640)、(-0.5140, 3.1443)、(-0.5502, 3.1324) m，蓝红相距约 0.1053 m。地面独立 Caustics 图显示彩色投影；合成图的太阳直射会降低对比度，不将其解释为条纹 HDRI 产生的环境焦散。
+- 改动前 433 项基线全部通过；保留所有原测试，新增 3 项几何单元与 4 项集成测试，当前 **344 项单元 + 96 项集成 = 440 项全部通过**，另有投影示例 2 项测试通过。fmt、fmt check、locked 全目标构建、完整测试、严格 Clippy、diff check 均通过；新测试覆盖端盖/侧面、绕序/共享棱、非法输入、折射与 Fresnel、色散落点、焦散能量、分量相加和 1/2/4 线程逐位一致。原 MIS、深度/RR、光谱与颜色测试保留。
+- 实跑原 `camera_direct_caustics -- 8` 与 `camera_parallel_benchmark -- 8 48`，后者 1/2/4/6 线程 XYZ 逐位一致。没有新增依赖、删除文件/函数/测试；通过复用现有求交与双透射实现避免复制几何遍历和光学算法。
+
+此前固定波长投影诊断的验收如下。
 
 固定波长相机投影诊断，2026-11-04。
 

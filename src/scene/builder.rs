@@ -6,6 +6,7 @@ use crate::{
     config::sceneconfig::{ObjectConfig, SceneConfig},
     geometry::{
         beveled_prism::BeveledPrism, ground::Ground, prism::Prism, ray::Ray, sphere::Sphere,
+        vertical_prism::VerticalPrism,
     },
     material,
 };
@@ -71,6 +72,26 @@ impl Scene {
         let ground_bounds = config.ground_bounds()?;
         for object in &config.objects {
             match object {
+                ObjectConfig::VerticalPrism {
+                    cross_section_m,
+                    z_min_m,
+                    z_max_m,
+                    material,
+                    caustics,
+                } => {
+                    if scene.prism_id.is_some() {
+                        return Err("当前渲染只支持一个三棱镜/竖直三棱柱".into());
+                    }
+                    let prism =
+                        VerticalPrism::new(cross_section_m.map(Vector2::from), *z_min_m, *z_max_m)
+                            .ok_or("竖直三棱柱的 XY 截面或 Z 范围无效")?;
+                    let id =
+                        scene.add_with_material(Box::new(prism), material::from_config(material)?);
+                    scene.prism_id = Some(id);
+                    if *caustics {
+                        scene.select_caustics_object(id)?;
+                    }
+                }
                 ObjectConfig::Prism {
                     vertices_m,
                     material,

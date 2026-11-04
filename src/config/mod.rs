@@ -26,6 +26,7 @@ impl Config {
                 use sceneconfig::ObjectConfig;
                 let material = match object {
                     ObjectConfig::Prism { material, .. }
+                    | ObjectConfig::VerticalPrism { material, .. }
                     | ObjectConfig::Sphere { material, .. }
                     | ObjectConfig::BeveledPrism { material, .. }
                     | ObjectConfig::Ground { material, .. } => material,

@@ -31,7 +31,7 @@ pub struct PhotonLanding {
 /// 追踪从空气出发的单条光线，返回地面落点及确定双透射路径的通量权重。
 /// glass_ior 是无参数闭包，例如 || refractive_index(Some(450.0), IorMode::Dispersion)。
 /// 闭包只调用一次，返回的正有限折射率用于两个界面；也可传入 || Some(1.52)。
-/// 支持一个闭合凸介质（Sphere/Prism）的两次透射；闭包返回 None、折射率非法、全反射、其他遮挡或未命中地面时返回 None。
+/// 支持一个闭合凸介质（Sphere/Prism/VerticalPrism）的两次透射；闭包返回 None、折射率非法、全反射、其他遮挡或未命中地面时返回 None。
 /// 此显式 IOR 入口保留独立光学实验；渲染入口通过物体材质查询 IOR。
 /// 被 Fresnel 反射的通量暂不追踪、不重新分配给透射路径。
 pub fn take_photon_landing(
@@ -142,7 +142,10 @@ impl Scene {
             return Err("焦散物体必须是接收地面以外的理想 Dielectric".into());
         }
         if self.caustics_object_id.is_some_and(|id| id != object_id) {
-            return Err("当前只支持一个焦散物体，请仅为一个 Sphere/Prism 启用 caustics".into());
+            return Err(
+                "当前只支持一个焦散物体，请仅为一个 Sphere/Prism/VerticalPrism 启用 caustics"
+                    .into(),
+            );
         }
         self.caustics_object_id = Some(object_id);
         Ok(())

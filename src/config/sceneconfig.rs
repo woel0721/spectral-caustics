@@ -144,6 +144,16 @@ impl EnvironmentConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ObjectConfig {
+    /// 无倒角 XY 三角形沿世界 Z 轴挤出，两个端面均为水平三角形。
+    VerticalPrism {
+        cross_section_m: [[f64; 2]; 3],
+        z_min_m: f64,
+        z_max_m: f64,
+        #[serde(default)]
+        caustics: bool,
+        #[serde(default = "MaterialConfig::default_glass")]
+        material: MaterialConfig,
+    },
     /// 与 Prism 当前默认顶点顺序一致，长度单位为米；面连接方式由运行时 Prism 定义。
     Prism {
         vertices_m: [[f64; 3]; 6],
@@ -315,6 +325,11 @@ impl SceneConfig {
                     caustics: true,
                     material,
                     ..
+                }
+                | ObjectConfig::VerticalPrism {
+                    caustics: true,
+                    material,
+                    ..
                 } => {
                     if !matches!(material, MaterialConfig::Dielectric { .. }) {
                         return Err(format!(
@@ -334,11 +349,33 @@ impl SceneConfig {
                 caustics_count += 1;
                 if caustics_count > 1 {
                     return Err(
-                        "当前只支持一个焦散物体，请仅为一个 Sphere/Prism 启用 caustics".into(),
+                        "当前只支持一个焦散物体，请仅为一个 Sphere/Prism/VerticalPrism 启用 caustics".into(),
                     );
                 }
             }
             match object {
+                ObjectConfig::VerticalPrism {
+                    cross_section_m,
+                    z_min_m,
+                    z_max_m,
+                    material,
+                    ..
+                } => {
+                    material
+                        .validate()
+                        .map_err(|message| format!("scene.objects[{index}].{message}"))?;
+                    if crate::geometry::vertical_prism::VerticalPrism::new(
+                        cross_section_m.map(Into::into),
+                        *z_min_m,
+                        *z_max_m,
+                    )
+                    .is_none()
+                    {
+                        return Err(format!(
+                            "scene.objects[{index}] 竖直三棱柱无效：需要有限非退化 XY 三角形和 z_min_m < z_max_m"
+                        ));
+                    }
+                }
                 ObjectConfig::Prism {
                     vertices_m,
                     material,
