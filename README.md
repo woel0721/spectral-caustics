@@ -21,7 +21,7 @@ cargo run --release --locked -- /path/to/config.json
 | 同目录的 `camera_direct.png` | 太阳、环境与相机续追贡献 |
 | 同目录的 `camera_caustics.png` | 首次地面着色的光谱焦散贡献 |
 
-三图共用一批相机路径。默认三球对照场景没有开启焦散；`sphere.json` 显式选择色散玻璃球，输出到 `output/sphere/`，其中 `camera_caustics.png` 包含球体的光谱焦散，`camera_combined.png` 为合成图。多波长重叠处接近白色，色散主要体现在焦散色边。自定义主图文件名时只保存指定名称；辅助图与主图重名时加 `aux_` 前缀。PNG 使用同一曝光，经 XYZ → linear sRGB → 曝光 → 简化 ACES → display sRGB 输出，生成图位于忽略的 `output/` 中。
+三图共用一批相机路径。默认三球对照场景没有开启焦散；`sphere.json` 显式选择色散玻璃球，输出到 `output/sphere/`，其中 `camera_caustics.png` 包含球体的光谱焦散，`camera_combined.png` 为合成图。多波长重叠处接近白色，色散主要体现在焦散色边。RGB 自定义主图文件名时只保存指定名称；辅助图与主图重名时加 `aux_` 前缀。Hero 开启焦散时额外保留标准三分量文件，见下文。PNG 使用同一曝光，经 XYZ → linear sRGB → 曝光 → 简化 ACES → display sRGB 输出，生成图位于忽略的 `output/` 中。
 
 ACES 对曝光后的每个线性 RGB 通道应用 `x=max(x,0)`、`clamp(x*(2.51*x+0.03)/(x*(2.43*x+0.59)+0.14),0,1)`；进入曲线前不把高光直接截断为 1。XYZ 缓冲和分量合成仍在线性空间中进行，仅 PNG 导出应用色调映射。Direct + Caustics = Combined 在导出前成立；经过非线性的 ACES/sRGB 后，PNG 像素不能直接相加。统计 AOV 保留原有直接量化方式。
 
@@ -94,7 +94,7 @@ ACES 对曝光后的每个线性 RGB 通道应用 `x=max(x,0)`、`clamp(x*(2.51*
 }
 ```
 
-两套配置使用同一个边长 1.2 m、高 1.8 m 的等边三棱柱，下端离地 5 cm，避免底盖与地面重合；仅含现有理想玻璃和反射率 0.18 的中性灰地面。环境均为 `assets/HDRI/dispersion_stripes.hdr`，`ground_checkerboard=null`。
+两套配置使用同一个边长 1.2 m、高 1.8 m 的等边三棱柱，下端离地 5 cm，避免底盖与地面重合；仅含现有理想玻璃和 Lambertian 地面。光谱相机配置使用反射率 1.0 的白色地面，地面焦散配置保留反射率 0.18 的中性灰地面。环境均为 `assets/HDRI/dispersion_stripes.hdr`，`ground_checkerboard=null`。
 
 | 配置 | 观察目标 | 默认设置 |
 | --- | --- | --- |
@@ -109,7 +109,16 @@ cargo run --release --locked --example spectral_camera_compare -- 256 256 output
 cargo run --release --locked -- configs/vertical_prism_caustics.json
 ```
 
-第一条命令输出 `output/vertical_prism/through/camera_constant.png`、`camera_dispersion.png` 和两份可重载 JSON；第二条输出 `output/vertical_prism/caustics/` 的三个分量。地面配置用窄太阳发射窗口分离各波长的投影，优先查看 `camera_caustics.png`：现有解析太阳不按发射窗口裁切，合成图里的直射地面会降低彩色投影对比度。条纹 HDRI 提供相机背景和环境照明；当前没有环境光源端焦散。光谱相机不读取已积分的 XYZ 焦散图，因此地面配置使用 RGB 相机显示光源端光谱积分结果。
+第一条命令输出 `output/vertical_prism/through/camera_constant.png`、`camera_dispersion.png` 和两份可重载 JSON；第二条输出 `output/vertical_prism/caustics/` 的三个分量。地面配置用窄太阳发射窗口分离各波长的投影，优先查看 `camera_caustics.png`：现有解析太阳不按发射窗口裁切，合成图里的直射地面会降低彩色投影对比度。条纹 HDRI 提供相机背景和环境照明；当前没有环境光源端焦散。
+
+Hero 光谱相机的地面焦散配置为 [vertical_prism_spectral_caustics.json](configs/vertical_prism_spectral_caustics.json)：沿用相同特写、反射率 0.18 的地面、窄太阳窗口，开启 `caustics: true`，256×256、256 总 SPP、Packet=4。运行后在 `output/vertical_prism/spectral_caustics/` 输出 `camera_direct.png`、`camera_caustics.png`、`camera_combined.png`。将 `render.mode` 改为 `constant` 可对照固定折射率；也可用比较示例输出两份可重载 JSON，再交给主程序输出各自的三分量：
+
+```sh
+cargo run --release --locked -- configs/vertical_prism_spectral_caustics.json
+cargo run --release --locked --example spectral_camera_compare -- 256 256 output/vertical_prism/spectral_caustics/compare configs/vertical_prism_spectral_caustics.json
+cargo run --release --locked -- output/vertical_prism/spectral_caustics/compare/constant.json
+cargo test --locked --test spectral_caustics
+```
 
 ## Hero Wavelength 光谱相机
 
@@ -130,9 +139,15 @@ cargo run --release --locked -- configs/vertical_prism_caustics.json
 - HDRI 方向采样沿用 RGB 亮度分布作为 proposal，实际 BSDF 与辐亮度均在当前 λ 计算。固定配额仍使用 `q_i=n_i*p_i` 的 Balance/Power MIS，单样本随机混合，渐变使用纯 BSDF 方向；被遮挡和背半球样本不补采。
 - 保留最多 32 次 Delta、`max_diffuse_bounces` 连接预算和第三次连续连接之后的补偿 RR；光谱 RR 使用标量 `p=clamp(throughput,0.05,0.95)`。非 Delta 逃逸由局部 NEE/MIS 负责；漫反射后经 Delta 链逃逸环境才额外计光。玻璃对局部 shadow ray 仍是二值遮挡，有限深度仍会截断贡献。
 
-该模式独立输出主图，不生成 RGB 专用的 Direct/Caustics 分量或调试 AOV，也不读取已经对波长积分的 XYZ 焦散贴图。当前光源端焦散仍通过原 RGB 三分量流程展示；不将 XYZ 贴图反解成单波长能量。主程序在光谱模式下直接调用相机，不执行光子图构建。
+启用理想介质光源焦散时，主程序先构建只读 `SpectralCausticsMap`，同一批 Hero/Packet 样本分别累计 Direct 和 Caustics 的线性 XYZ，再逐像素相加为 Combined。主图仍保存到 `output_path`，同目录另有标准三分量文件；自定义主图名称时还保存 `camera_combined.png`，重名时保护主图。没有选中焦散物体时不构建图集，保留原有主图与随机序列。光谱模式仍不生成路径调试 AOV。
 
-`Render::render_camera()` 按配置选择 RGB 或光谱；`Render::render_spectral_camera()` 遵循配置中的 Packet 大小。公开函数 `render_spectral_camera()` 保留原签名并固定 Packet=1；新增 `render_spectral_camera_with_packet(scene,width,height,spp,packet_size,seed,ior_mode)`。`trace_spectral_camera_path()` 保持单波长接口。原 RGB 入口继续保持 RGB 语义。当前实验场景为 512×512、2048 总路径、Packet=4（512 个空间样本）、曝光 0.4，使用单灯带 HDRI（旋转 127.0546°）、线性反射率 0.18 的中性灰地面，棋盘格关闭；临时采用 Cauchy A=1.4907、B=0.0084 μm²，550 nm 的 IOR 约为 1.518469。
+`SpectralCausticsMap` 每节点保存标量地面辐照度 `Eλ`（相对通量/m²/nm），完全来自光子双透射，不从 XYZ 反推。每条空间光线的标尺为 `total_flux / ray_count / pixel_area`，再乘两个界面的 Fresnel 透射率及 `k * D65(λ)`；`k=1/Σ D65(λ) ybar(λ) Δλ` 与既有光源端相同，丢失光子不重新归一化。层内不含 CIE 或 `Δλ`：按节点的梯形宽度积分能还原原光源 XYZ 图；Hero 只在最终积分乘一次 `400/SPP`。这也保留原光源离散归一化与 Hero 解析太阳连续 D65 归一化的区别；二者的数值差随光源波长步长收敛，无经验亮度系数。
+
+查询使用世界 x/y 的像素中心双线性采样和相邻波长线性插值，接收范围/配置发射波段外返回零。有限节点间插值会平滑窄焦散色边，缩小 `wavelength_step_nm` 可提高精度；连续 Hero 积分和原节点梯形积分有不同的求积误差。图集大小为 `波长节点数 × width × height × 8` 字节；256²、10 nm 的 41 层约 20.5 MiB。按波长并行、每层只分配一个标量图；Constant 另用一张临时几何通量图，只追踪一次。Dispersion 各层重放同一发射序列，不为每个采样块复制图集，也不缓存全部光子路径，代价是逐层重做首次求交。
+
+路径仅在**第一个 non-delta 着色顶点为地面**时累加 `throughput * (rhoλ/π) * Eλ`；玻璃/镜面 Delta 前缀仍可读取。反射率由原有光谱 Lambertian 求值一次，棋盘格尺度施加一次；图中已含光源强度、源端 Fresnel 和折射可见性，不再使用太阳 shadow ray 遮挡，不在后续地面顶点重复读取。Direct Sun、Environment MIS、RR 和三类 CRN 的顺序保持原样。
+
+`Render::render_camera()` 按配置选择 RGB 或光谱；`Render::render_spectral_camera()` 遵循 Packet 配置并按需接入焦散，`Render::render_spectral_camera_components()` 返回三张未曝光 XYZ 图。低层 `render_spectral_camera()` / `render_spectral_camera_with_packet()` / `trace_spectral_camera_path()` 保留无焦散语义与原签名。需要复用预计算数据时，调用 `caustics::render_wavelength_caustics(scene,settings)`，再将 `Option<&SpectralCausticsMap>` 传给 `render_spectral_camera_components(scene,settings,map)` 或 `trace_spectral_camera_path_with_caustics()`；`SpectralPathState.radiance` 保留 Direct，新增 `caustics_radiance`，`combined_radiance()` 返回两者之和。原 RGB 入口继续保持 RGB 语义。当前实验场景为 512×512、2048 总路径、Packet=4（512 个空间样本）、曝光 0.4，使用单灯带 HDRI（旋转 127.0546°）、线性反射率 0.18 的中性灰地面，棋盘格关闭；临时采用 Cauchy A=1.4907、B=0.0084 μm²，550 nm 的 IOR 约为 1.518469。
 
 Packet=4 将独立空间样本数减为四分之一，可能降低颜色方差，也可能增加轮廓或纹理边缘的空间噪声；公共随机数只改变 Lane 间的相关性，各单波长估计的 PDF、Fresnel/RR 补偿、400/SPP 权重和总路径预算保持原样；不保证每个场景都优于 Packet=1。
 

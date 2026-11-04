@@ -41,8 +41,28 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     if config.render.camera_mode == spectral_caustics::config::rendersetting::CameraMode::Spectral {
-        let image = renderer.render_camera(&scene)?;
-        renderer.save(&image, &config.render.output_path)?;
+        if scene.caustics_object_id.is_some() {
+            let images = renderer.render_spectral_camera_components(&scene)?;
+            renderer.save(&images.combined, &config.render.output_path)?;
+            for (image, name) in [
+                (&images.direct, "camera_direct.png"),
+                (&images.caustics, "camera_caustics.png"),
+                (&images.combined, "camera_combined.png"),
+            ] {
+                let path = config
+                    .render
+                    .output_path
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join(name);
+                if name != "camera_combined.png" || path != config.render.output_path {
+                    renderer.save(image, auxiliary_path(&config.render.output_path, name))?;
+                }
+            }
+        } else {
+            let image = renderer.render_camera(&scene)?;
+            renderer.save(&image, &config.render.output_path)?;
+        }
         println!(
             "Hero wavelength 光谱相机：{}，总光谱路径/像素={}，Packet={}，空间样本/像素={}，IOR={:?}",
             config.render.output_path.display(),

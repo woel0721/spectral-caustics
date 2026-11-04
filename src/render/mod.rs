@@ -6,14 +6,15 @@ pub mod framebuffer;
 pub mod integrator;
 pub mod utils;
 
-pub use caustics::SpectralLighting;
+pub use caustics::{SpectralCausticsMap, SpectralLighting};
 pub use integrator::{
     CameraLightingImages, lambertian_radiance, render_camera_glass, render_camera_glass_components,
     sample_ground_irradiance,
 };
 pub use integrator::{
-    SpectralPathState, render_spectral_camera, render_spectral_camera_with_packet,
-    trace_spectral_camera_path,
+    SpectralPathState, render_spectral_camera, render_spectral_camera_components,
+    render_spectral_camera_with_packet, trace_spectral_camera_path,
+    trace_spectral_camera_path_with_caustics,
 };
 
 use self::{
@@ -56,6 +57,12 @@ impl Render {
     }
 
     pub fn render_spectral_camera(&self, scene: &Scene) -> Result<Framebuffer, Box<dyn Error>> {
+        if scene
+            .caustics_object_id
+            .is_some_and(|id| scene.supports_ideal_caustics(id))
+        {
+            return Ok(self.render_spectral_camera_components(scene)?.combined);
+        }
         let work = || {
             integrator::render_spectral_camera_with_packet(
                 scene,
@@ -67,6 +74,24 @@ impl Render {
                 self.settings.mode,
             )
             .map_err(|e| e.to_string())
+        };
+        match &self.pool {
+            Some(pool) => pool.install(work),
+            None => work(),
+        }
+        .map_err(Into::into)
+    }
+
+    /// 按需预计算一次 Eλ 图集，再借用给同一批 Rayon 相机路径；RGB 入口保持原样。
+    pub fn render_spectral_camera_components(
+        &self,
+        scene: &Scene,
+    ) -> Result<CameraLightingImages, Box<dyn Error>> {
+        let work = || {
+            let map = caustics::render_wavelength_caustics(scene, &self.settings)
+                .map_err(|e| e.to_string())?;
+            integrator::render_spectral_camera_components(scene, &self.settings, map.as_ref())
+                .map_err(|e| e.to_string())
         };
         match &self.pool {
             Some(pool) => pool.install(work),

@@ -10,7 +10,10 @@ pub struct SpectralPathState {
     pub ray: Ray,
     pub wavelength_nm: f64,
     pub throughput: f64,
+    /// Direct：原有太阳、环境和背景的 Lλ，保持既有无焦散入口语义。
     pub radiance: f64,
+    /// 仅首次连续地面顶点读取的焦散 Lλ，与 Direct 使用同一路径吞吐量。
+    pub caustics_radiance: f64,
     pub last_scatter: Option<ScatterType>,
     pub path_depth: usize,
     pub non_delta_bounces: usize,
@@ -25,6 +28,7 @@ impl SpectralPathState {
             wavelength_nm,
             throughput: 1.0,
             radiance: 0.0,
+            caustics_radiance: 0.0,
             last_scatter: None,
             path_depth: 0,
             non_delta_bounces: 0,
@@ -37,6 +41,10 @@ impl SpectralPathState {
 
     pub fn delta_events(&self) -> usize {
         self.path_depth.saturating_sub(self.non_delta_bounces)
+    }
+
+    pub fn combined_radiance(&self) -> f64 {
+        self.radiance + self.caustics_radiance
     }
 
     pub(super) fn validate(&self) -> Result<(), String> {
@@ -54,6 +62,9 @@ impl SpectralPathState {
             || self.throughput < 0.0
             || !self.radiance.is_finite()
             || self.radiance < 0.0
+            || !self.caustics_radiance.is_finite()
+            || self.caustics_radiance < 0.0
+            || !self.combined_radiance().is_finite()
             || self.non_delta_bounces > self.path_depth
             || self.non_delta_bounces > self.max_non_delta_bounces
             || self.path_depth.saturating_sub(self.non_delta_bounces)

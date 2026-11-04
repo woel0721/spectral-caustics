@@ -17,6 +17,9 @@ use rand_chacha::ChaCha12Rng;
 use rayon::prelude::*;
 use std::{error::Error, ops::Range};
 
+mod wavelength;
+pub use wavelength::{SpectralCausticsMap, render_wavelength_caustics};
+
 /// 同一批光源样本的两种落地贡献，均为未曝光的 XYZ 辐照度。
 /// direct 用于光源通量检查；相机直射使用无限远太阳，不读取 direct 图。
 pub struct SpectralLighting {
@@ -193,7 +196,6 @@ fn render_spectral_buffers(
         .ok_or("纵向采样数溢出")?;
     let ray_count = samples_x.checked_mul(samples_y).ok_or("光线数量溢出")?;
 
-    let span = scene.light.aperture_max_m - scene.light.aperture_min_m;
     let area = scene.receiver.area();
     let total_flux = scene.light.total_flux;
     let flux_per_ray = total_flux / ray_count as f64;
@@ -245,22 +247,13 @@ fn render_spectral_buffers(
     .into_par_iter()
     .map(|(rows, mut rng)| {
         let mut buffers = SpectralBuffers::new(settings.width, settings.height);
-        for sample_y in rows {
-            for sample_x in 0..samples_x {
-                // 同一空间光线的所有波长共享发射位置，每次仅消耗两个随机数。
-                let origin_x = scene.light.aperture_min_m.x
-                    + (sample_x as f64 + rng.random::<f64>()) / samples_x as f64 * span.x;
-                let origin_y = scene.light.aperture_min_m.y
-                    + (sample_y as f64 + rng.random::<f64>()) / samples_y as f64 * span.y;
-                let ray = Ray::new(
-                    Vector3::new(origin_x, origin_y, scene.light.height_m),
-                    scene.light.direction,
-                )
-                .ok_or("平行光线构造失败")?;
-
-                let Some(first_hit) = scene.intersect(&ray) else {
-                    continue;
-                };
+        for_each_emitted_hit(
+            scene,
+            samples_x,
+            samples_y,
+            rows,
+            &mut rng,
+            |ray, first_hit| {
                 if first_hit.object_id == Some(ground_id) {
                     splat_spectral_xyz(
                         buffers.target(false),
@@ -268,13 +261,13 @@ fn render_spectral_buffers(
                         direct_xyz,
                         &scene.receiver,
                     )?;
-                    continue;
+                    return Ok(());
                 }
                 if first_hit.object_id != caustics_object_id {
-                    continue;
+                    return Ok(());
                 }
                 let Some(caustics_object_id) = caustics_object_id else {
-                    continue;
+                    return Ok(());
                 };
 
                 if let Some(glass_ior) = constant_ior {
@@ -294,7 +287,7 @@ fn render_spectral_buffers(
                             &scene.receiver,
                         )?;
                     }
-                    continue;
+                    return Ok(());
                 }
 
                 for &(glass_ior, xyz) in &contributions {
@@ -316,8 +309,9 @@ fn render_spectral_buffers(
                         &scene.receiver,
                     )?;
                 }
-            }
-        }
+                Ok(())
+            },
+        )?;
         Ok(buffers)
     })
     .collect();
@@ -367,6 +361,47 @@ fn spectral_sample_blocks(
     blocks
 }
 
+/// RGB XYZ 积分与单波长图共享发射位置、首次求交和 RNG 消耗顺序。
+fn for_each_emitted_hit(
+    scene: &Scene,
+    samples_x: usize,
+    samples_y: usize,
+    rows: Range<usize>,
+    rng: &mut ChaCha12Rng,
+    mut visit: impl FnMut(Ray, crate::geometry::hit::Hit) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    let span = scene.light.aperture_max_m - scene.light.aperture_min_m;
+    for sample_y in rows {
+        for sample_x in 0..samples_x {
+            let origin_x = scene.light.aperture_min_m.x
+                + (sample_x as f64 + rng.random::<f64>()) / samples_x as f64 * span.x;
+            let origin_y = scene.light.aperture_min_m.y
+                + (sample_y as f64 + rng.random::<f64>()) / samples_y as f64 * span.y;
+            let ray = Ray::new(
+                Vector3::new(origin_x, origin_y, scene.light.height_m),
+                scene.light.direction,
+            )
+            .ok_or("平行光线构造失败")?;
+            if let Some(hit) = scene.intersect(&ray) {
+                visit(ray, hit)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ground_splat_weights(
+    position: Vector3<f64>,
+    width: usize,
+    height: usize,
+    receiver: &GroundReceiver,
+) -> Result<[(usize, usize, f64); 4], &'static str> {
+    match ground_to_pixel(position, width, height, receiver) {
+        Some((x, y)) => bilinear_weights(x, y, width, height).ok_or("双线性权重计算失败"),
+        None => Ok([(0, 0, 0.0); 4]),
+    }
+}
+
 /// 把一份线性 XYZ 按地面落点分配到四邻域，接收区域外的通量直接丢弃。
 fn splat_spectral_xyz(
     framebuffer: &mut Framebuffer,
@@ -377,12 +412,8 @@ fn splat_spectral_xyz(
     if xyz.iter().any(|v| !v.is_finite() || *v < 0.0) {
         return Err("光谱 XYZ 能量必须有限且非负");
     }
-    let Some((x, y)) = ground_to_pixel(position, framebuffer.width, framebuffer.height, receiver)
-    else {
-        return Ok(());
-    };
-    let neighbors = bilinear_weights(x, y, framebuffer.width, framebuffer.height)
-        .ok_or("双线性权重计算失败")?;
+    let neighbors =
+        ground_splat_weights(position, framebuffer.width, framebuffer.height, receiver)?;
     for (pixel_x, pixel_y, weight) in neighbors {
         if weight > 0.0 && !framebuffer.accumulate(pixel_x, pixel_y, xyz * weight) {
             return Err("光谱 XYZ 像素累积失败");

@@ -4,6 +4,7 @@ use crate::{
     geometry::ray::Ray,
     material::unit_vector,
     optics::{emission::rgb_emission, iormode::IorMode},
+    render::caustics::SpectralCausticsMap,
     scene::Scene,
 };
 use rand::Rng;
@@ -33,7 +34,7 @@ pub(super) fn russian_roulette(
 }
 
 /// 全路径固定 λ；仅传输标量 Lλ 和 throughput，CIE 和 1/pλ 留在相机像素积分阶段。
-/// 不查询已经对波长积分的 XYZ 焦散贴图，避免把 XYZ 误当作单波长数据。
+/// 无光源焦散的既有入口，保留原有随机流和计光。
 /// prefix_rng 仅用于首次连续顶点前的 Delta；environment_rng 仅用于首次环境 NEE。
 /// 后续 BSDF、Delta、环境与 RR 使用 continuation_rng，深度变化不消耗上述前缀流。
 pub fn trace_spectral_camera_path(
@@ -44,7 +45,34 @@ pub fn trace_spectral_camera_path(
     environment_rng: &mut dyn rand::RngCore,
     continuation_rng: &mut dyn rand::RngCore,
 ) -> Result<(), Box<dyn Error>> {
+    trace_spectral_camera_path_with_caustics(
+        scene,
+        state,
+        ior_mode,
+        None,
+        prefix_rng,
+        environment_rng,
+        continuation_rng,
+    )
+}
+
+/// map 只读；首次 non-delta 着色顶点是地面时添加 throughput × (rhoλ/π) × Eλ。
+/// Delta 前缀不禁用查询；后续连续顶点永不读取，且查询不消耗随机数。
+pub fn trace_spectral_camera_path_with_caustics(
+    scene: &Scene,
+    state: &mut SpectralPathState,
+    ior_mode: IorMode,
+    caustics: Option<&SpectralCausticsMap>,
+    prefix_rng: &mut dyn rand::RngCore,
+    environment_rng: &mut dyn rand::RngCore,
+    continuation_rng: &mut dyn rand::RngCore,
+) -> Result<(), Box<dyn Error>> {
     state.validate()?;
+    if caustics
+        .is_some_and(|map| Some(map.ground_id()) != scene.ground_id || map.mode() != ior_mode)
+    {
+        return Err("单波长焦散图的地面或 IOR 模式与相机不一致".into());
+    }
     crate::config::sceneconfig::validate_diffuse_bounces(scene.max_diffuse_bounces)?;
     if scene.environment_samples == 0 {
         return Err("环境样本数必须为正".into());
@@ -107,6 +135,22 @@ pub fn trace_spectral_camera_path(
                 },
             )?;
             state.radiance += state.throughput * (direct + environment) * scale;
+            if !state.has_non_delta_vertex
+                && state.non_delta_bounces == 0
+                && let Some(map) = caustics
+                && hit.object_id == Some(map.ground_id())
+            {
+                // Eλ 已含光源强度、双界面透射与几何可见性，不能再次做太阳 shadow ray。
+                // 法线方向只用于取 Lambertian 的 rhoλ/π，不再乘入射余弦。
+                if material.irradiance_reflectance().is_none() {
+                    return Err("单波长焦散仅支持 Lambertian 地面".into());
+                }
+                let f = lighting::evaluate(material, normal, wo, normal, state.wavelength_nm)?;
+                let e = map
+                    .sample(hit.coords, state.wavelength_nm)
+                    .ok_or("单波长焦散查询失败")?;
+                state.caustics_radiance += state.throughput * f * e * scale;
+            }
         }
         state.has_non_delta_vertex |= material.has_non_delta();
         let continuous_budget = state.non_delta_bounces < state.max_non_delta_bounces;

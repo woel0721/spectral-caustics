@@ -1094,6 +1094,10 @@ fn spectral_hdri_balance_power_and_odd_quotas_converge_to_a_uniform_emitter() {
 fn spectral_config_defaults_roundtrips_rejects_ggx_and_cli_renders_xyz_output() {
     assert_eq!(Config::default().render.camera_mode, CameraMode::Rgb);
     let mut c = Config::from_json(include_str!("../configs/sphere_spectral.json")).unwrap();
+    // 无光源焦散时仍只输出原有主图；启用后的三图由 spectral_caustics 测试覆盖。
+    if let ObjectConfig::Sphere { caustics, .. } = &mut c.scene.objects[0] {
+        *caustics = false;
+    }
     assert_eq!(Config::from_json(&c.to_json().unwrap()).unwrap(), c);
     c.render.width = 16;
     c.render.height = 12;

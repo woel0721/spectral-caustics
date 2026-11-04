@@ -15,8 +15,9 @@ pub(crate) use camera::render_camera_glass_components_impl;
 pub use camera::{render_camera_glass, render_camera_glass_components};
 pub use ground::{lambertian_radiance, sample_ground_irradiance};
 pub use spectral::{
-    SpectralPathState, render_spectral_camera, render_spectral_camera_with_packet,
-    trace_spectral_camera_path,
+    SpectralPathState, render_spectral_camera, render_spectral_camera_components,
+    render_spectral_camera_with_packet, trace_spectral_camera_path,
+    trace_spectral_camera_path_with_caustics,
 };
 pub use types::CameraLightingImages;
 
