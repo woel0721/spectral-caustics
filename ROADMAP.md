@@ -20,7 +20,7 @@
 
 `configs/sphere.json` 为主要光谱测试场景，显式启用玻璃球的 `caustics` 和 Cauchy 模型，输出 Sphere 的 Direct/Caustics/Combined。默认三球对照 JSON 仍关闭光源焦散。旧 Prism 配置、独立 IOR 实验入口与 Debug 目标选择保留；相机 RGB BSDF 采样不随光源色散设置变化。
 
-`configs/sphere_spectral.json` 为独立光谱相机场景，当前实验配置为 256×256、4096 总路径、Packet=4、1024 个空间样本，使用 `monochrome_studio_04_4k.hdr`、线性反射率 0.18 的中性灰地面，棋盘格关闭。`render.camera_mode` 默认 `rgb`，设为 `spectral` 后独立输出主图；`render.mode` 选择 Constant/Dispersion。太阳使用连续归一化 D65；RGB HDRI/天空/背景使用独立 PBRT Illuminant 基谱与 D65 白点校准，保留 HDR 强度。源数据与近似边界见颜色数据说明。
+`configs/sphere_spectral.json` 为独立光谱相机场景，当前实验配置为 512×512、2048 总路径、Packet=4、512 个空间样本、曝光 0.4，使用单灯带 HDRI（旋转 127.0546°）、线性反射率 0.18 的中性灰地面，棋盘格关闭；临时使用 Cauchy A=1.4907、B=0.0084 μm²。`render.camera_mode` 默认 `rgb`，设为 `spectral` 后独立输出主图；`render.mode` 选择 Constant/Dispersion。太阳使用连续归一化 D65；RGB HDRI/天空/背景使用独立 PBRT Illuminant 基谱与 D65 白点校准，保留 HDR 强度。源数据与近似边界见颜色数据说明。
 
 ## 当前限制
 

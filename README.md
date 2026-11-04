@@ -97,7 +97,7 @@ ACES 对曝光后的每个线性 RGB 通道应用 `x=max(x,0)`、`clamp(x*(2.51*
 
 该模式独立输出主图，不生成 RGB 专用的 Direct/Caustics 分量或调试 AOV，也不读取已经对波长积分的 XYZ 焦散贴图。当前光源端焦散仍通过原 RGB 三分量流程展示；不将 XYZ 贴图反解成单波长能量。主程序在光谱模式下直接调用相机，不执行光子图构建。
 
-`Render::render_camera()` 按配置选择 RGB 或光谱；`Render::render_spectral_camera()` 遵循配置中的 Packet 大小。公开函数 `render_spectral_camera()` 保留原签名并固定 Packet=1；新增 `render_spectral_camera_with_packet(scene,width,height,spp,packet_size,seed,ior_mode)`。`trace_spectral_camera_path()` 保持单波长接口。原 RGB 入口继续保持 RGB 语义。当前实验场景为 256×256、4096 总路径、Packet=4（1024 个空间样本），使用 `monochrome_studio_04_4k.hdr`、线性反射率 0.18 的中性灰地面，棋盘格关闭。
+`Render::render_camera()` 按配置选择 RGB 或光谱；`Render::render_spectral_camera()` 遵循配置中的 Packet 大小。公开函数 `render_spectral_camera()` 保留原签名并固定 Packet=1；新增 `render_spectral_camera_with_packet(scene,width,height,spp,packet_size,seed,ior_mode)`。`trace_spectral_camera_path()` 保持单波长接口。原 RGB 入口继续保持 RGB 语义。当前实验场景为 512×512、2048 总路径、Packet=4（512 个空间样本）、曝光 0.4，使用单灯带 HDRI（旋转 127.0546°）、线性反射率 0.18 的中性灰地面，棋盘格关闭；临时采用 Cauchy A=1.4907、B=0.0084 μm²，550 nm 的 IOR 约为 1.518469。
 
 Packet=4 将独立空间样本数减为四分之一，可能降低颜色方差，也可能增加轮廓或纹理边缘的空间噪声；公共随机数只改变 Lane 间的相关性，各单波长估计的 PDF、Fresnel/RR 补偿、400/SPP 权重和总路径预算保持原样；不保证每个场景都优于 Packet=1。
 

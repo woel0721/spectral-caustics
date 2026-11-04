@@ -1,15 +1,15 @@
 {
   "render": {
-    "width": 256,
-    "height": 256,
+    "width": 512,
+    "height": 512,
     "samples_per_pixel_axis": 4,
-    "camera_spp": 4096,
+    "camera_spp": 2048,
     "spectral_packet_size": 4,
     "mode": "dispersion",
     "wavelength_min_nm": 380.0,
     "wavelength_max_nm": 780.0,
     "wavelength_step_nm": 10.0,
-    "exposure": 1.0,
+    "exposure": 0.4,
     "seed": 42,
     "thread_count": null,
     "max_spectral_blocks": 16,
@@ -42,8 +42,8 @@
       1.0
     ],
     "environment": {
-      "map_path": "assets/HDRI/monochrome_studio_04_4k.hdr",
-      "rotation_degrees": 0.0,
+      "map_path": "assets/HDRI/dispersion_single_light_bar.hdr",
+      "rotation_degrees": 127.05460409907714,
       "intensity": 1.0,
       "horizon_linear_rgb": [
         1.0,
@@ -74,8 +74,8 @@
           "type": "dielectric",
           "ior": 1.52,
           "dispersion": {
-            "a": 1.5046,
-            "b_um2": 0.0042
+            "a": 1.4907,
+            "b_um2": 0.0084
           }
         },
         "caustics": true
