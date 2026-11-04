@@ -10,7 +10,7 @@
 | 几何 | 米制 Z-up、有限地面、Sphere、Prism、三条长棱各 8 段圆角的 BeveledPrism；材质绑定与最近交点 |
 | RGB 材质 | Lambertian、Dielectric、Mirror、各向同性 GgxMetal，统一 `BsdfSample` 接口 |
 | 相机路径 | 独立 RGB / Hero Wavelength 标量路径，最多 32 次 Delta、0..1024 次额外连接与补偿 Russian Roulette |
-| 光谱相机 | 每像素按 SPP 将 380–780 nm 等宽分层，每层随机一个波长；Dielectric/Lambertian/Mirror；CIE 与 1/pλ 的 XYZ Monte Carlo 积分 |
+| 光谱相机 | 单波长或四波长 Packet，共享主射线、独立标量路径；总 SPP 个完整细分波长层；Dielectric/Lambertian/Mirror；CIE 与 1/pλ 的 XYZ Monte Carlo 积分 |
 | 照明 | 解析太阳、HDRI/渐变环境、重要性采样、固定配额 Balance/Power MIS |
 | 光源焦散 | 显式选择理想 Dielectric Sphere/Prism；材质 Constant/Cauchy IOR、双界面 Snell/Fresnel、地面 XYZ 双线性累积、CIE/D65 积分 |
 | 调试 | debug 构建可输出四张路径 AOV 与 JSON，目标物体独立可选 |
@@ -20,7 +20,7 @@
 
 `configs/sphere.json` 为主要光谱测试场景，显式启用玻璃球的 `caustics` 和 Cauchy 模型，输出 Sphere 的 Direct/Caustics/Combined。默认三球对照 JSON 仍关闭光源焦散。旧 Prism 配置、独立 IOR 实验入口与 Debug 目标选择保留；相机 RGB BSDF 采样不随光源色散设置变化。
 
-`configs/sphere_spectral.json` 为独立 Hero 相机场景（256×256、512 SPP）。`render.camera_mode` 默认 `rgb`，设为 `spectral` 后独立输出主图；`render.mode` 选择 Constant/Dispersion。太阳使用连续归一化 D65；RGB HDRI/天空/背景使用独立 PBRT Illuminant 基谱与 D65 白点校准，保留 HDR 强度。源数据与近似边界见颜色数据说明。
+`configs/sphere_spectral.json` 为独立光谱相机场景（256×256、512 总路径、Packet=4、128 个空间样本）。`render.camera_mode` 默认 `rgb`，设为 `spectral` 后独立输出主图；`render.mode` 选择 Constant/Dispersion。太阳使用连续归一化 D65；RGB HDRI/天空/背景使用独立 PBRT Illuminant 基谱与 D65 白点校准，保留 HDR 强度。源数据与近似边界见颜色数据说明。
 
 ## 当前限制
 
@@ -32,13 +32,13 @@
 
 ## 最近一次实现验收
 
-Hero Wavelength 相机，本地阶段提交 `2d40a2c`（材质/发光光谱）、`d6f2a8c`（相机/配置/测试）与 `8dc9bca`（随机流隔离），2026-11-03。以下计数对应当前工作区，保留已有 ACES 输出改动：
+4-Wavelength Packet 光谱相机，2026-11-04；核心实现提交 `1cc29e9`。
 
-- 原有 401 项回归测试保留；新增 2 项发光光谱、1 项 RR 单元和 16 项光谱相机集成测试。当前 **338 项单元 + 82 项集成 = 420 项测试全部通过**，无失败或 ignored；另通过原单波长示例的 2 项验证和 release 光谱相机的 16 项测试。
-- fmt、locked 全目标构建、完整测试、严格 Clippy、diff 检查通过。没有新增依赖，没有删除文件、接口或测试。
-- 每像素按 SPP 分层波长采样；验证 SPP=1/2/7/64 时每层恰好一个波长，保持每项 400/SPP 权重，不额外乘 Δλ。
-- 检查 D65 连续 Y 归一化与 XYZ 白点、恒定 IOR/色散方向、Fresnel 分支频率和 IOR 平方权重、标量反射率/PDF、MC 收敛、HDR 增益、背景/环境逃逸与 NEE 去重、RR 补偿、32 次 Delta 上限、非法输入与 GGX 拒绝。
-- HDRI 验证包含单样本、2/3/8 配额的 Balance/Power，以及高对比彩色 HDR、旋转和玻璃遮挡，与独立半球数值积分比较。光谱两种 IOR 模式、两种 MIS、深度 0/4 下，固定 seed 在 1/2/4 线程及重复渲染中逐位一致；RGB 入口继续与原独立相机入口一致。增加续追深度不消耗玻璃前缀与首次环境随机流，后续玻璃、环境和 RR 只使用续追流。
-- 主程序实跑 `configs/sphere_spectral.json`：256×256、512 SPP、Dispersion，约 20.0 秒（与回归测试并行运行）。`spectral_camera_compare` 输出同采样配置的 Constant/Dispersion 对比图，两次分别约 14.4/15.8 秒。单波长估计仍有颜色噪声。
-- 原 `camera_direct_caustics -- 8` 与 `camera_parallel_benchmark -- 8 48` 实跑成功；原光源与 RGB 三分量在 1/2/4/6 线程逐位一致。
-- 路径循环独立保留，未把 RGB 状态改为泛型；仅共用介质界面采样、Fresnel/Snell、余弦方向、MIS 基础函数、可见性、偏移和 Delta 预算。当前没有通用 Photon Mapping、体积、BDPT 或 GPU。
+- `spectral_packet_size` 仅支持 1/4，Rust/旧 JSON 缺省为 1；光谱球展示 JSON 显式为 4。`camera_spp` 始终为总光谱路径数；Packet=4 要求整除，空间样本数为 SPP/4。配置和直接 API 校验非法配额及路径/环境工作量溢出。
+- 每个 Packet 只生成一次抖动和主射线，四个 Lane 在各自 100 nm 波段内进一步完整分层，独立新建标量状态和随机流；继续复用原 `trace_spectral_camera_path()`、材质、Fresnel/Snell、MIS、RR 和输出链。新增 `render_spectral_camera_with_packet()`；原公开函数保留签名并固定 Packet=1。每项积分权重仍是 400/总路径数。
+- 改动前 **420** 项基线全部通过；保留全部原测试，新增 **3 项单元 + 6 项集成**，当前 **341 项单元 + 88 项集成 = 429 项测试全部通过**，无失败或 ignored。fmt、fmt check、locked 全目标构建、完整测试、严格全目标 Clippy、diff check 均通过；release 光谱相机的 22 项测试及 Packet 的 2 项边界/RNG 单元测试也通过。
+- 测试覆盖 4/16/512 个细分层各访问一次、浮点右端边界、共享主射线、Lane 提前结束/额外随机消耗的隔离、独立标量贡献、D65 白点/能量、Constant/Dispersion 折射、非法配置和溢出。两种 Packet、两种 IOR、Balance/Power、深度 0/4、1/2/4 线程及重复结果逐位一致；RGB、光源焦散和三个分量继续兼容。
+- 修改前后保存的 12 张线性 XYZ 小图（Constant/Dispersion、SPP=1/7/16、深度 0/4）在 Packet=1 下逐字节相同，SHA-256 为 `3a22a5b0c72e4f8cd8df6d805691d0987be2aec1a7a17e937935782e59a91c4c`。未保留冻结旧算法作为测试实现。
+- 实跑新 `spectral_packet_compare`：256×256、512 总路径、三种子、10 线程，完成两种 IOR 的 Packet=1/4 以及独立 4096 SPP 参考。球内色度方差的三种子估计降低约 4.14% / 1.28%，耗时增加约 27.2% / 22.8%；轮廓 Y 方差上升，彩色噪点仍明显。指标、定义、有限参考与少量种子的限制见 README。
+- 主程序实跑原光谱球配置：256×256、512 总路径、Packet=4、Dispersion，成功输出，约 23.8 秒（与完整回归并行，不用于性能对比）。原 `camera_direct_caustics -- 8` 与 `camera_parallel_benchmark -- 8 48` 成功；后者 1/2/4/6 线程 XYZ 逐位一致。另实跑 96×96、8 SPP 的 RGB Sphere 配置，输出非零光源焦散及 Direct/Caustics/Combined。
+- 新增可重复的对比示例与说明；没有新增依赖，没有删除文件、函数或测试。没有改变 RGB 或光源传输算法，也未引入 SIMD、通用 Packet 状态、去噪、BDPT、Photon Mapping 或 GPU。

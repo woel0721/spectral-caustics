@@ -31,6 +31,7 @@ ACES 对曝光后的每个线性 RGB 通道应用 `x=max(x,0)`、`clamp(x*(2.51*
 | --- | --- | --- |
 | `render.width/height` | 512×512 | 768×432 |
 | `render.camera_spp` | 64 | 256 |
+| `render.spectral_packet_size` | 1 | 默认展示省略；光谱球场景为 4 |
 | `render.camera_mode` | `rgb` | 默认展示为 `rgb`，光谱相机场景为 `spectral` |
 | `scene.environment_samples` | 1 | 8 |
 | `scene.environment_mis_heuristic` | `balance` | `power` |
@@ -39,7 +40,7 @@ ACES 对曝光后的每个线性 RGB 通道应用 `x=max(x,0)`、`clamp(x*(2.51*
 
 `Config::default()` 保留单三棱镜实验场景和渐变天空；主程序加载上述 JSON。JSON 省略 `scene.environment` 或设为 `null` 会关闭环境照明，使用常量背景；环境中的 `map_path` 省略/null 时使用渐变，否则加载 HDR。`rotation_degrees` 绕 +Z 旋转，`intensity` 在线性空间缩放。
 
-- `camera_spp` 控制相机采样；`samples_per_pixel_axis` 控制光源每轴分层采样，二者独立。快速预览可同时降低尺寸和采样数。
+- `camera_spp` 始终是每像素总路径数；光谱 `spectral_packet_size` 只支持 1/4，取 4 时 SPP 必须被 4 整除。RGB 和光源端的采样不受 Packet 设置影响。`samples_per_pixel_axis` 独立控制光源每轴分层采样。
 - `seed` 固定随机种子；`thread_count=null` 使用 Rayon 默认线程数，正整数创建专用池；`max_spectral_blocks` 控制光源采样块数。
 - `max_diffuse_bounces` 表示额外连续 BSDF 连接数，包含 Diffuse/Glossy，范围 0..1024；4 最多访问 5 个连续着色顶点。
 - 场景采用米制、Z-up；JSON 支持一个地面、至多一个三棱镜及多个球体/圆角三棱镜。Sphere/Prism 的 `caustics` 开关显式选择至多一个理想 Dielectric 焦散目标，不依赖物体下标或 `debug_object_id`。Sphere 缺省关闭；Prism 缺省开启以兼容旧配置，非介质 Prism 仍只遮挡光线。选择 Sphere 时应关闭其他 Prism 的开关；Sphere 开启时绑定非介质材质会报错。
@@ -77,7 +78,17 @@ ACES 对曝光后的每个线性 RGB 通道应用 `x=max(x,0)`、`clamp(x*(2.51*
 
 ## Hero Wavelength 光谱相机
 
-`render.camera_mode="spectral"` 将每个像素的 380–780 nm 范围按 SPP 等宽分层，第 i 个样本在第 i 层内均匀采样一个波长，整条路径保持该波长。各层等配额混合的边缘 PDF 为 `1/400 nm⁻¹`，每项最终积分权重为 `400/SPP`。独立的 `SpectralPathState` 保存标量 throughput 和每 nm 的辐亮度；结束后才乘 `cie_xyz(λ)/p(λ)`，再对 SPP 求均值。不再额外乘光子积分的离散步宽 `Δλ`，也不把 RGB BSDF 的某个通道当作光谱。波长、像素抖动、玻璃前缀、首次环境 NEE、续追各有确定性的随机流；后续玻璃/连续 BSDF、环境与 RR 只使用续追流，增加深度不扰动前缀。Rayon 像素并行不改变像素内的累积顺序。
+`render.camera_mode="spectral"` 将每个像素的 380–780 nm 范围按总 SPP 等宽细分，整条标量路径保持各自的波长。`spectral_packet_size` 缺省为 1，保留旧的波长、抖动及路径随机序列；设为 4 时，每个空间样本只生成一次子像素偏移和初始 Camera Ray，分别追踪四条独立路径：
+
+| 总 SPP=512 | Packet=1 | Packet=4 |
+| --- | --- | --- |
+| 空间样本 / 初始射线 | 512 | 128 |
+| 单波长路径数 | 512 | 512 |
+| 波长分层 | 全范围 512 层 | 四个 100 nm 波段各 128 层 |
+
+四个 Lane 分别在 380–480、480–580、580–680、680–780 nm 内再按空间样本数细分；每个细分层恰取一个均匀波长。仅共享初始射线和只读 Scene，各 Lane 新建 `SpectralPathState`，独立维护波长、throughput、radiance、散射事件、PDF 和深度，Dielectric 按各自 `n(λ)` 计算后续方向。Packet=4 的波长、玻璃前缀、首次环境 NEE、续追随机流由 seed、像素、空间样本、Lane 和 Stream ID 确定；相机流只按空间样本生成一次。某条 Lane 提前结束不会改变其他路径的随机状态。后续玻璃/连续 BSDF、环境与 RR 仍只使用续追流；Rayon 不改变像素内累积顺序。
+
+各层等配额混合的边缘 PDF 为 `1/400 nm⁻¹`。总路径数 `N=(SPP/packet_size)*packet_size=SPP`，最终直接累积 `Σ cie_xyz(λ)*Lλ/(pλ*N)`，每项积分权重均为 `400/SPP`；不额外乘 `Δλ`，也不再次除以 Packet 大小。所有贡献累积为同一个线性 XYZ 像素，最后才曝光、ACES 和 sRGB 编码。
 
 - 支持 Dielectric、Lambertian、Mirror。Dielectric 在当前 λ 下进行 Fresnel/Snell 采样，radiance 透射权重为 `(eta_i/eta_t)²`，反射/透射的选择概率已补偿；连续两个相反界面的 IOR 平方因子相消。Lambertian/Mirror 使用已有 `rgb_reflectance()` 近似重建反射光谱。GGX 的 RGB eta/k 没有唯一物理光谱，配置和运行时入口会明确拒绝该材质。
 - 太阳采用连续归一化 D65（380–780 nm 的 Y 积分为 1）。RGB HDRI、渐变和背景使用独立的 PBRT **Illuminant** 七基谱，并相对白基谱校准为 D65；保留 HDR 强度，不使用反射率基谱或 [0,1] 上限冒充发光光谱。这是近似重建，任意 RGB 色度不保证精确还原；来源、校准方法、许可见 [颜色数据说明](assets/color/README.md)。
@@ -86,13 +97,34 @@ ACES 对曝光后的每个线性 RGB 通道应用 `x=max(x,0)`、`clamp(x*(2.51*
 
 该模式独立输出主图，不生成 RGB 专用的 Direct/Caustics 分量或调试 AOV，也不读取已经对波长积分的 XYZ 焦散贴图。当前光源端焦散仍通过原 RGB 三分量流程展示；不将 XYZ 贴图反解成单波长能量。主程序在光谱模式下直接调用相机，不执行光子图构建。
 
-`Render::render_camera()` 按配置选择 RGB 或光谱；`Render::render_spectral_camera()` 和 `trace_spectral_camera_path()` 提供独立入口。原 `render_camera_glass()` / `render_camera_glass_components()` 显式保持 RGB 语义。默认/省略 `camera_mode` 为 RGB，现有场景配置继续可用。示例场景为 256×256、512 SPP；单波长估计具有颜色噪声，可提高 SPP 检查收敛。
+`Render::render_camera()` 按配置选择 RGB 或光谱；`Render::render_spectral_camera()` 遵循配置中的 Packet 大小。公开函数 `render_spectral_camera()` 保留原签名并固定 Packet=1；新增 `render_spectral_camera_with_packet(scene,width,height,spp,packet_size,seed,ior_mode)`。`trace_spectral_camera_path()` 保持单波长接口。原 RGB 入口继续保持 RGB 语义。示例场景为 256×256、512 总路径、Packet=4。
+
+Packet=4 将独立空间样本数减为四分之一，可能降低颜色方差，也可能增加轮廓或纹理边缘的空间噪声；独立 Lane 的 Fresnel、环境和漫反射采样仍产生噪声，不保证每个场景都优于 Packet=1。
 
 ```sh
 cargo run --release --locked --example spectral_camera_compare
 ```
 
 同一相机、seed 和波长采样配置下，输出 `output/sphere_spectral/camera_constant.png` 与 `camera_dispersion.png`，并保存两份可直接加载的配置。可传 `[SPP] [边长] [输出目录]`。
+
+公平预算、多种子和高 SPP 参考对比：
+
+```sh
+cargo run --release --locked --example spectral_packet_compare -- 512 256 output/spectral_packet 3 4096
+```
+
+依次对比 Constant/Dispersion 的 Packet=1/4，种子从 42 递增；参考图为 Packet=1、独立种子 20261104。输出 PNG、可重载配置、线性 `.xyz64`（行优先 little-endian f64 XYZ）和 `metrics.json`。统计曝光前的 XYZ 方差/MSE、xy 色度方差、球内部/轮廓边缘，并单独计时相机渲染。参考图仍含有限 SPP 噪声，少量种子不能代表所有场景。
+
+2026-11-04 实跑上述命令：256×256、每像素 512 条光谱路径（每帧 33,554,432 条）、10 线程、种子 42/43/44，分别使用两种 IOR 模式的 4096 SPP 参考。球内部为中心射线命中球体、排除四邻域轮廓的 11,880 像素；轮廓包含两侧的 708 像素。色度方差是跨种子的像素 `Var(X/(X+Y+Z))+Var(Y/(X+Y+Z))`，下表方差/MSE 再对球内部像素取均值。MSE 使用曝光前 XYZ，三个通道取均值；耗时只计相机渲染。
+
+| IOR | Packet | 球内 xy 方差 | 球内 XYZ MSE | 平均耗时 |
+| --- | --- | --- | --- | --- |
+| Constant | 1 | 1.34110e-3 | 4.22506e-3 | 10.717 s |
+| Constant | 4 | 1.28563e-3 | 4.17284e-3 | 13.633 s |
+| Dispersion | 1 | 1.32549e-3 | 4.25199e-3 | 12.000 s |
+| Dispersion | 4 | 1.30858e-3 | 4.14856e-3 | 14.740 s |
+
+本次三种子估计中，Packet=4 的球内色度方差分别降低 **4.14% / 1.28%**，XYZ MSE 降低 **1.24% / 2.43%**；耗时增加 **27.2% / 22.8%**。轮廓色度方差降低 16.2% / 8.4%，但轮廓亮度 Y 方差增加 **7.0% / 26.9%**，体现空间样本减少的代价。全图平均 Y 在两种 Packet 下相差均小于 0.002%，没有四倍能量变化。独立 Lane 的玻璃分支、环境照明和续追噪声仍明显，首版仅观察到有限改善；三种子与有限参考不足以保证所有场景或等耗时预算下获益。
 
 ## 路径调试
 
