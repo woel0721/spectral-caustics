@@ -142,6 +142,21 @@ cargo test --locked --test spectral_caustics
 
 事件 RNG 使用原 seed 和全局发射样本编号选择独立 ChaCha stream，不消费原发射、相机、环境或漫反射续追 RNG。各波长从同一事件序列起点开始；Constant 仍只追踪一次几何通量，Dispersion 按各自 IOR 追踪。固定配置和 seed 在 Rayon 1/2/4 线程下逐位一致；XYZ 固定采样块归约，改变块数量可能改变浮点分组。新增随机分支会产生光子噪声，有限 receiver/事件上限丢失的通量不会重新归一化。未引入透明阴影、环境焦散、通用 Photon Mapping 或 BDPT。
 
+### Forward 三棱镜与玻璃球预览
+
+以下为 `forward` 模式的实际输出：384×384、512 总 SPP、Packet=4、Dispersion、32 次事件上限、seed=42；源端每轴分层 8，圆盘半径 0.01 m、通量 20。场景与此前圆盘预览一致，采用修正棱边续追起点后的算法；有限光子采样仍有噪声。三张分量图保存在 [assets/previews/forward_photons](assets/previews/forward_photons/)，重新渲染写入 `output/forward_preview/`。
+
+| 竖直三棱镜 | 玻璃球 |
+| --- | --- |
+| ![Forward 三棱镜](assets/previews/forward_photons/prism/camera_combined.png) | ![Forward 玻璃球](assets/previews/forward_photons/sphere/camera_combined.png) |
+| [Direct](assets/previews/forward_photons/prism/camera_direct.png) / [Caustics](assets/previews/forward_photons/prism/camera_caustics.png) | [Direct](assets/previews/forward_photons/sphere/camera_direct.png) / [Caustics](assets/previews/forward_photons/sphere/camera_caustics.png) |
+| [可重载配置](configs/vertical_prism_forward_preview.json) | [可重载配置](configs/sphere_forward_preview.json) |
+
+```sh
+cargo run --release --locked -- configs/vertical_prism_forward_preview.json
+cargo run --release --locked -- configs/sphere_forward_preview.json
+```
+
 ## 圆盘面光源与光谱焦散
 
 [configs/vertical_prism_area_light.json](configs/vertical_prism_area_light.json) 使用单面 Lambertian 圆盘代替太阳：半径 0.01 m、总相对通量 20，位置 `(1.3714,-1.0286,1.55)` m、朝向 `(-0.8,0.6,-0.35)`，关闭环境和背景，地面反射率 0.18。256×256、256 总光谱 SPP、Packet=4、8 个 Direct 面积样本；光源每轴分层 8（每个波长 4,194,304 条发射光线）。曝光 8 仅用于显示，未曝光 XYZ 与源端通量不随曝光改变。

@@ -41,7 +41,7 @@
 
 Forward 三棱镜/玻璃球高采样预览与棱边修复，2026-11-05。
 
-- 使用已有圆盘预览场景分别渲染竖直三棱镜和玻璃球，显式开启 Forward/32 事件上限；均为 384×384、512 总 SPP、Packet=4、Dispersion、seed=42、源端每轴分层 8、4 线程。三分量 PNG 和可重载配置保存于 `output/forward_preview/{prism,sphere}/`，实际耗时约 87.8/77.0 秒；已查看合成图与独立焦散图，仍存在有限光子采样噪声。
+- 使用已有圆盘预览场景分别渲染竖直三棱镜和玻璃球，显式开启 Forward/32 事件上限；均为 384×384、512 总 SPP、Packet=4、Dispersion、seed=42、源端每轴分层 8、4 线程。三分量 PNG 和可重载配置保存于 `output/forward_preview/{prism,sphere}/`；同一批 PNG 已保存到 `assets/previews/forward_photons/`，可重载配置为 `configs/vertical_prism_forward_preview.json`、`configs/sphere_forward_preview.json`，README 展示两组预览。实际耗时约 87.8/77.0 秒；已查看合成图与独立焦散图，仍存在有限光子采样噪声。
 - 高采样三棱镜实跑暴露了 Forward 沿单面法线偏移 1e-5 m 会在尖棱附近跨越相邻面的问题，导致 Glass 状态下一次命中却为入射面，明确报错并中止。修复为从实际交点续追，利用各几何已有的 1e-6 m 正向求交阈值排除自交，不跳过错误界面、不重新分配通量。原双透射函数体和 `integrator/area.rs` 未修改。
 - 增加真实棱边路径的回归测试，独立重现旧偏移造成的错误法线方向，并检查修复后的出射面、介质与落地通量。双透射回归进一步核对玻璃板解析 Snell 落点，并显式约束与旧算法两次法线偏移之间的几何误差；Fresnel 权重参考保留。
 - **355 项单元 + 118 项集成 = 473 项测试全部通过**，无失败/ignored，doc tests 通过；fmt、fmt check、locked 全目标构建、严格全目标 Clippy、diff check 均通过，release 构建和两个高采样主程序实跑通过。原线程、MIS/PDF、RR、光谱/颜色、能量和分量测试全部保留。
