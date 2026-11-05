@@ -1,4 +1,8 @@
-//! 理想介质物体的双界面正向光子追踪与 Fresnel 通量。
+//! 理想介质光子；保留双界面透射基准，并提供独立的多事件正向路径。
+
+mod path;
+pub(crate) use path::PhotonTracer;
+pub use path::{PhotonMedium, PhotonPathResult, PhotonPathState, PhotonTermination};
 
 use super::Scene;
 use crate::{
@@ -24,7 +28,8 @@ pub fn refractive_index(wavelength_nm: Option<f64>, mode: IorMode) -> Option<f64
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PhotonLanding {
     pub position: Vector3<f64>,
-    /// 直射为 1；双透射为 (1-F_enter)*(1-F_exit)，不含折射率平方因子。
+    /// 双透射基准为 (1-F_enter)*(1-F_exit)；Forward 为事件通量/PDF 乘积。
+    /// 两者均不含 radiance 的折射率平方因子。
     pub weight: f64,
 }
 
@@ -129,6 +134,29 @@ pub(crate) fn take_photon_from_hit(
 }
 
 impl Scene {
+    /// 从空气发射一条不分裂的光子路径；首次落地后立即终止。
+    /// Fresnel 事件 RNG 由调用方提供，不能与发射/相机流共用。
+    /// 仅选中理想介质可散射，其他物体二值吸收；不支持嵌套介质。
+    pub fn trace_forward_photon(
+        &self,
+        ray: Ray,
+        wavelength_nm: Option<f64>,
+        mode: IorMode,
+        max_events: usize,
+        rng: &mut dyn rand::RngCore,
+    ) -> Result<PhotonPathResult, &'static str> {
+        let object_id = self.caustics_object_id.ok_or("未选择焦散物体")?;
+        let tracer = PhotonTracer {
+            object_id,
+            ground_id: self.ground_id.ok_or("光子路径缺少地面")?,
+            glass_ior: self
+                .photon_ior(object_id, wavelength_nm, mode)
+                .ok_or("光子 IOR 无效")?,
+            max_events,
+        };
+        tracer.trace(self, ray, self.intersect(&ray), rng)
+    }
+
     /// 手工构建场景时使用 add_with_material 返回的编号显式选取目标。
     /// JSON 从物体自身的 caustics 开关选择，不假定球体或地面位于固定下标。
     pub fn select_caustics_object(&mut self, object_id: usize) -> Result<(), String> {

@@ -12,7 +12,7 @@
 | 相机路径 | 独立 RGB / Hero Wavelength 标量路径，最多 32 次 Delta、0..1024 次额外连接与补偿 Russian Roulette |
 | 光谱相机 | 单波长或四波长 Packet，共享主射线和公共路径随机数、独立标量路径；总 SPP 个完整细分波长层；Dielectric/Lambertian/Mirror；CIE 与 1/pλ 的 XYZ Monte Carlo 积分 |
 | 照明 | ParallelLight / 单面 Lambertian DiskAreaLight；圆盘面积 NEE 与全半球余弦光子发射；HDRI/渐变环境、重要性采样、固定配额 Balance/Power MIS |
-| 光源焦散 | 显式选择理想 Dielectric Sphere/Prism/VerticalPrism；材质 Constant/Cauchy IOR、双界面 Snell/Fresnel、地面 XYZ 与标量 Eλ 图集、CIE/D65 积分；RGB/Hero 共享路径三分量 |
+| 光源焦散 | 显式选择理想 Dielectric Sphere/Prism/VerticalPrism；材质 Constant/Cauchy IOR、双透射回归基准及可选多事件 Fresnel/PDF 正向路径、地面 XYZ 与标量 Eλ 图集、CIE/D65 积分；RGB/Hero 共享路径三分量 |
 | 调试 | debug 构建可输出四张路径 AOV 与 JSON，目标物体独立可选；固定波长相机与灯带亚像素投影诊断；光谱相机可临时关闭地面太阳直射以观察焦散 |
 | 工程 | JSON 校验、固定 seed、独立 RNG 流、Rayon 线程一致性、XYZ → 线性 RGB → 曝光/简化 ACES → sRGB PNG |
 
@@ -32,12 +32,24 @@
 
 - 两种相机均为有界路径估计器。RGB 保留首次地面读取 XYZ 焦散图的流程；Hero 在第一个 non-delta 顶点为地面时读取独立 Eλ 图集并输出三分量，仍不输出路径 AOV。波长线性插值会平滑窄色边，有限图集不代替连续光子追踪；非 Delta 环境逃逸由局部 NEE/MIS 计光，不能重复累加背景。
 - Hero 相机的单波长 IOR 支持色散；GGX RGB eta/k 尚无光谱模型，会明确报错。RGB 发光重建仅是近似，不代表实测 HDRI 光谱，也不保证任意 RGB 色度精确还原。单波长 Monte Carlo 有颜色噪声，需要足够 SPP。
-- 光源端只追踪一个显式选中的理想介质 Sphere/Prism/VerticalPrism 的直接双透射，不追踪内部多次反射。BeveledPrism、Mirror、GGX 不生成光源端光谱焦散；默认三球对照场景的 Caustics 为零。
+- 光源端只追踪一个显式选中的理想介质 Sphere/Prism/VerticalPrism。缺省 two_transmission 保留双透射基准；forward 支持多次反射/透射及 TIR，事件上限 1..1024（缺省 32），截断通量丢弃；不支持内部发射、嵌套介质或其他材质续追。BeveledPrism、Mirror、GGX 不生成光源端光谱焦散；默认三球对照场景的 Caustics 为零。
 - 玻璃对太阳/环境 shadow ray 仍为二值遮挡；尚无透明阴影、嵌套介质或体积。GGX 仅支持各向同性单次散射，尚无 RoughDielectric、Plastic、各向异性或多次散射补偿。
 - 尚无环境/金属焦散、通用 Photon Mapping、BVH/KD-Tree、GUI 或 GPU。圆角仍由平面段近似，未使用平滑法线。
-- 圆盘当前不作为可命中或遮挡的发光几何；其直接照明仅由专用 NEE 估计，不与环境 MIS 或 BSDF 命中重复计光。尚不包含 Camera→Glass→Disk 等看到发光面本体的路径；光子仍只做理想介质双透射，有限接收范围外的通量不会重分配。
+- 圆盘当前不作为可命中或遮挡的发光几何；其直接照明仅由专用 NEE 估计，不与环境 MIS 或 BSDF 命中重复计光。尚不包含 Camera→Glass→Disk 等看到发光面本体的路径；光子可选理想介质双透射/多事件路径，有限接收范围外的通量不会重分配。
 
 ## 最近一次实现验收
+
+有界多事件正向光子追踪，2026-11-05。
+
+- 保留 `take_photon_landing`、`take_photon_from_hit`、`Scene::trace_caustics_photon` 的原函数体与双透射测试作为独立回归基准；默认 `render.photon_trace_mode=two_transmission`，显式 `forward` 开启新路径。新增 `photon_max_events`（缺省 32，范围 1..1024）及单路径 `Scene::trace_forward_photon` API。
+- 新 `PhotonPathState` 记录 Ray、Air/Glass、相对单波长通量与事件数；用精确 Fresnel 的离散概率选择反射/透射，通量乘系数/PDF，不乘 radiance η²。支持内部反射及 TIR，确定事件不抽 RNG。路径不分裂，首次落地终止并仅沉积一次；逃逸、其他物体遮挡及事件上限各有显式终态，截断通量不重分配。仍限一个选中理想介质，不支持内部发射或嵌套介质。
+- XYZ 与 Eλ 通过同一入口选择算法，共用新追踪器；事件随机流绑定 seed/全局发射样本编号，各波长重放同一事件序列，不消费发射/相机/环境/漫反射流。Constant 保留单次几何追踪，Dispersion 使用材质 IOR；原 CIE、D65、Δλ、发射功率归一化及 splat 保留。`integrator/area.rs` 与二值 shadow ray 未改，未增加透明阴影、通用 Photon Mapping 或 BDPT。
+- 改动前 **462 项基线通过**；新增 7 项路径单元与 3 项集成测试，现为 **354 项单元 + 118 项集成 = 472 项通过**，无失败/ignored，doc tests 通过；`sphere_wavelengths` 另有 2 项示例测试通过。新增覆盖四次内部反射后落地、全反射续追、前表面反射落地、玻璃板解析透射级数、接收/逃逸/截断通量核算、原双透射几何及概率回归、非法输入、Sphere/VerticalPrism、平行/圆盘光、Constant/Dispersion、XYZ/Eλ 重积分与接收通量上界、发射 Direct 不变、Packet=1/4、Balance/Power、深度 0/4、RGB/Hero 三分量和 Rayon 1/2/4 线程逐位一致。原 MIS/PDF、Fresnel、颜色、路径深度/RR 与焦散数值测试全部保留。
+- `cargo fmt`、`cargo fmt --check`、`cargo build --locked --all-targets`、`cargo test --locked`、`cargo clippy --locked --all-targets -- -D warnings`、`git diff --check` 全部通过；release 全目标构建通过。实跑 `camera_direct_caustics -- 8`、`camera_parallel_benchmark -- 8 48`，后者 1/2/4/6 线程 XYZ 逐位一致。
+- 实跑 Forward 的平行/圆盘 × Constant/Dispersion 四组 256×256、64 总 SPP、Packet=4、源端每轴分层 2、32 事件上限渲染，三分量与可重载配置位于 `output/forward_photons/{parallel,disk}/{constant,dispersion}/`。已查看两种光源的色散 Caustics 图；圆盘在此次低采样下仍有明显光子噪声。有限深度、receiver、空间/波长图集及求积误差仍存在。
+- 无新增依赖；删除文件/函数/测试均为 0。没有执行历史清理；有意保留原双透射算法与独立参考断言，新几何遍历/事件权重不在 XYZ 和 Eλ 生成器中重复实现。原配置未改。
+
+以下保留此前圆盘光源验收。
 
 圆盘面光源与光谱焦散，2026-11-04。
 

@@ -123,6 +123,25 @@ cargo run --release --locked -- output/vertical_prism/spectral_caustics/compare/
 cargo test --locked --test spectral_caustics
 ```
 
+## 多事件正向光子追踪
+
+在 `render` 中设置以下字段可启用有界理想反射/折射路径；省略时仍使用原双透射算法，已有配置与发射随机序列保持不变：
+
+```json
+"photon_trace_mode": "forward",
+"photon_max_events": 32
+```
+
+`photon_trace_mode` 支持 `two_transmission`（默认回归基准）和 `forward`。`photon_max_events` 缺省 32，合法范围 1..1024；一次反射、透射或全反射各占一个事件。恰好完成上限次数后仍允许落地或逃逸，下一次界面事件才截断；截断通量不补偿，因此这是有限深度估计器。两个 IOR 模式、平行光/圆盘、XYZ 图和 Eλ 图均可组合。原 `take_photon_landing`、`Scene::trace_caustics_photon` 始终执行双透射；新单路径入口为 `Scene::trace_forward_photon(ray, wavelength_nm, mode, max_events, rng)`，返回路径状态与终止原因，`landing()` 只为 Ground 终态提供落点及通量。
+
+`PhotonPathState` 记录当前 Ray、Air/Glass、相对发射单波长通量 `flux_weight`、总事件数及反射/透射次数。路径从空气开始，仅在选中理想介质的透射后切换介质，反射及 TIR 不切换。IOR 在整条单波长路径上固定，由材质的 Constant/Cauchy 模型确定；不隐式推断内部发射或嵌套介质。其他物体二值吸收；非法 IOR、事件上限或介质/法线方向不一致会明确报错。
+
+每个界面用精确非偏振 Fresnel 采样 `pR=F`、`pT=1-F`，通量分别乘 `F/pR`、`(1-F)/pT`。这是离散 delta 事件的概率质量，匹配采样时权重为 1；不能再乘一次 Fresnel。正向通量没有相机 radiance 的 η² 因子，参见 [PBRT Dielectric BSDF 的 Importance 约定](https://pbr-book.org/4ed/Reflection_Models/Dielectric_BSDF)。TIR 是概率 1 的反射，F=0/1 不消耗随机数。反射/透射后均沿正确一侧的几何法线偏移 1e-5 m。
+
+一条路径只随机选择一个续追分支，不分裂、不在玻璃界面沉积。首次命中接收地面即终止，仅返回一份贡献；首次直接落地归 Direct，先命中选中玻璃后落地归 Caustics（包括外表面反射）。生成器不会把基准和 Forward 相加；相机继续只在首个 non-delta 地面顶点读取焦散图，`integrator/area.rs` 二值 shadow ray 保持原样。
+
+事件 RNG 使用原 seed 和全局发射样本编号选择独立 ChaCha stream，不消费原发射、相机、环境或漫反射续追 RNG。各波长从同一事件序列起点开始；Constant 仍只追踪一次几何通量，Dispersion 按各自 IOR 追踪。固定配置和 seed 在 Rayon 1/2/4 线程下逐位一致；XYZ 固定采样块归约，改变块数量可能改变浮点分组。新增随机分支会产生光子噪声，有限 receiver/事件上限丢失的通量不会重新归一化。未引入透明阴影、环境焦散、通用 Photon Mapping 或 BDPT。
+
 ## 圆盘面光源与光谱焦散
 
 [configs/vertical_prism_area_light.json](configs/vertical_prism_area_light.json) 使用单面 Lambertian 圆盘代替太阳：半径 0.01 m、总相对通量 20，位置 `(1.3714,-1.0286,1.55)` m、朝向 `(-0.8,0.6,-0.35)`，关闭环境和背景，地面反射率 0.18。256×256、256 总光谱 SPP、Packet=4、8 个 Direct 面积样本；光源每轴分层 8（每个波长 4,194,304 条发射光线）。曝光 8 仅用于显示，未曝光 XYZ 与源端通量不随曝光改变。
@@ -152,11 +171,11 @@ cargo test --locked --test disk_area_light
 面积 `A=πr²`，单面辐亮度系数 `Le=Φ/(πA)`。这里 Φ 沿用项目的 D65/Y 相对通量标尺，没有绝对瓦特标定；新圆盘的光谱密度为 `Leλ=Le*Sλ`，`Sλ=d65_spectrum(λ)` 使用 Hero 已有的 380–780 nm 连续归一化（`∫Sλ*ybar(λ)dλ=1`）。RGB Direct 使用同一连续 D65 白光的 XYZ→RGB 积分，光谱 Direct 在当前 λ 求值；两者共用位置、距离、余弦和可见性算法。模型与 [PBRT 的单面面光源约定](https://pbr-book.org/4ed/Light_Sources/Area_Lights) 一致。
 
 - Direct 在圆盘上均匀采点，`pA=1/A`，估计 `fr*Leλ*cos_x*cos_y/(distance²*pA)` 并按 `light_samples` 平均。代码中 `Le/pA=Φ/π` 解析抵消，避免小半径下分别形成巨大辐亮度和巨大 PDF；保留正确的距离平方与两个余弦。背面/遮挡样本贡献零并计入配额分母，不补采；阴影只检查表面至采样点的有限线段，光源后方的物体不遮挡它。
-- Photon 的位置 PDF 同样为 `1/A`，方向为完整单面余弦半球 `pω=cos_y/π`。匹配发射权重 `Leλ*cos_y/(N*pA*pω)=Φ*Sλ/N`，所以空间权重仍是 `Φ/N/pixel_area`。normal 决定发光半球，不把方向裁剪到玻璃；未命中玻璃、TIR、遮挡和超出接收范围的通量直接丢失。源端两个透射界面的 `(1-F_enter)*(1-F_exit)` 只乘一次，不加相机 radiance 的 eta 平方因子。
+- Photon 的位置 PDF 同样为 `1/A`，方向为完整单面余弦半球 `pω=cos_y/π`。匹配发射权重 `Leλ*cos_y/(N*pA*pω)=Φ*Sλ/N`，所以空间权重仍是 `Φ/N/pixel_area`。normal 决定发光半球，不把方向裁剪到玻璃；未命中接收地面、遮挡和超出接收范围的通量直接丢失。默认双透射基准在 TIR 时终止，源端两个界面的 `(1-F_enter)*(1-F_exit)` 只乘一次；Forward 模式继续追踪 TIR，采用前述事件概率权重。两者均不加相机 radiance 的 eta 平方因子。
 - `SpectralCausticsMap` 继续保存不含 CIE/Δλ 的每 nm 标量 Eλ；源端 XYZ 节点求积乘一次梯形 Δλ，相机仅使用原有 `400/SPP`，不再乘节点宽度。圆盘的连续 D65 归一化固定，改变步长或缩窄图集波段不会改变保留节点的发射密度；离散 XYZ 求积仍有数值误差（纯 D65 的 10 nm 白光 Y 误差约 0.0095%，17 nm 约 0.229%）。旧平行光保留离散节点 Y=1 的归一化约定与原渲染行为。
 - 相机仍仅在首次 non-delta 顶点为地面时查询 Eλ，玻璃前缀有效；保留 Lambertian 光谱 BSDF、环境 MIS、RR 和三个分量。圆盘 NEE 在路径开始时从前缀抽一次固定种子，随后使用独立 RNG；改变 `light_samples` 不消费玻璃、首次环境或续追流。Packet 的各 Lane 从共同前缀获得相同面积采样序列，各自持有独立游标；Parallel 不新增随机抽取。光子采样块按光源的 2/4 个随机维度定位，保持 Rayon 确定性，图集仍不按块复制。
 
-当前圆盘是**不可被相机/BSDF 路径直接命中的发射器**，也不作为遮挡几何加入场景。因此 Area Direct 由专用 NEE 唯一估计，不与环境 NEE/MIS 或发光面命中重复计光；Camera→Glass→Disk、镜面中看到圆盘本体等路径尚未实现。玻璃对局部面积 shadow ray 继续采用二值遮挡，Light→Glass→Ground 的双透射由独立光子图提供，未扩展为透明阴影或通用 Photon Mapping。`spectral_debug_disable_ground_sun` 只关闭平行太阳项，保留圆盘 Direct。
+当前圆盘是**不可被相机/BSDF 路径直接命中的发射器**，也不作为遮挡几何加入场景。因此 Area Direct 由专用 NEE 唯一估计，不与环境 NEE/MIS 或发光面命中重复计光；Camera→Glass→Disk、镜面中看到圆盘本体等路径尚未实现。玻璃对局部面积 shadow ray 继续采用二值遮挡，Light→Glass→Ground 的理想介质路径由独立光子图提供，未扩展为透明阴影或通用 Photon Mapping。`spectral_debug_disable_ground_sun` 只关闭平行太阳项，保留圆盘 Direct。
 
 ### 三棱镜与玻璃球展示预览
 
@@ -194,7 +213,7 @@ cargo run --release --locked -- configs/sphere_area_light_preview.json
 
 启用理想介质光源焦散时，主程序先构建只读 `SpectralCausticsMap`，同一批 Hero/Packet 样本分别累计 Direct 和 Caustics 的线性 XYZ，再逐像素相加为 Combined。主图仍保存到 `output_path`，同目录另有标准三分量文件；自定义主图名称时还保存 `camera_combined.png`，重名时保护主图。没有选中焦散物体时不构建图集，保留原有主图与随机序列。光谱模式仍不生成路径调试 AOV。
 
-`SpectralCausticsMap` 每节点保存标量地面辐照度 `Eλ`（相对通量/m²/nm），完全来自光子双透射，不从 XYZ 反推。每条空间光线的标尺为 `total_flux / ray_count / pixel_area`，再乘两个界面的 Fresnel 透射率及 `k * D65(λ)`；平行光的 `k=1/Σ D65(λ) ybar(λ) Δλ` 保留既有节点归一化，圆盘则采用与 Hero 一致的固定连续 D65 归一化；两者均不对丢失光子重新归一化。层内不含 CIE 或 `Δλ`：按节点的梯形宽度积分能还原原光源 XYZ 图；Hero 只在最终积分乘一次 `400/SPP`。平行光仍保留原离散归一化与 Hero 解析太阳连续 D65 归一化的区别，其数值差随步长收敛；圆盘两阶段使用同一发射光谱，只有节点/空间近似和求积误差。
+`SpectralCausticsMap` 每节点保存标量地面辐照度 `Eλ`（相对通量/m²/nm），来自选定光子算法，不从 XYZ 反推。每条空间光线的标尺为 `total_flux / ray_count / pixel_area`，再乘路径通量权重及 `k * D65(λ)`；平行光的 `k=1/Σ D65(λ) ybar(λ) Δλ` 保留既有节点归一化，圆盘则采用与 Hero 一致的固定连续 D65 归一化；两者均不对丢失光子重新归一化。层内不含 CIE 或 `Δλ`：按节点的梯形宽度积分能还原原光源 XYZ 图；Hero 只在最终积分乘一次 `400/SPP`。平行光仍保留原离散归一化与 Hero 解析太阳连续 D65 归一化的区别，其数值差随步长收敛；圆盘两阶段使用同一发射光谱，只有节点/空间近似和求积误差。
 
 查询使用世界 x/y 的像素中心双线性采样和相邻波长线性插值，接收范围/配置发射波段外返回零。有限节点间插值会平滑窄焦散色边，缩小 `wavelength_step_nm` 可提高精度；连续 Hero 积分和原节点梯形积分有不同的求积误差。图集大小为 `波长节点数 × width × height × 8` 字节；256²、10 nm 的 41 层约 20.5 MiB。按波长并行、每层只分配一个标量图；Constant 另用一张临时几何通量图，只追踪一次。Dispersion 各层重放同一发射序列，不为每个采样块复制图集，也不缓存全部光子路径，代价是逐层重做首次求交。
 
@@ -300,7 +319,7 @@ HDR 使用 `image::codecs::hdr::HdrEncoder` 直接写入 `Rgb<f32>`，不经过�
 - 相机由统一 `BsdfSample` 推进 RGB 吞吐量，Dielectric/Mirror/光滑 GGX 合计最多 32 次 Delta 事件。第三次连续连接后的顶点已着色且仍有预算时执行 RR，`p=clamp(max(throughput),0.05,0.95)`，存活除以 p 补偿。
 - 首次表面立即着色；仅首次连续着色顶点为地面时读取焦散图，续追不再读取。已有连续散射历史时，仅最近事件为 Delta 且有环境的 miss 累加环境到 Direct；非 Delta miss 由局部 NEE/MIS 负责。太阳/环境 shadow ray 对玻璃仍采用二值遮挡。
 - GGX 为各向同性、单次散射金属，`alpha=roughness²`，使用完整 NDF 采样；无效反射保留零贡献、不补采。`roughness≤0.001` 切换为理想镜面。默认 eta/k 为演示参数，RGB 参数不代表真实光谱，未做微表面多次散射补偿。
-- 光源焦散只追踪选中理想介质 Sphere/Prism 的两次透射：首次求交进入后，通过 `Scene::intersect()` 查找同一物体出射面，再求地面交点。折射率由绑定材质查询，两个界面使用同一波长的 `n(λ)`；Snell/Fresnel 函数保持原有数值行为。光子通量乘 `(1-F_enter)(1-F_exit)`，不乘相机 radiance 的 IOR 平方因子；反射、TIR、其他物体遮挡和区域外通量不再分配。D65/CIE XYZ 积分只计一次 `Δλ`，保留原有空间发射归一化与地面双线性 splat。相机三分量 API 要求接收地面为中性 Lambertian；彩色地面可使用独立 RGB 入口 `render_camera_glass`。
+- 光源焦散只追踪选中的单一理想介质 Sphere/Prism/VerticalPrism。默认双透射算法保留原几何路径和 `(1-F_enter)(1-F_exit)` 权重；可选 Forward 按 Fresnel 概率续追理想反射、透射和 TIR，每个事件乘通量/PDF 权重。每条路径使用材质同一波长的 `n(λ)`，不乘相机 radiance 的 IOR 平方因子；遮挡、深度截断和区域外通量不再分配。D65/CIE XYZ 积分只计一次 `Δλ`，保留原有空间发射归一化与地面双线性 splat。相机三分量 API 要求接收地面为中性 Lambertian；彩色地面可使用独立 RGB 入口 `render_camera_glass`。
 - RGB 与 Hero 光谱相机均为有界路径估计器。尚无透明阴影、嵌套介质、环境/金属焦散、通用 Photon Mapping、BVH/KD-Tree、体积、GUI 或 GPU；有限深度仍会截断路径。
 
 几何/光学与 XYZ 使用 `f64`；固定配置和 seed 在当前实现的 1/2/4 线程下结果一致。模块入口为 [src/render/integrator.rs](src/render/integrator.rs) 和 [src/scene.rs](src/scene.rs)。CIE/D65、PBRT 反射/发光基谱的来源、许可证与校验和见 [颜色数据说明](assets/color/README.md)；RGB 到光谱是近似模型。

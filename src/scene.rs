@@ -13,8 +13,11 @@ pub use crate::light::{DiskAreaLight, Light};
 pub use checkerboard::Checkerboard;
 pub use lighting::{Environment, GroundReceiver, ParallelLight};
 pub use objects::SceneObject;
-pub(crate) use photon::take_photon_from_hit;
-pub use photon::{PhotonLanding, refractive_index, take_photon_landing};
+pub use photon::{
+    PhotonLanding, PhotonMedium, PhotonPathResult, PhotonPathState, PhotonTermination,
+    refractive_index, take_photon_landing,
+};
+pub(crate) use photon::{PhotonTracer, take_photon_from_hit};
 
 pub struct Scene {
     /// 玻璃与漫反射路径使用的主光线相机；地面焦散仍从光源发射光线。

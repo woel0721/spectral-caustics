@@ -1,10 +1,12 @@
 //! 未积分的地面光谱辐照度；与 RGB 光源图共享光子追踪和通量标尺。
 
-use super::{for_each_emitted_hit, ground_splat_weights, spectral_sample_blocks};
+use super::{
+    for_each_emitted_hit, ground_splat_weights, spectral_sample_blocks, trace_emitted_photon,
+};
 use crate::{
     config::rendersetting::RenderSetting,
     optics::{iormode::IorMode, spectrum::d65_spd},
-    scene::{GroundReceiver, Scene, take_photon_from_hit},
+    scene::{GroundReceiver, PhotonTracer, Scene},
 };
 use nalgebra::Vector3;
 use rayon::prelude::*;
@@ -80,7 +82,7 @@ impl SpectralCausticsMap {
     }
 }
 
-/// 仅显式启用且支持理想双透射的焦散目标才生成图集；否则立即返回 None。
+/// 仅显式启用且支持理想介质路径的焦散目标才生成图集；否则立即返回 None。
 /// Dispersion 按波长并行，每层只分配一个标量缓冲；没有每采样块的完整图集。
 /// Constant 只追踪一次几何通量图，再乘每个节点的 D65 密度。
 pub fn render_wavelength_caustics(
@@ -166,13 +168,23 @@ pub fn render_wavelength_caustics(
             settings.max_spectral_blocks,
             scene.light.emission_dimensions(),
         ) {
-            for_each_emitted_hit(scene, nx, ny, rows, &mut rng, |ray, hit| {
+            for_each_emitted_hit(scene, nx, ny, rows, &mut rng, |sample_index, ray, hit| {
                 if hit.object_id != Some(object_id) {
                     return Ok(());
                 }
-                if let Some(landing) =
-                    take_photon_from_hit(scene, ray, hit, object_id, ground_id, ior)
-                {
+                if let Some(landing) = trace_emitted_photon(
+                    scene,
+                    ray,
+                    hit,
+                    PhotonTracer {
+                        object_id,
+                        ground_id,
+                        glass_ior: ior,
+                        max_events: settings.photon_max_events,
+                    },
+                    settings,
+                    sample_index,
+                )? {
                     let value = spatial_weight * landing.weight;
                     if !value.is_finite() || value < 0.0 {
                         return Err("单波长焦散通量溢出");
@@ -205,7 +217,7 @@ pub fn render_wavelength_caustics(
                 Some(pixels) => pixels.clone(),
                 None => geometry_layer(nm)?,
             };
-            // Eλ = spatial_weight × T1 × T2 × k × D65(λ)，这里没有 Δλ。
+            // Eλ = spatial_weight × 路径通量/PDF 权重 × k × D65(λ)，这里没有 Δλ。
             let density = k * d65_spd(nm).ok_or("D65 查询失败")?;
             for value in &mut layer {
                 *value *= density;

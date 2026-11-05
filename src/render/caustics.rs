@@ -3,13 +3,13 @@
 
 use super::{framebuffer::Framebuffer, utils::bilinear_weights};
 use crate::{
-    config::rendersetting::RenderSetting,
+    config::rendersetting::{PhotonTraceMode, RenderSetting},
     geometry::ray::Ray,
     optics::{
         iormode::IorMode,
         spectrum::{d65_spd, wavelength_to_xyz},
     },
-    scene::{GroundReceiver, Scene, take_photon_from_hit},
+    scene::{GroundReceiver, PhotonLanding, PhotonTracer, Scene, take_photon_from_hit},
 };
 use nalgebra::Vector3;
 use rand::{Rng, SeedableRng};
@@ -63,7 +63,7 @@ impl SpectralLighting {
     }
 }
 
-// 按首次落地/双界面透射分别累积，合并入口直接相加。
+// 按直接落地/经选中介质落地分别累积，合并入口直接相加。
 struct SpectralBuffers {
     direct: Framebuffer,
     caustics: Framebuffer,
@@ -123,8 +123,8 @@ pub fn render_spectral_caustics(
     render_spectral_lighting(scene, caustics_object_id, ground_id, settings)?.combined()
 }
 
-/// 一次追踪拆分 Direct（首次命中地面）与 Caustics（经所选介质双界面后落地）。
-/// 折射落点乘双界面 Fresnel 透射通量比例；解析太阳的强度不依赖 receiver。
+/// 一次追踪拆分 Direct（首次命中地面）与 Caustics（经所选介质事件后落地）。
+/// 落点乘选定算法的通量权重；解析太阳的强度不依赖 receiver。
 pub fn render_spectral_lighting(
     scene: &Scene,
     caustics_object_id: Option<usize>,
@@ -254,7 +254,7 @@ fn render_spectral_buffers(
             samples_y,
             rows,
             &mut rng,
-            |ray, first_hit| {
+            |sample_index, ray, first_hit| {
                 if first_hit.object_id == Some(ground_id) {
                     splat_spectral_xyz(
                         buffers.target(false),
@@ -273,14 +273,19 @@ fn render_spectral_buffers(
 
                 if let Some(glass_ior) = constant_ior {
                     // 固定折射率下所有波长光路相同，完整白光沿这一条路径落地。
-                    if let Some(landing) = take_photon_from_hit(
+                    if let Some(landing) = trace_emitted_photon(
                         scene,
                         ray,
                         first_hit,
-                        caustics_object_id,
-                        ground_id,
-                        glass_ior,
-                    ) {
+                        PhotonTracer {
+                            object_id: caustics_object_id,
+                            ground_id,
+                            glass_ior,
+                            max_events: settings.photon_max_events,
+                        },
+                        settings,
+                        sample_index,
+                    )? {
                         splat_spectral_xyz(
                             buffers.target(true),
                             landing.position,
@@ -292,14 +297,20 @@ fn render_spectral_buffers(
                 }
 
                 for &(glass_ior, xyz) in &contributions {
-                    let Some(landing) = take_photon_from_hit(
+                    let Some(landing) = trace_emitted_photon(
                         scene,
                         ray,
                         first_hit,
-                        caustics_object_id,
-                        ground_id,
-                        glass_ior,
-                    ) else {
+                        PhotonTracer {
+                            object_id: caustics_object_id,
+                            ground_id,
+                            glass_ior,
+                            max_events: settings.photon_max_events,
+                        },
+                        settings,
+                        sample_index,
+                    )?
+                    else {
                         continue;
                     };
                     // 落地即累积；丢失光子不重新分配通量。
@@ -340,6 +351,32 @@ fn merge_spectral_buffer(
     Ok(())
 }
 
+/// XYZ/Eλ 使用相同的事件序列；序列独立于发射 RNG、波长、块和线程调度。
+fn trace_emitted_photon(
+    scene: &Scene,
+    ray: Ray,
+    hit: crate::geometry::hit::Hit,
+    tracer: PhotonTracer,
+    settings: &RenderSetting,
+    sample_index: usize,
+) -> Result<Option<PhotonLanding>, &'static str> {
+    match settings.photon_trace_mode {
+        PhotonTraceMode::TwoTransmission => Ok(take_photon_from_hit(
+            scene,
+            ray,
+            hit,
+            tracer.object_id,
+            tracer.ground_id,
+            tracer.glass_ior,
+        )),
+        PhotonTraceMode::Forward => {
+            let mut rng = ChaCha12Rng::seed_from_u64(settings.seed);
+            rng.set_stream((sample_index as u64) ^ 0x7068_6f74_6f6e_0001);
+            Ok(tracer.trace(scene, ray, Some(hit), &mut rng)?.landing())
+        }
+    }
+}
+
 /// 直接定位每块在原有随机序列中的起点，不遍历或生成块之前的随机数。
 /// 当前锁定的 rand 0.9.5 的 StdRng 使用 ChaCha12；显式 RNG 提供 set_word_pos。
 fn spectral_sample_blocks(
@@ -370,7 +407,7 @@ fn for_each_emitted_hit(
     samples_y: usize,
     rows: Range<usize>,
     rng: &mut ChaCha12Rng,
-    mut visit: impl FnMut(Ray, crate::geometry::hit::Hit) -> Result<(), &'static str>,
+    mut visit: impl FnMut(usize, Ray, crate::geometry::hit::Hit) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
     let area = scene.light.as_disk().is_some();
     for sample_y in rows {
@@ -386,7 +423,7 @@ fn for_each_emitted_hit(
             };
             let ray = scene.light.emission_ray(u, v).ok_or("光源发射采样失败")?;
             if let Some(hit) = scene.intersect(&ray) {
-                visit(ray, hit)?;
+                visit(sample_y * samples_x + sample_x, ray, hit)?;
             }
         }
     }

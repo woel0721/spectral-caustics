@@ -12,6 +12,15 @@ pub enum CameraMode {
     Spectral,
 }
 
+/// 光源端算法；缺省保留确定双透射作为独立回归基准。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhotonTraceMode {
+    #[default]
+    TwoTransmission,
+    Forward,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenderSetting {
@@ -38,6 +47,11 @@ pub struct RenderSetting {
     pub spectral_debug_disable_ground_sun: bool,
     /// 光源端/光谱相机的 IOR 模式；RGB 相机始终使用材质的常数 ior。
     pub mode: IorMode,
+    #[serde(default)]
+    pub photon_trace_mode: PhotonTraceMode,
+    /// 仅 Forward 使用；每次理想反射/透射（含全反射）占一个事件。
+    #[serde(default = "default_photon_max_events")]
+    pub photon_max_events: usize,
     /// 光源端离散积分的波长范围和步长，单位 nm；Hero 相机固定为 380..780 nm。
     pub wavelength_min_nm: f64,
     pub wavelength_max_nm: f64,
@@ -55,6 +69,10 @@ pub struct RenderSetting {
 
 fn default_camera_spp() -> usize {
     64
+}
+
+fn default_photon_max_events() -> usize {
+    32
 }
 
 fn default_spectral_packet_size() -> usize {
@@ -94,6 +112,8 @@ impl Default for RenderSetting {
             debug_path: false,
             spectral_debug_disable_ground_sun: false,
             mode: IorMode::Dispersion,
+            photon_trace_mode: PhotonTraceMode::TwoTransmission,
+            photon_max_events: default_photon_max_events(),
             wavelength_min_nm: 380.0,
             wavelength_max_nm: 780.0,
             wavelength_step_nm: 10.0,
@@ -146,6 +166,9 @@ impl RenderSetting {
 
     /// 只校验配置数值，不分配图片或创建运行时渲染器。
     pub fn validate(&self) -> Result<(), String> {
+        if !(1..=1024).contains(&self.photon_max_events) {
+            return Err("render.photon_max_events 必须位于 1..1024".into());
+        }
         if self.width == 0 || self.height == 0 || self.samples_per_pixel_axis == 0 {
             return Err("render 的图片尺寸和每轴采样数必须大于零".into());
         }
