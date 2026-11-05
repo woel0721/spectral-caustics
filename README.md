@@ -136,7 +136,7 @@ cargo test --locked --test spectral_caustics
 
 `PhotonPathState` 记录当前 Ray、Air/Glass、相对发射单波长通量 `flux_weight`、总事件数及反射/透射次数。路径从空气开始，仅在选中理想介质的透射后切换介质，反射及 TIR 不切换。IOR 在整条单波长路径上固定，由材质的 Constant/Cauchy 模型确定；不隐式推断内部发射或嵌套介质。其他物体二值吸收；非法 IOR、事件上限或介质/法线方向不一致会明确报错。
 
-每个界面用精确非偏振 Fresnel 采样 `pR=F`、`pT=1-F`，通量分别乘 `F/pR`、`(1-F)/pT`。这是离散 delta 事件的概率质量，匹配采样时权重为 1；不能再乘一次 Fresnel。正向通量没有相机 radiance 的 η² 因子，参见 [PBRT Dielectric BSDF 的 Importance 约定](https://pbr-book.org/4ed/Reflection_Models/Dielectric_BSDF)。TIR 是概率 1 的反射，F=0/1 不消耗随机数。反射/透射后均沿正确一侧的几何法线偏移 1e-5 m。
+每个界面用精确非偏振 Fresnel 采样 `pR=F`、`pT=1-F`，通量分别乘 `F/pR`、`(1-F)/pT`。这是离散 delta 事件的概率质量，匹配采样时权重为 1；不能再乘一次 Fresnel。正向通量没有相机 radiance 的 η² 因子，参见 [PBRT Dielectric BSDF 的 Importance 约定](https://pbr-book.org/4ed/Reflection_Models/Dielectric_BSDF)。TIR 是概率 1 的反射，F=0/1 不消耗随机数。Forward 从实际界面交点续追，使用几何已有的 1e-6 m 正向求交阈值排除自交；不沿单个面法线偏移，以免在棱边跨越相邻面。旧双透射基准仍保留原 1e-5 m 法线偏移。
 
 一条路径只随机选择一个续追分支，不分裂、不在玻璃界面沉积。首次命中接收地面即终止，仅返回一份贡献；首次直接落地归 Direct，先命中选中玻璃后落地归 Caustics（包括外表面反射）。生成器不会把基准和 Forward 相加；相机继续只在首个 non-delta 地面顶点读取焦散图，`integrator/area.rs` 二值 shadow ray 保持原样。
 

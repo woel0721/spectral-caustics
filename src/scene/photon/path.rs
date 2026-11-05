@@ -140,14 +140,13 @@ impl PhotonTracer {
         let f = fresnel_dielectric(cos_i, eta_i, eta_t).ok_or("光子 Fresnel 无效")?;
         // 离散 delta 事件的概率质量，不是立体角 PDF。TIR/F=0 不消耗 RNG。
         let reflected = f == 1.0 || (f > 0.0 && rng.random::<f64>() < f);
-        let (direction, coefficient, probability, offset) = if reflected {
-            (state.ray.direction + 2.0 * cos_i * normal, f, f, normal)
+        let (direction, coefficient, probability) = if reflected {
+            (state.ray.direction + 2.0 * cos_i * normal, f, f)
         } else {
             (
                 refract(state.ray.direction, normal, eta_i, eta_t).ok_or("光子透射方向无效")?,
                 1.0 - f,
                 1.0 - f,
-                -normal,
             )
         };
         // 光子通量采用 importance 传输：没有相机 radiance 的 (eta_i/eta_t)^2。
@@ -156,7 +155,9 @@ impl PhotonTracer {
         if !state.flux_weight.is_finite() || state.flux_weight <= 0.0 {
             return Err("光子通量权重无效");
         }
-        state.ray = Ray::new(hit.coords + offset * 1e-5, direction).ok_or("光子续追 Ray 无效")?;
+        // 凸棱边附近沿单个面法线偏移可能穿过相邻面，破坏介质状态。
+        // 从真实界面点续追；各几何的 INTERSECTION_EPSILON 已剔除起点自交。
+        state.ray = Ray::new(hit.coords, direction).ok_or("光子续追 Ray 无效")?;
         state.event_count += 1;
         if reflected {
             state.reflections += 1;
@@ -359,7 +360,16 @@ mod tests {
                 let result = tracer
                     .trace(&scene, ray, scene.intersect(&ray), &mut rng)
                     .unwrap();
-                assert!((result.landing().unwrap().position - reference.position).norm() < 1e-12);
+                let sin_t = theta.sin() / ior;
+                let tan_t = sin_t / (1.0 - sin_t * sin_t).sqrt();
+                let analytic = Vector3::new(2.0 * theta.tan() + tan_t, 0.0, 0.0);
+                assert!((result.landing().unwrap().position - analytic).norm() < 1e-12);
+                // 基准保留两个 1e-5 m 法线偏移；新路径从真实界面点续追。
+                let legacy_offset = 1e-5 * (theta.tan().abs() + tan_t.abs());
+                assert!(
+                    (result.landing().unwrap().position - reference.position).norm()
+                        <= legacy_offset + 1e-12
+                );
                 let f = fresnel_dielectric(theta.cos(), 1.0, ior).unwrap();
                 assert!(
                     (reference.weight - (1.0 - f).powi(2) * result.state.flux_weight).abs() < 1e-12
@@ -367,6 +377,69 @@ mod tests {
                 assert_eq!(rng.draws, if ior == 1.0 { 0 } else { 2 });
             }
         }
+    }
+
+    #[test]
+    fn prism_corner_transmission_does_not_cross_the_adjacent_face_during_ray_spawn() {
+        use crate::geometry::vertical_prism::VerticalPrism;
+        use nalgebra::Vector2;
+
+        let mut scene = Scene::new();
+        let object_id = scene.add(Box::new(
+            VerticalPrism::new(
+                [
+                    Vector2::new(-0.6, -0.34641016151377546),
+                    Vector2::new(0.6, -0.34641016151377546),
+                    Vector2::new(0.0, 0.6928203230275509),
+                ],
+                0.05,
+                1.85,
+            )
+            .unwrap(),
+        ));
+        let ground_id = scene.add(Box::new(Ground::new(0.0).unwrap()));
+        let tracer = PhotonTracer {
+            object_id,
+            ground_id,
+            glass_ior: 1.5156702734839476,
+            max_events: 32,
+        };
+        let normal = Vector3::new(3.0_f64.sqrt() / 2.0, 0.5, 0.0);
+        // 高采样圆盘渲染中实际触发的棱边路径：法线偏移会越过 y_min 面。
+        let point = Vector3::new(0.5999885804466438, -0.34641038226716264, 1.0474086403116099)
+            + normal * 1e-5;
+        let inside = Vector3::new(
+            -0.9527120219424032,
+            0.09838193295949721,
+            -0.2875079103495607,
+        );
+        let reverse = refract(-inside, -normal, tracer.glass_ior, 1.0).unwrap();
+        let ray = Ray::new(point + reverse, -reverse).unwrap();
+        let entry = scene.intersect(&ray).unwrap();
+        assert!((entry.coords - point).norm() < 1e-12);
+        let mut state = PhotonPathState::new(ray);
+        tracer
+            .scatter(&mut state, entry, &mut Sequence::new(&[u64::MAX]))
+            .unwrap();
+        assert_eq!(state.medium, PhotonMedium::Glass);
+        let exit = scene.intersect(&state.ray).unwrap();
+        assert_eq!(exit.object_id, Some(object_id));
+        assert!(state.ray.direction.dot(&exit.normal) > 0.0);
+        // 独立重现原偏移的错误介质一侧，避免用“跳过错误面”掩盖回归。
+        let displaced = Ray::new(entry.coords - entry.normal * 1e-5, state.ray.direction).unwrap();
+        let wrong = scene.intersect(&displaced).unwrap();
+        assert!(displaced.direction.dot(&wrong.normal) < 0.0);
+        let result = tracer
+            .trace(
+                &scene,
+                ray,
+                Some(entry),
+                &mut Sequence::new(&[u64::MAX; 32]),
+            )
+            .unwrap();
+        assert_eq!(result.state.medium, PhotonMedium::Air);
+        assert!(result.landing().is_some());
+        assert_eq!(result.state.flux_weight, 1.0);
     }
 
     #[test]
