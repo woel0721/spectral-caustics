@@ -1,15 +1,22 @@
 //! JSON 配置的统一入口：序列化、文件读写和配置数值校验。
-//! 这里只返回配置数据，不创建 Scene、Render 或分配运行时物体集合。
+//! 这里只返回配置数据，不创建 RenderJob、Renderer 或分配运行时物体集合。
 
-pub mod cameraconfig;
-pub mod lightconfig;
-pub mod materialconfig;
-pub mod rendersetting;
-pub mod sceneconfig;
+mod build;
+mod job;
+pub use job::{CameraOptions, PhotonOptions, RenderJob};
+pub mod camera;
+pub mod light;
+pub mod material;
+pub mod render;
+pub mod scene;
 
-use self::{rendersetting::RenderSetting, sceneconfig::SceneConfig};
-use serde::{Deserialize, Serialize};
-use std::{error::Error, fs, path::Path};
+use self::render::RenderSetting;
+use self::scene::SceneConfig;
+use serde::Deserialize;
+use serde::Serialize;
+use std::error::Error;
+use std::fs;
+use std::path::Path;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,12 +26,35 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn build(&self) -> Result<RenderJob, Box<dyn Error + Send + Sync>> {
+        let job = RenderJob::from_config(&self.scene)?;
+        #[cfg(feature = "diagnostics")]
+        let job = {
+            let mut job = job;
+            job.diagnostics = self.render.diagnostics.clone();
+            job.diagnostics.target = job.diagnostics.target.or(job.photon.caustics_object_id);
+            if job
+                .diagnostics
+                .target
+                .is_some_and(|id| id >= job.scene.objects.len())
+            {
+                return Err("invalid diagnostic target".into());
+            }
+            job
+        };
+        Ok(job)
+    }
+
+    /// 检查完整渲染配置是否能交给场景和渲染器使用。
+    ///
+    /// 输入：self 中的场景/渲染参数；输出：有效时 Ok(())，非法数值、材质与相机不兼容或工作量溢出时 Err。
+    /// 只做配置校验，不创建运行时场景或图像；HDR 文件加载由 RenderJob 构建处理。
     pub fn validate(&self) -> Result<(), String> {
         self.render.validate()?;
         self.scene.validate()?;
-        if self.render.camera_mode == rendersetting::CameraMode::Spectral {
+        if self.render.camera_mode == render::CameraMode::Spectral {
             for object in &self.scene.objects {
-                use sceneconfig::ObjectConfig;
+                use scene::ObjectConfig;
                 let material = match object {
                     ObjectConfig::Prism { material, .. }
                     | ObjectConfig::VerticalPrism { material, .. }
@@ -32,7 +62,7 @@ impl Config {
                     | ObjectConfig::BeveledPrism { material, .. }
                     | ObjectConfig::Ground { material, .. } => material,
                 };
-                if matches!(material, materialconfig::MaterialConfig::GgxMetal { .. }) {
+                if matches!(material, material::MaterialConfig::GgxMetal { .. }) {
                     return Err(
                         "spectral 相机暂不支持 GGX Metal：RGB eta/k 没有唯一的物理光谱".into(),
                     );
@@ -62,23 +92,32 @@ impl Config {
         Ok(())
     }
 
-    pub fn from_json(json: &str) -> Result<Self, Box<dyn Error>> {
-        let config: Self = serde_json::from_str(json)?;
-        config.validate()?;
-        Ok(config)
+    /// 读取 JSON 文本并校验，供文件加载或内存配置使用。
+    ///
+    /// 输入：json 字符串；输出：Config，语法、字段或配置数值无效时 Err。
+    pub fn from_json(json: &str) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Ok(serde_json::from_str(json)?)
     }
 
-    pub fn to_json(&self) -> Result<String, Box<dyn Error>> {
+    /// 把当前配置转为可阅读的 JSON 文本，供保存和复现实验。
+    ///
+    /// 输入：self；输出：带缩进的字符串，配置校验或序列化失败返回 Err。
+    pub fn to_json(&self) -> Result<String, Box<dyn Error + Send + Sync>> {
         // 先校验，避免 NaN/无穷值被 JSON 序列化为 null，或写入不可使用的配置。
         self.validate()?;
         Ok(serde_json::to_string_pretty(self)?)
     }
 
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, Box<dyn Error>> {
+    /// 从文件读取并校验配置。输入：配置文件路径；输出：Config，读取、JSON 解析或参数无效时 Err。
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, Box<dyn Error + Send + Sync>> {
         Self::from_json(&fs::read_to_string(path)?)
     }
 
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), Box<dyn Error>> {
+    /// 将当前配置保存为带缩进的 JSON，供以后重载。
+    ///
+    /// 输入：self 和目标文件路径；输出：成功为 Ok(())，校验、序列化或写入失败为 Err。
+    /// 先完成校验和序列化，再写文件，避免非法配置覆盖原文件。
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), Box<dyn Error + Send + Sync>> {
         // 先完成校验和序列化，再写文件；配置非法时不覆盖已有文件。
         let json = self.to_json()?;
         fs::write(path, json)?;
@@ -89,15 +128,13 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        config::{materialconfig::MaterialConfig, sceneconfig::ObjectConfig},
-        optics::iormode::IorMode,
-    };
+    use crate::config::material::MaterialConfig;
+    use crate::config::scene::ObjectConfig;
+    use crate::optics::dispersion::IorMode;
     use serde_json::json;
-    use std::{
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
 
     fn temporary_path() -> PathBuf {
         let time = SystemTime::now()
@@ -122,7 +159,6 @@ mod tests {
         expected.scene.camera.position = [0.0, -5.5, 2.7];
         expected.scene.camera.target = [0.0, 0.0, 0.68];
         expected.scene.camera.fov_y_degrees = 30.0;
-        expected.scene.debug_object_id = Some(0);
         expected.scene.objects = vec![
             ObjectConfig::Sphere {
                 caustics: false,
@@ -157,7 +193,7 @@ mod tests {
             },
         ];
         expected.scene.environment_samples = 8;
-        expected.scene.environment_mis_heuristic = sceneconfig::EnvironmentMisHeuristic::Power;
+        expected.scene.environment_mis_heuristic = scene::EnvironmentMisHeuristic::Power;
         expected.scene.max_diffuse_bounces = 4;
         expected.scene.environment.as_mut().unwrap().map_path =
             Some(PathBuf::from("assets/HDRI/herkulessaulen_4k.hdr"));
@@ -204,8 +240,8 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("spectral_packet_size");
-        let legacy = Config::from_json(&json.to_string()).unwrap();
-        assert_eq!(legacy.render.spectral_packet_size, 1);
+        let loaded = Config::from_json(&json.to_string()).unwrap();
+        assert_eq!(loaded.render.spectral_packet_size, 1);
         assert_eq!(RenderSetting::default().spectral_packet_size, 1);
         json["render"]["spectral_packet_size"] = json!(4);
         let packet = Config::from_json(&json.to_string()).unwrap();
@@ -215,7 +251,14 @@ mod tests {
         );
         for size in [json!(0), json!(2), json!(8), json!(-1), json!(1.5)] {
             json["render"]["spectral_packet_size"] = size;
-            assert!(Config::from_json(&json.to_string()).is_err());
+            assert!(
+                Config::from_json(&json.to_string())
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err()
+            );
         }
         let mut bad = packet;
         bad.render.camera_spp = 7;
@@ -244,8 +287,13 @@ mod tests {
                 .max_diffuse_bounces,
             0
         );
-        assert_eq!(crate::scene::Scene::new().max_diffuse_bounces, 0);
-        for count in [0, 1, 2, 3, 5, sceneconfig::MAX_DIFFUSE_BOUNCES] {
+        assert_eq!(
+            crate::config::RenderJob::new()
+                .camera_options
+                .max_diffuse_bounces,
+            0
+        );
+        for count in [0, 1, 2, 3, 5, scene::MAX_DIFFUSE_BOUNCES] {
             json["scene"]["max_diffuse_bounces"] = json!(count);
             let config = Config::from_json(&json.to_string()).unwrap();
             assert_eq!(
@@ -253,30 +301,49 @@ mod tests {
                 config
             );
             assert_eq!(
-                crate::scene::Scene::from_config(&config.scene)
-                    .unwrap()
-                    .max_diffuse_bounces,
+                config.build().unwrap().camera_options.max_diffuse_bounces,
                 count
             );
         }
         for invalid in [
-            json!(sceneconfig::MAX_DIFFUSE_BOUNCES + 1),
+            json!(scene::MAX_DIFFUSE_BOUNCES + 1),
             json!(usize::MAX),
             json!(-1),
             json!(0.5),
             json!(null),
         ] {
             json["scene"]["max_diffuse_bounces"] = invalid;
-            assert!(Config::from_json(&json.to_string()).is_err());
+            assert!(
+                Config::from_json(&json.to_string())
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err()
+            );
         }
-        let mut scene = crate::scene::Scene::new();
-        scene.max_diffuse_bounces = sceneconfig::MAX_DIFFUSE_BOUNCES + 1;
-        assert!(crate::render::render_camera_glass(&scene, 1, 1, 1, 42).is_err());
+        let mut scene = crate::config::RenderJob::new();
+        scene.camera_options.max_diffuse_bounces = scene::MAX_DIFFUSE_BOUNCES + 1;
+        assert!(
+            crate::integrator::camera::integrate_rgb(
+                &scene,
+                &crate::config::render::RenderSetting {
+                    width: 1,
+                    height: 1,
+                    camera_spp: 1,
+                    seed: 42,
+                    ..Default::default()
+                },
+                None
+            )
+            .map(|images| images.combined)
+            .is_err()
+        );
     }
 
     #[test]
     fn environment_mis_defaults_to_balance_and_roundtrips_power() {
-        use sceneconfig::EnvironmentMisHeuristic;
+        use scene::EnvironmentMisHeuristic;
         let mut json: serde_json::Value =
             serde_json::from_str(include_str!("../../configs/default.json")).unwrap();
         json["scene"]
@@ -302,19 +369,27 @@ mod tests {
                 config
             );
             assert_eq!(
-                crate::scene::Scene::from_config(&sceneconfig::SceneConfig {
+                crate::config::RenderJob::from_config(&scene::SceneConfig {
                     environment: None,
                     environment_mis_heuristic: expected,
                     ..Default::default()
                 })
                 .unwrap()
+                .camera_options
                 .environment_mis_heuristic,
                 expected
             );
         }
         for invalid in [json!("unknown"), json!(null), json!(2)] {
             json["scene"]["environment_mis_heuristic"] = invalid;
-            assert!(Config::from_json(&json.to_string()).is_err());
+            assert!(
+                Config::from_json(&json.to_string())
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err()
+            );
         }
     }
 
@@ -338,9 +413,23 @@ mod tests {
         for field in ["horizon_linear_rgb", "zenith_linear_rgb"] {
             let mut invalid = json.clone();
             invalid["scene"]["environment"][field] = json!([-0.1, 0.0, 0.0]);
-            assert!(Config::from_json(&invalid.to_string()).is_err());
+            assert!(
+                Config::from_json(&invalid.to_string())
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err()
+            );
             invalid["scene"]["environment"][field] = json!([0.0, 0.0]);
-            assert!(Config::from_json(&invalid.to_string()).is_err());
+            assert!(
+                Config::from_json(&invalid.to_string())
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err()
+            );
         }
         let path = temporary_path();
         fs::write(&path, "keep").unwrap();
@@ -407,17 +496,31 @@ mod tests {
                 assert!(config.to_json().is_err());
                 assert!(config.save(&path).is_err());
                 assert_eq!(fs::read_to_string(&path).unwrap(), "keep");
-                assert!(crate::scene::Scene::from_config(&config.scene).is_err());
+                assert!(config.build().is_err());
             }
             for value in [json!(null), json!("invalid"), json!(true)] {
                 let mut json = serde_json::to_value(Config::default()).unwrap();
                 json["scene"]["environment"][field] = value;
-                assert!(Config::from_json(&json.to_string()).is_err());
+                assert!(
+                    Config::from_json(&json.to_string())
+                        .and_then(|config| {
+                            config.validate()?;
+                            Ok(config)
+                        })
+                        .is_err()
+                );
             }
         }
         let mut json = serde_json::to_value(Config::default()).unwrap();
         json["scene"]["environment"]["intensity"] = json!(-0.01);
-        assert!(Config::from_json(&json.to_string()).is_err());
+        assert!(
+            Config::from_json(&json.to_string())
+                .and_then(|config| {
+                    config.validate()?;
+                    Ok(config)
+                })
+                .is_err()
+        );
         fs::remove_file(path).unwrap();
     }
 
@@ -444,12 +547,26 @@ mod tests {
         );
         for count in [json!(0), json!(-1), json!(1.5), json!(usize::MAX)] {
             json["scene"]["environment_samples"] = count;
-            assert!(Config::from_json(&json.to_string()).is_err());
+            assert!(
+                Config::from_json(&json.to_string())
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err()
+            );
         }
         // 独立天空亮度已删除，旧参数不能被静默忽略。
         let mut json = serde_json::to_value(&config).unwrap();
         json["scene"]["environment"]["sky_radiance_linear_rgb"] = json!([0.1, 0.1, 0.1]);
-        assert!(Config::from_json(&json.to_string()).is_err());
+        assert!(
+            Config::from_json(&json.to_string())
+                .and_then(|config| {
+                    config.validate()?;
+                    Ok(config)
+                })
+                .is_err()
+        );
     }
 
     #[test]
@@ -485,7 +602,14 @@ mod tests {
         ] {
             let mut invalid = serde_json::to_value(&config).unwrap();
             invalid["scene"]["ground_checkerboard"][field] = json!(value);
-            assert!(Config::from_json(&invalid.to_string()).is_err());
+            assert!(
+                Config::from_json(&invalid.to_string())
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err()
+            );
         }
         for field in 0..3 {
             for value in [f64::NAN, f64::INFINITY] {
@@ -594,7 +718,11 @@ mod tests {
     fn both_material_variants_survive_json_file_roundtrip() {
         let path = temporary_path();
         let mut config = Config::default();
-        if let ObjectConfig::Prism { material, .. } = &mut config.scene.objects[0] {
+        if let ObjectConfig::Prism {
+            material, caustics, ..
+        } = &mut config.scene.objects[0]
+        {
+            *caustics = false;
             *material = MaterialConfig::Lambertian {
                 albedo: [0.0, 0.5, 1.0],
             };
@@ -641,7 +769,14 @@ mod tests {
         ] {
             let mut invalid = original.clone();
             invalid["scene"]["objects"][0]["material"] = material;
-            assert!(Config::from_json(&invalid.to_string()).is_err());
+            assert!(
+                Config::from_json(&invalid.to_string())
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err()
+            );
         }
     }
 
@@ -680,7 +815,15 @@ mod tests {
         ] {
             let mut invalid = original.clone();
             invalid["render"][field] = value;
-            assert!(Config::from_json(&invalid.to_string()).is_err(), "{field}");
+            assert!(
+                Config::from_json(&invalid.to_string())
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err(),
+                "{field}"
+            );
         }
         let mut config = Config::default();
         config.render.width = usize::MAX;
@@ -697,22 +840,57 @@ mod tests {
         for direction in [json!([0.0, 0.0, 0.0]), json!([1e308, 0.0, 0.0])] {
             let mut invalid = original.clone();
             invalid["scene"]["light"]["direction"] = direction;
-            assert!(Config::from_json(&invalid.to_string()).is_err());
+            assert!(
+                Config::from_json(&invalid.to_string())
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err()
+            );
         }
         for pointer in ["/scene/light/aperture_max_m", "/scene/receiver/max_m"] {
             let mut invalid = original.clone();
             *invalid.pointer_mut(pointer).unwrap() = json!([-2.0, 2.0]);
-            assert!(Config::from_json(&invalid.to_string()).is_err());
+            assert!(
+                Config::from_json(&invalid.to_string())
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err()
+            );
         }
         let mut invalid = original.clone();
         invalid["scene"]["background_linear_rgb"] = json!([-0.1, 0.0, 0.0]);
-        assert!(Config::from_json(&invalid.to_string()).is_err());
+        assert!(
+            Config::from_json(&invalid.to_string())
+                .and_then(|config| {
+                    config.validate()?;
+                    Ok(config)
+                })
+                .is_err()
+        );
         invalid = original.clone();
         invalid["scene"]["light"]["total_flux"] = json!(-1.0);
-        assert!(Config::from_json(&invalid.to_string()).is_err());
+        assert!(
+            Config::from_json(&invalid.to_string())
+                .and_then(|config| {
+                    config.validate()?;
+                    Ok(config)
+                })
+                .is_err()
+        );
         invalid = original;
         invalid["scene"]["camera"]["fov_y_degrees"] = json!(180.0);
-        assert!(Config::from_json(&invalid.to_string()).is_err());
+        assert!(
+            Config::from_json(&invalid.to_string())
+                .and_then(|config| {
+                    config.validate()?;
+                    Ok(config)
+                })
+                .is_err()
+        );
     }
 
     #[test]
@@ -731,18 +909,44 @@ mod tests {
             let mut invalid = original.clone();
             invalid.pointer_mut(pointer).unwrap()["typo"] = json!(1);
             assert!(
-                Config::from_json(&invalid.to_string()).is_err(),
+                Config::from_json(&invalid.to_string())
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err(),
                 "{pointer}"
             );
         }
         let mut invalid = original.clone();
         invalid["scene"]["objects"][0]["type"] = json!("unknown_shape");
-        assert!(Config::from_json(&invalid.to_string()).is_err());
+        assert!(
+            Config::from_json(&invalid.to_string())
+                .and_then(|config| {
+                    config.validate()?;
+                    Ok(config)
+                })
+                .is_err()
+        );
         invalid = original;
         invalid["render"].as_object_mut().unwrap().remove("width");
-        assert!(Config::from_json(&invalid.to_string()).is_err());
+        assert!(
+            Config::from_json(&invalid.to_string())
+                .and_then(|config| {
+                    config.validate()?;
+                    Ok(config)
+                })
+                .is_err()
+        );
         for json in ["", "{", "null", "{}"] {
-            assert!(Config::from_json(json).is_err());
+            assert!(
+                Config::from_json(json)
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err()
+            );
         }
     }
 
@@ -764,7 +968,15 @@ mod tests {
         ] {
             let mut invalid = original.clone();
             invalid["scene"]["camera"][field] = value;
-            assert!(Config::from_json(&invalid.to_string()).is_err(), "{field}");
+            assert!(
+                Config::from_json(&invalid.to_string())
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err(),
+                "{field}"
+            );
         }
         for field in ["position", "target", "up", "fov_y_degrees"] {
             let mut invalid = original.clone();
@@ -772,11 +984,26 @@ mod tests {
                 .as_object_mut()
                 .unwrap()
                 .remove(field);
-            assert!(Config::from_json(&invalid.to_string()).is_err(), "{field}");
+            assert!(
+                Config::from_json(&invalid.to_string())
+                    .and_then(|config| {
+                        config.validate()?;
+                        Ok(config)
+                    })
+                    .is_err(),
+                "{field}"
+            );
         }
         let mut invalid = original;
         invalid["scene"].as_object_mut().unwrap().remove("camera");
-        assert!(Config::from_json(&invalid.to_string()).is_err());
+        assert!(
+            Config::from_json(&invalid.to_string())
+                .and_then(|config| {
+                    config.validate()?;
+                    Ok(config)
+                })
+                .is_err()
+        );
     }
 
     #[test]

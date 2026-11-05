@@ -1,20 +1,17 @@
-use nalgebra::{Vector2, Vector3};
+use nalgebra::Vector2;
+use nalgebra::Vector3;
 use serde_json::json;
-use spectral_caustics::{
-    camera::Camera,
-    config::{
-        Config,
-        cameraconfig::CameraConfig,
-        materialconfig::MaterialConfig,
-        sceneconfig::{EnvironmentMisHeuristic, ObjectConfig},
-    },
-    geometry::{
-        beveled_prism::{BeveledPrism, ROUND_SEGMENTS},
-        object::Hittable,
-    },
-    render::{Render, framebuffer::Framebuffer},
-    scene::Scene,
-};
+use spectral_caustics::camera::Camera;
+use spectral_caustics::config::Config;
+use spectral_caustics::config::camera::CameraConfig;
+use spectral_caustics::config::material::MaterialConfig;
+use spectral_caustics::config::scene::EnvironmentMisHeuristic;
+use spectral_caustics::config::scene::ObjectConfig;
+use spectral_caustics::film::Framebuffer;
+use spectral_caustics::geometry::beveled_prism::BeveledPrism;
+use spectral_caustics::geometry::beveled_prism::ROUND_SEGMENTS;
+use spectral_caustics::geometry::object::Hittable;
+use spectral_caustics::renderer::Renderer;
 
 fn config() -> Config {
     let mut config = Config::from_json(include_str!("../configs/beveled_prism.json")).unwrap();
@@ -25,7 +22,10 @@ fn config() -> Config {
     config.render.thread_count = Some(1);
     config.scene.environment_samples = 3;
     config.scene.objects.swap(0, 1);
-    config.scene.debug_object_id = Some(1);
+    #[cfg(feature = "diagnostics")]
+    {
+        config.render.diagnostics.target = Some(1);
+    }
     config
 }
 
@@ -51,6 +51,7 @@ fn materials() -> [MaterialConfig; 4] {
     ]
 }
 
+#[cfg(feature = "diagnostics")]
 #[test]
 fn json_roundtrips_builds_materials_and_keeps_debug_target_separate_from_spectral_prism() {
     for bevel in [0.02, 0.035, 0.05] {
@@ -67,17 +68,16 @@ fn json_roundtrips_builds_materials_and_keeps_debug_target_separate_from_spectra
             }
             let loaded = Config::from_json(&config.to_json().unwrap()).unwrap();
             assert_eq!(loaded, config);
-            let scene = Scene::from_config(&loaded.scene).unwrap();
+            let scene = loaded.build().unwrap();
             assert_eq!(
-                (scene.prism_id, scene.ground_id, scene.debug_object_id),
+                (
+                    scene.photon.caustics_object_id,
+                    scene.photon.ground_id,
+                    scene.diagnostics.target
+                ),
                 (None, Some(0), Some(1))
             );
-            assert!(
-                scene.objects[1]
-                    .material_id()
-                    .and_then(|id| scene.material(id))
-                    .is_some()
-            );
+            assert_eq!(scene.scene.objects[1].material_id(), 1);
         }
     }
     let mut config = config();
@@ -85,9 +85,9 @@ fn json_roundtrips_builds_materials_and_keeps_debug_target_separate_from_spectra
         .scene
         .objects
         .push(Config::default().scene.objects.remove(0));
-    let scene = Scene::from_config(&config.scene).unwrap();
-    assert_eq!(scene.prism_id, Some(2));
-    assert_eq!(scene.debug_object_id, Some(1));
+    let scene = config.build().unwrap();
+    assert_eq!(scene.photon.caustics_object_id, Some(2));
+    assert_eq!(scene.diagnostics.target, Some(1));
     let mut json = serde_json::to_value(config).unwrap();
     json["scene"]["objects"][1]
         .as_object_mut()
@@ -125,7 +125,15 @@ fn invalid_json_geometry_and_material_are_rejected_before_rendering() {
     ] {
         let mut bad = base.clone();
         bad["scene"]["objects"][1][field] = value;
-        assert!(Config::from_json(&bad.to_string()).is_err(), "{field}");
+        assert!(
+            Config::from_json(&bad.to_string())
+                .and_then(|config| {
+                    config.validate()?;
+                    Ok(config)
+                })
+                .is_err(),
+            "{field}"
+        );
     }
     for field in ["bevel_size_m", "cross_section_m", "y_min_m", "y_max_m"] {
         let mut bad = base.clone();
@@ -133,14 +141,21 @@ fn invalid_json_geometry_and_material_are_rejected_before_rendering() {
             .as_object_mut()
             .unwrap()
             .remove(field);
-        assert!(Config::from_json(&bad.to_string()).is_err());
+        assert!(
+            Config::from_json(&bad.to_string())
+                .and_then(|config| {
+                    config.validate()?;
+                    Ok(config)
+                })
+                .is_err()
+        );
     }
     let mut bad = config();
     if let ObjectConfig::BeveledPrism { bevel_size_m, .. } = &mut bad.scene.objects[1] {
         *bevel_size_m = f64::NAN;
     }
     assert!(bad.to_json().is_err());
-    assert!(Scene::from_config(&bad.scene).is_err());
+    assert!(bad.build().is_err());
 }
 
 #[test]
@@ -179,8 +194,8 @@ fn camera_center_ray_hits_all_eight_facets_of_each_round_corner_at_both_test_siz
 }
 
 fn identical(a: &Framebuffer, b: &Framebuffer) {
-    assert_eq!((a.width, a.height), (b.width, b.height));
-    assert!(a.pixels.iter().zip(&b.pixels).all(|(a, b)| {
+    assert_eq!((a.width(), a.height()), (b.width(), b.height()));
+    assert!(a.pixels().iter().zip(b.pixels()).all(|(a, b)| {
         a.iter()
             .zip(b.iter())
             .all(|(a, b)| a.to_bits() == b.to_bits())
@@ -194,15 +209,18 @@ fn existing_materials_and_debug_reuse_rgb_paths_across_mis_depths_and_threads() 
         if let ObjectConfig::BeveledPrism { material: slot, .. } = &mut config.scene.objects[1] {
             *slot = material.clone();
         }
-        let mut scene = Scene::from_config(&config.scene).unwrap();
-        let lighting = Render::new(config.render.clone())
-            .unwrap()
-            .render_lighting(&scene)
-            .unwrap();
+        let mut scene = config.build().unwrap();
+        let lighting = spectral_caustics::integrator::photon::integrate_xyz(
+            &scene,
+            scene.photon.caustics_object_id,
+            scene.photon.ground_id.expect("receiver"),
+            (Renderer::new(config.render.clone()).unwrap()).settings(),
+        )
+        .unwrap();
         assert!(
             lighting
                 .caustics
-                .pixels
+                .pixels()
                 .iter()
                 .all(|p| *p == Vector3::zeros())
         );
@@ -210,34 +228,42 @@ fn existing_materials_and_debug_reuse_rgb_paths_across_mis_depths_and_threads() 
             EnvironmentMisHeuristic::Balance,
             EnvironmentMisHeuristic::Power,
         ] {
-            scene.environment_mis_heuristic = heuristic;
+            scene.camera_options.environment_mis_heuristic = heuristic;
             for depth in [0, 1, 4] {
-                scene.max_diffuse_bounces = depth;
-                config.render.debug_path = false;
-                let ordinary = Render::new(config.render.clone())
+                scene.camera_options.max_diffuse_bounces = depth;
+                #[cfg(feature = "diagnostics")]
+                {
+                    config.render.diagnostics.path = false;
+                }
+                let ordinary = Renderer::new(config.render.clone())
                     .unwrap()
-                    .render_camera_glass_components(&scene, &lighting, 8, 42)
+                    .render(&scene)
                     .unwrap();
+                #[cfg(feature = "diagnostics")]
                 let mut reference = None;
                 for threads in [1, 2, 4, 1] {
                     config.render.thread_count = Some(threads);
-                    config.render.debug_path = true;
-                    let images = Render::new(config.render.clone())
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        config.render.diagnostics.path = true;
+                    }
+                    let images = Renderer::new(config.render.clone())
                         .unwrap()
-                        .render_camera_glass_components(&scene, &lighting, 8, 42)
+                        .render(&scene)
                         .unwrap();
                     identical(&images.direct, &ordinary.direct);
                     identical(&images.caustics, &ordinary.caustics);
                     identical(&images.combined, &ordinary.combined);
                     for ((direct, caustics), combined) in images
                         .direct
-                        .pixels
+                        .pixels()
                         .iter()
-                        .zip(&images.caustics.pixels)
-                        .zip(&images.combined.pixels)
+                        .zip(images.caustics.pixels())
+                        .zip(images.combined.pixels())
                     {
                         assert!((direct + caustics - combined).norm() < 1e-12);
                     }
+                    #[cfg(feature = "diagnostics")]
                     if let Some(debug) = &images.path_debug {
                         assert_eq!(debug.target_object_id, Some(1));
                         assert!(debug.pixels.iter().any(|p| p.target_samples > 0));
@@ -247,11 +273,10 @@ fn existing_materials_and_debug_reuse_rgb_paths_across_mis_depths_and_threads() 
                                 .iter()
                                 .all(|p| p.terminations.values().sum::<u64>() == p.target_samples)
                         );
-                        let events = |f: fn(
-                            &spectral_caustics::render::integrator::debug::PathDebugPixel,
-                        ) -> u64| {
-                            debug.pixels.iter().map(f).sum::<u64>()
-                        };
+                        let events =
+                            |f: fn(&spectral_caustics::diagnostics::PathDebugPixel) -> u64| {
+                                debug.pixels.iter().map(f).sum::<u64>()
+                            };
                         match material {
                             MaterialConfig::Dielectric { .. } => {
                                 assert!(events(|p| p.events.specular_transmission) > 0)
@@ -265,7 +290,10 @@ fn existing_materials_and_debug_reuse_rgb_paths_across_mis_depths_and_threads() 
                             assert_eq!(debug, expected);
                         }
                     }
-                    reference = images.path_debug;
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        reference = images.path_debug;
+                    }
                 }
             }
         }

@@ -1,109 +1,34 @@
-//! JSON 场景：共享 BSDF 路径输出相机合成图及 Direct/Caustics 分量。
-use spectral_caustics::{config::Config, render::Render, scene::Scene};
-use std::{
-    error::Error,
-    path::{Path, PathBuf},
-    time::Instant,
-};
-
-// 主图占用辅助图名称时，避免覆盖用户指定的输出。
-fn auxiliary_path(primary: &Path, name: &str) -> PathBuf {
-    let directory = primary.parent().unwrap_or(Path::new("."));
-    let path = directory.join(name);
-    if path == primary {
-        directory.join(format!("aux_{name}"))
-    } else {
-        path
-    }
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
+//! Command line → validated job → renderer pipeline → display output.
+use spectral_caustics::{config::Config, output, renderer::Renderer};
+use std::{error::Error, path::PathBuf, time::Instant};
+fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let start = Instant::now();
-    let mut arguments = std::env::args_os().skip(1);
-    let path = PathBuf::from(
-        arguments
-            .next()
-            .unwrap_or_else(|| "configs/default.json".into()),
-    );
-    if arguments.next().is_some() {
-        return Err("用法：spectral-caustics [config.json 路径]".into());
+    let mut args = std::env::args_os().skip(1);
+    let path = PathBuf::from(args.next().unwrap_or_else(|| "configs/default.json".into()));
+    if args.next().is_some() {
+        return Err("usage: spectral-caustics [config.json]".into());
     }
     let config = Config::load(&path)
         .map_err(|error| format!("读取配置 {} 失败：{error}", path.display()))?;
-    let scene = Scene::from_config(&config.scene)?;
-    let renderer = Render::new(config.render.clone())?;
+    let job = config.build()?;
+    let renderer = Renderer::new(config.render.clone())?;
     println!(
-        "配置：{}，{}×{}，{} 个渲染线程",
+        "{}: {}×{}, {} threads",
         path.display(),
         config.render.width,
         config.render.height,
         renderer.thread_count()
     );
-
-    if config.render.camera_mode == spectral_caustics::config::rendersetting::CameraMode::Spectral {
-        if config.render.spectral_debug_disable_ground_sun {
-            println!("光谱调试：地面解析太阳 Direct 已关闭，环境照明与光源端 Caustics 保留");
-        }
-        if scene.caustics_object_id.is_some() {
-            let images = renderer.render_spectral_camera_components(&scene)?;
-            renderer.save(&images.combined, &config.render.output_path)?;
-            for (image, name) in [
-                (&images.direct, "camera_direct.png"),
-                (&images.caustics, "camera_caustics.png"),
-                (&images.combined, "camera_combined.png"),
-            ] {
-                let path = config
-                    .render
-                    .output_path
-                    .parent()
-                    .unwrap_or(Path::new("."))
-                    .join(name);
-                if name != "camera_combined.png" || path != config.render.output_path {
-                    renderer.save(image, auxiliary_path(&config.render.output_path, name))?;
-                }
-            }
-        } else {
-            let image = renderer.render_camera(&scene)?;
-            renderer.save(&image, &config.render.output_path)?;
-        }
-        println!(
-            "Hero wavelength 光谱相机：{}，总光谱路径/像素={}，Packet={}，空间样本/像素={}，IOR={:?}",
-            config.render.output_path.display(),
-            config.render.camera_spp,
-            config.render.spectral_packet_size,
-            config.render.camera_spp / config.render.spectral_packet_size,
-            config.render.mode
-        );
-        println!("总耗时：{:.3} 秒", start.elapsed().as_secs_f64());
-        return Ok(());
-    }
-
-    let lighting = renderer.render_lighting(&scene)?;
-    let images = renderer.render_camera_glass_components(
-        &scene,
-        &lighting,
-        config.render.camera_spp,
-        config.render.seed,
-    )?;
-    renderer.save(&images.combined, &config.render.output_path)?;
-    println!(
-        "相机合成图：{}，SPP={}",
-        config.render.output_path.display(),
-        config.render.camera_spp
-    );
-    for (image, name) in [
-        (&images.direct, "camera_direct.png"),
-        (&images.caustics, "camera_caustics.png"),
-    ] {
-        let path = auxiliary_path(&config.render.output_path, name);
-        renderer.save(image, &path)?;
-        println!("相机：{}，SPP={}", path.display(), config.render.camera_spp);
-    }
+    let images = renderer.render(&job)?;
+    output::save_components(&images, &config.render.output_path, config.render.exposure)?;
+    #[cfg(feature = "diagnostics")]
     if let Some(debug) = &images.path_debug {
-        for path in debug.save(&config.render.output_path)? {
-            println!("路径调试：{}", path.display());
-        }
+        debug.save(&config.render.output_path)?;
     }
-    println!("总耗时：{:.3} 秒", start.elapsed().as_secs_f64());
+    println!(
+        "{} ({:.3}s)",
+        config.render.output_path.display(),
+        start.elapsed().as_secs_f64()
+    );
     Ok(())
 }

@@ -14,7 +14,6 @@
     "thread_count": null,
     "max_spectral_blocks": 16,
     "output_path": "output/vertical_prism/area_light/camera_combined.png",
-    "debug_path": false,
     "camera_mode": "spectral"
   },
   "scene": {
@@ -114,7 +113,6 @@
         4.8
       ]
     },
-    "debug_object_id": 0,
     "light_samples": 8
   }
 }

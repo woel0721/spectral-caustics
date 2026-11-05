@@ -1,16 +1,18 @@
 //! 固定 450/550/650 nm、共享主射线和 CRN，测量球内灯带的图像坐标。
 use nalgebra::Vector3;
 use serde::Serialize;
-use spectral_caustics::{
-    config::Config,
-    optics::emission::d65_spectrum,
-    render::{
-        Render, framebuffer::Framebuffer, integrator::spectral::render_fixed_wavelength_camera,
-        utils::linear_srgb_to_xyz,
-    },
-    scene::Scene,
-};
-use std::{error::Error, fs, io::Write, path::PathBuf, time::Instant};
+use spectral_caustics::color::linear_srgb_to_xyz;
+use spectral_caustics::config::Config;
+#[cfg(feature = "diagnostics")]
+use spectral_caustics::diagnostics::render_fixed_wavelength_camera;
+use spectral_caustics::film::Framebuffer;
+use spectral_caustics::renderer::Renderer;
+use spectral_caustics::spectrum::emission::d65_spectrum;
+use std::error::Error;
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::Instant;
 
 const WAVELENGTHS_NM: [f64; 3] = [450.0, 550.0, 650.0];
 
@@ -67,7 +69,7 @@ fn locate_bar(row: &[f64], start: usize, end: usize, y: usize) -> Option<Project
     })
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() > 4 {
         return Err(
@@ -93,14 +95,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|| "output/fixed_wavelength_projection".into());
     fs::create_dir_all(&directory)?;
     config.save(directory.join("config.json"))?;
-    let scene = Scene::from_config(&config.scene)?;
+    let scene = config.build()?;
     let object_id = scene
+        .photon
         .caustics_object_id
         .ok_or("请显式选择一个玻璃球 caustics 目标")?;
-    let material = scene.objects[object_id]
-        .material_id()
-        .and_then(|id| scene.material(id))
-        .ok_or("玻璃材质缺失")?;
+    let material = scene
+        .scene
+        .material(scene.scene.objects[object_id].material_id());
     let indices: Vec<_> = WAVELENGTHS_NM
         .iter()
         .map(|&nm| {
@@ -144,26 +146,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let mut save_settings = config.render.clone();
     save_settings.thread_count = None;
-    let renderer = Render::new(save_settings)?;
+    let renderer = Renderer::new(save_settings)?;
     let width = config.render.width;
     let height = config.render.height;
     let mut normalized = Vec::new();
     for image in &images {
         let source = d65_spectrum(image.wavelength_nm).ok_or("D65 查询失败")?;
         let values: Vec<_> = image.radiance.iter().map(|v| v / source).collect();
-        let mut gray = Framebuffer::new(width, height);
-        for (dst, &value) in gray.pixels.iter_mut().zip(&values) {
+        let mut gray = Framebuffer::new(width, height)?;
+        for (dst, &value) in gray.pixels_mut().iter_mut().zip(&values) {
             *dst = linear_srgb_to_xyz(Vector3::repeat(value)).ok_or("灰度转换失败")?;
         }
-        renderer.save(
+        spectral_caustics::output::save_png_with_exposure(
             &gray,
             directory.join(format!("camera_{:.0}nm.png", image.wavelength_nm)),
+            (renderer).settings().exposure,
         )?;
         normalized.push(values);
     }
     // 伪彩叠加 R=650/G=550/B=450，专用于对比位置，不是全光谱积分结果。
-    let mut overlay = Framebuffer::new(width, height);
-    for (i, pixel) in overlay.pixels.iter_mut().enumerate() {
+    let mut overlay = Framebuffer::new(width, height)?;
+    for (i, pixel) in overlay.pixels_mut().iter_mut().enumerate() {
         *pixel = linear_srgb_to_xyz(Vector3::new(
             normalized[2][i],
             normalized[1][i],
@@ -171,7 +174,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
         .ok_or("叠加转换失败")?;
     }
-    renderer.save(&overlay, directory.join("overlay_650_550_450.png"))?;
+    spectral_caustics::output::save_png_with_exposure(
+        &overlay,
+        directory.join("overlay_650_550_450.png"),
+        (renderer).settings().exposure,
+    )?;
 
     // 用真实主射线命中范围排除直接背景灯带；再裁掉球体两侧 20% 的反射边缘。
     let mask: Vec<_> = (0..width * height)
@@ -181,8 +188,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ray_for_pixel(i % width, i / width, width, height)
                 .unwrap();
             scene
+                .scene
                 .intersect(&ray)
-                .is_some_and(|hit| hit.object_id == Some(object_id))
+                .is_some_and(|hit| hit.object_id == (object_id))
         })
         .collect();
     let top = mask

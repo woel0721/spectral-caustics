@@ -1,10 +1,17 @@
-//! 有限圆盘与平行太阳的统一入口；光谱密度由照明/光子积分层单独施加。
+mod parallel;
+pub use parallel::ParallelLight;
+// Finite disk and parallel sunlight.
 
 mod disk;
-pub use disk::{DiskAreaLight, DiskDirectSample, DiskEmissionSample, DiskPositionSample};
+pub use disk::DiskAreaLight;
+pub use disk::DiskDirectSample;
+pub use disk::DiskEmissionSample;
+pub use disk::DiskPositionSample;
 
-use crate::{geometry::ray::Ray, scene::ParallelLight};
-use nalgebra::{Vector2, Vector3};
+use crate::geometry::ray::Ray;
+
+use nalgebra::Vector2;
+use nalgebra::Vector3;
 
 #[derive(Debug, Clone)]
 pub enum Light {
@@ -13,82 +20,82 @@ pub enum Light {
 }
 
 impl Light {
-    /// 圆盘与 Hero 直射共用连续 D65；波长节点只负责求积，不能改变发射光谱。
-    /// 旧平行光保留原离散节点 Y=1 归一化，以保持既有流程和测试。
+    /// 计算发射 D65 光谱的归一化系数，使白光亮度 Y=1。
+    ///
+    /// 输入：(波长 nm,积分宽度 nm) 节点；输出：Some(k)，离散归一化失败时 None。
+    /// 平行光 k=1/Σ[D65·ȳ·Δλ]；圆盘使用连续 380–780 nm 的固定 k，避免节点步长改变光谱密度。
     pub(crate) fn spectral_normalization(&self, samples: &[(f64, f64)]) -> Option<f64> {
         match self {
-            Self::Parallel(_) => crate::optics::spectrum::d65_normalization(samples),
-            Self::DiskArea(_) => Some(crate::optics::emission::d65_normalization_continuous()),
+            Self::Parallel(_) => crate::spectrum::d65_normalization(samples),
+            Self::DiskArea(_) => Some(crate::spectrum::emission::d65_normalization_continuous()),
         }
     }
+    /// Integrate the normalized source spectrum into XYZ, independently of caustics geometry.
+    pub(crate) fn white_xyz(&self, samples: &[(f64, f64)]) -> Option<Vector3<f64>> {
+        let k = self.spectral_normalization(samples)?;
+        let mut xyz = Vector3::zeros();
+        for &(nm, width) in samples {
+            xyz += crate::spectrum::cie_xyz(nm)? * (k * crate::spectrum::d65_spd(nm)? * width);
+        }
+        xyz.iter().all(|v| v.is_finite()).then_some(xyz)
+    }
+    /// 尝试读取平行光参数；当前为 Parallel 时返回只读引用，否则 None。
     pub fn as_parallel(&self) -> Option<&ParallelLight> {
         match self {
             Self::Parallel(light) => Some(light),
             Self::DiskArea(_) => None,
         }
     }
+    /// 尝试修改平行光参数；当前为 Parallel 时返回可变引用，否则 None，修改后由使用入口重新校验。
     pub fn as_parallel_mut(&mut self) -> Option<&mut ParallelLight> {
         match self {
             Self::Parallel(light) => Some(light),
             Self::DiskArea(_) => None,
         }
     }
+    /// 尝试读取圆盘光源参数；当前为 DiskArea 时返回只读引用，否则 None。
     pub fn as_disk(&self) -> Option<&DiskAreaLight> {
         match self {
             Self::DiskArea(light) => Some(light),
             Self::Parallel(_) => None,
         }
     }
+    /// 返回当前光源的相对总通量 Φ；采用项目的 D65/Y 标尺，未标定为瓦特。
     pub fn total_flux(&self) -> f64 {
         match self {
             Self::Parallel(light) => light.total_flux,
             Self::DiskArea(light) => light.total_flux,
         }
     }
+    /// 查询解析太阳参数，返回 (指向太阳的单位方向,光束法向辐照度)；圆盘或无效平行光返回 None。
     pub fn sunlight(&self) -> Option<(Vector3<f64>, f64)> {
         self.as_parallel()?.sunlight()
     }
+    /// 检查当前光源能否用于光子发射。
+    ///
+    /// 输入：self 中的参数；输出：有效时 Ok(())，方向、窗口、圆盘几何或通量无效时 Err。
     pub fn validate_emission(&self) -> Result<(), String> {
         match self {
             Self::Parallel(light) => light
                 .sunlight()
                 .map(|_| ())
                 .ok_or("平行光子发射要求有效的向下方向、窗口与通量".into()),
-            Self::DiskArea(light) => light.validate(),
+            Self::DiskArea(_) => Ok(()),
         }
     }
-    /// 平行光的解析项；圆盘只有有限面积 NEE，不产生解析太阳项。
+    /// 为直接光计算提供可选的解析太阳项。
+    ///
+    /// 输入：当前光源；输出：平行光的 Some((wi,E_perp))，圆盘为 None；发射参数非法返回 Err。
     pub fn analytic_sun(&self) -> Result<Option<(Vector3<f64>, f64)>, String> {
         self.validate_emission()?;
         Ok(self.sunlight())
     }
-    /// RGB 单图沿用原平行光 Φ/A 约定（含向上/水平测试）；圆盘走独立 NEE。
-    pub(crate) fn camera_parameters(&self) -> Result<(Vector3<f64>, f64), String> {
-        match self {
-            Self::Parallel(light) => {
-                let length = light.direction.norm();
-                let span = light.aperture_max_m - light.aperture_min_m;
-                let area = span.x * span.y;
-                let strength = light.total_flux / area;
-                if !length.is_finite()
-                    || length == 0.0
-                    || span.iter().any(|v| !v.is_finite() || *v <= 0.0)
-                    || !area.is_finite()
-                    || area <= 0.0
-                    || !strength.is_finite()
-                    || light.total_flux < 0.0
-                {
-                    return Err("平行光方向、孔径或通量无效".into());
-                }
-                Ok((-light.direction / length, strength))
-            }
-            Self::DiskArea(light) => {
-                light.validate()?;
-                Ok((Vector3::z(), 0.0))
-            }
-        }
-    }
-    /// 匹配光源的发射采样；两类均携带 Φ/N，无波长积分或额外 PDF 权重。
+    /// 根据采样坐标生成一条从光源出发的射线，供批量光子追踪。
+    ///
+    /// 输入：位置样本 position_u 和方向样本 direction_u，各轴应在 [0,1)。
+    ///
+    /// 输出：Ray，构造失败时 None；平行光只用位置，圆盘还按余弦半球采方向。
+    /// 本函数不返回通量；调用方按匹配的发射分布赋每条 Φ/N，再施加光谱密度。
     pub fn emission_ray(&self, position_u: [f64; 2], direction_u: [f64; 2]) -> Option<Ray> {
         match self {
             Self::Parallel(light) => {
@@ -100,17 +107,20 @@ impl Light {
             Self::DiskArea(light) => Some(light.sample_emission(position_u, direction_u)?.ray),
         }
     }
+    /// 返回每条发射射线需要的随机维数：平行光为位置 2 维，圆盘为位置加方向共 4 维，用于定位采样块。
     pub(crate) fn emission_dimensions(&self) -> usize {
         if self.as_disk().is_some() { 4 } else { 2 }
     }
 }
 
 impl From<ParallelLight> for Light {
+    /// 把输入的 ParallelLight 包装成 Light::Parallel，供统一光源接口使用，不重新校验参数。
     fn from(value: ParallelLight) -> Self {
         Self::Parallel(value)
     }
 }
 impl From<DiskAreaLight> for Light {
+    /// 把输入的 DiskAreaLight 包装成 Light::DiskArea，供统一光源接口使用，不重新校验参数。
     fn from(value: DiskAreaLight) -> Self {
         Self::DiskArea(value)
     }

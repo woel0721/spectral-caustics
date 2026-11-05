@@ -1,12 +1,13 @@
 //! 三角截面的三个角各用 8 段相切圆弧替代，再沿 y 拉伸；只圆化三条长棱。
 
-use super::{
-    hit::Hit,
-    object::Hittable,
-    ray::{INTERSECTION_EPSILON, PARALLEL_EPSILON, Ray},
-    triangle::Triangle,
-};
-use nalgebra::{Vector2, Vector3};
+use super::hit::GeometryHit as Hit;
+use super::object::Hittable;
+use super::ray::INTERSECTION_EPSILON;
+use super::ray::PARALLEL_EPSILON;
+use super::ray::Ray;
+use super::triangle::Triangle;
+use nalgebra::Vector2;
+use nalgebra::Vector3;
 
 /// 每个圆角的等角度圆弧段数，端点也作为共享 mesh 顶点保存。
 pub const ROUND_SEGMENTS: usize = 8;
@@ -16,7 +17,10 @@ const VERTEX_COUNT: usize = 2 * RING_VERTICES;
 const TRIANGLE_COUNT: usize = 4 * RING_VERTICES - 4;
 const FACE_INDICES: [[usize; 3]; TRIANGLE_COUNT] = face_indices();
 
-// 两个截面共用索引拓扑，不引入端面中心点或 T 接点。
+/// 生成圆角三棱柱的三角面索引，供构建时校验和网格导出共用。
+///
+/// 输入：无，使用固定截面顶点数；输出：连接两圈顶点的侧面与两个端面索引。
+/// 每圈 27 点，侧面 54 片、端面各 25 片，共 104 个三角形；不增加端面中心点。
 const fn face_indices() -> [[usize; 3]; TRIANGLE_COUNT] {
     let mut faces = [[0; 3]; TRIANGLE_COUNT];
     let mut i = 0;
@@ -49,12 +53,13 @@ struct Plane {
 }
 
 impl BeveledPrism {
-    /// cross_section 的 Vector2 分量为 (x,z)，所有长度以米计。
-    /// 顺/逆时针均可；内部统一为逆时针，并保留第一个输入顶点。
-    /// bevel_size 是沿两条相邻原始边的切点距离，不是圆角半径。
-    /// 每角使用与两边相切的圆弧，等角度离散为 ROUND_SEGMENTS 个平面段。
-    /// 要求有限、非退化三角形，y_min < y_max，且 0 < 2*bevel_size < 每条边长。
-    /// 支持 0.02..0.05 m；其他满足上述几何条件的正值也可使用。非法输入返回 None。
+    /// 把三角截面的三个角改为分段圆弧，再沿 Y 拉伸成带圆角的三棱柱。
+    ///
+    /// 输入：三个 (x,z) 截面顶点、y_min/y_max 及沿原边截取的长度 bevel_size，单位均为米。
+    ///
+    /// 输出：缓存顶点和裁剪平面的 BeveledPrism；退化、非有限或圆角过大时返回 None。
+    /// 要求 y_min<y_max 且 0<2·bevel_size<每条边长；bevel_size 不是圆弧半径。
+    /// 每个圆角离散成 8 段，法线按平面段计算。
     pub fn new(
         cross_section: [Vector2<f64>; 3],
         y_min: f64,
@@ -92,17 +97,25 @@ impl BeveledPrism {
         Some(Self { vertices, planes })
     }
 
-    /// 只读 indexed mesh：前 27 个顶点在 y_min，后 27 个在 y_max。
+    /// 返回圆角网格的只读世界坐标顶点（米）：前 27 点位于 y_min，后 27 点位于 y_max。
     pub fn vertices(&self) -> &[Vector3<f64>; VERTEX_COUNT] {
         &self.vertices
     }
 
-    /// 27 个侧矩形各两片，前后端面各 25 片，共 104 片；对应 vertices()。
+    /// 返回与 vertices() 配套的只读三角面索引：54 个侧面三角形加 50 个端面三角形，共 104 片。
     pub fn triangle_indices(&self) -> &[[usize; 3]; TRIANGLE_COUNT] {
         &FACE_INDICES
     }
 }
 
+/// 计算圆角截面并复制到两个端面，供 BeveledPrism::new 构建几何。
+///
+/// 输入：XZ 三角截面、Y 范围和沿边截取长度 b（米）。
+///
+/// 输出：两圈共 54 个世界坐标顶点；退化、圆角相交或数值无效返回 None。
+///
+/// 公式：内角为 θ，两条指向邻点的单位向量为 u/v；圆心 C=P+b(u+v)/(1+cosθ)，半径 r=b·tan(θ/2)。
+/// 从一个切点沿圆弧旋转 π-θ，再以等角度生成 8 段。
 fn mesh_vertices(
     mut section: [Vector2<f64>; 3],
     y_min: f64,
@@ -189,6 +202,12 @@ fn mesh_vertices(
 }
 
 impl Hittable for BeveledPrism {
+    /// 用凸体的各个外向平面裁剪光线，避免三角面共享边的舍入缝隙。
+    ///
+    /// 输入：Ray；输出：最近正向 Hit，从内部发射时取出射点；无交集或数值无效返回 None。
+    ///
+    /// 公式：每面要求 (o+t·d-p)·n≤0，其边界距离 t=-(o-p)·n/(d·n)。
+    /// 所有面的允许区间取交集 `[enter,exit]`，法线来自决定最终端点的平面。
     fn intersect(&self, ray: &Ray) -> Option<Hit> {
         if ray
             .origin
@@ -250,7 +269,6 @@ impl Hittable for BeveledPrism {
             coords,
             normal,
             distance,
-            ..Hit::default()
         })
     }
 }

@@ -1,27 +1,30 @@
-use nalgebra::{Vector2, Vector3};
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use nalgebra::Vector2;
+use nalgebra::Vector3;
+use rand::Rng;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use rayon::prelude::*;
-use spectral_caustics::{
-    config::{
-        cameraconfig::CameraConfig,
-        materialconfig::MaterialConfig,
-        rendersetting::RenderSetting,
-        sceneconfig::{EnvironmentConfig, EnvironmentMisHeuristic, ObjectConfig, SceneConfig},
-    },
-    environment::{Environment, EnvironmentMap},
-    material::ScatterType,
-    render::{
-        Render, SpectralLighting, framebuffer::Framebuffer, render_camera_glass,
-        render_camera_glass_components, utils::linear_srgb_to_xyz,
-    },
-    scene::Scene,
-};
-use std::{
-    fs,
-    path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use spectral_caustics::caustics::SpectralLighting;
+use spectral_caustics::color::linear_srgb_to_xyz;
+use spectral_caustics::config::RenderJob;
+use spectral_caustics::config::camera::CameraConfig;
+use spectral_caustics::config::material::MaterialConfig;
+use spectral_caustics::config::render::RenderSetting;
+use spectral_caustics::config::scene::EnvironmentConfig;
+use spectral_caustics::config::scene::EnvironmentMisHeuristic;
+use spectral_caustics::config::scene::ObjectConfig;
+use spectral_caustics::config::scene::SceneConfig;
+use spectral_caustics::environment::Environment;
+use spectral_caustics::environment::EnvironmentMap;
+use spectral_caustics::film::Framebuffer;
+use spectral_caustics::material::ScatterType;
+use spectral_caustics::renderer::Renderer;
+use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 struct TemporaryHdr(PathBuf);
 
@@ -249,7 +252,7 @@ fn rotation_handles_extreme_direction_scales_and_rejects_invalid_directions() {
 }
 
 #[test]
-fn intensity_overflow_and_invalid_runtime_intensity_return_none() {
+fn intensity_overflow_is_handled_and_invalid_intensity_edits_are_rejected() {
     let hdr = TemporaryHdr::new(false);
     for map_path in [None, Some(hdr.0.clone())] {
         let mut environment = Environment::try_from(&EnvironmentConfig {
@@ -261,8 +264,7 @@ fn intensity_overflow_and_invalid_runtime_intensity_return_none() {
         .unwrap();
         assert!(environment.radiance(Vector3::x()).is_none());
         for intensity in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            environment.intensity = intensity;
-            assert!(!environment.is_valid());
+            assert!(environment.set_intensity(intensity).is_err());
             assert!(environment.radiance(Vector3::x()).is_none());
         }
     }
@@ -273,42 +275,42 @@ fn missing_or_corrupt_hdr_returns_a_scene_construction_error() {
     let hdr = TemporaryHdr::new(false);
     let config = scene_config(hdr.config());
     fs::remove_file(&hdr.0).unwrap();
-    let error = Scene::from_config(&config).err().unwrap().to_string();
+    let error = RenderJob::from_config(&config).err().unwrap().to_string();
     assert!(error.contains("scene.environment.map_path"));
     assert!(error.contains(hdr.0.to_str().unwrap()));
     fs::write(&hdr.0, b"not an HDR").unwrap();
-    assert!(Scene::from_config(&config).is_err());
+    assert!(RenderJob::from_config(&config).is_err());
 }
 
 #[test]
 fn scene_queries_cached_hdr_after_its_source_file_is_deleted() {
     let hdr = TemporaryHdr::new(false);
-    let scene = Scene::from_config(&scene_config(hdr.config())).unwrap();
+    let scene = RenderJob::from_config(&scene_config(hdr.config())).unwrap();
     fs::remove_file(&hdr.0).unwrap();
     for _ in 0..3 {
         assert_rgb(
-            scene.background_radiance(Vector3::z()).unwrap(),
+            scene.scene.background_radiance(Vector3::z()).unwrap(),
             Vector3::new(2.0, 4.0, 4.5),
         );
         assert_rgb(
-            scene.background_radiance(-Vector3::z()).unwrap(),
+            scene.scene.background_radiance(-Vector3::z()).unwrap(),
             Vector3::new(4.0, 8.0, 9.0),
         );
     }
-    assert!(Scene::from_config(&scene_config(hdr.config())).is_err());
+    assert!(RenderJob::from_config(&scene_config(hdr.config())).is_err());
 }
 
 #[test]
 fn camera_misses_return_rotated_scaled_hdr_background() {
     let hdr = TemporaryHdr::new(false);
     let map = EnvironmentMap::load(&hdr.0).unwrap();
-    let mut scene = Scene::from_config(&scene_config(EnvironmentConfig {
+    let mut scene = RenderJob::from_config(&scene_config(EnvironmentConfig {
         rotation_degrees: 90.0,
         intensity: 2.0,
         ..hdr.config()
     }))
     .unwrap();
-    scene.objects.clear();
+    scene.scene.objects.clear();
     fs::remove_file(&hdr.0).unwrap();
     // pixel_seed(0, 0, CAMERA_STREAM=0) = 0，独立推导新逐像素流的首条路径。
     let mut rng = StdRng::seed_from_u64(0);
@@ -321,7 +323,20 @@ fn camera_misses_return_rotated_scaled_hdr_background() {
     let local = Vector3::new(direction.y, -direction.x, direction.z);
     let expected = map.radiance(local).unwrap() * 2.0;
     assert_rgb(
-        render_camera_glass(&scene, 1, 1, 1, 0).unwrap().pixels[0],
+        spectral_caustics::integrator::camera::integrate_rgb(
+            &scene,
+            &spectral_caustics::config::render::RenderSetting {
+                width: 1,
+                height: 1,
+                camera_spp: 1,
+                seed: 0,
+                ..Default::default()
+            },
+            None,
+        )
+        .map(|images| images.combined)
+        .unwrap()
+        .pixels()[0],
         linear_srgb_to_xyz(expected).unwrap(),
     );
 }
@@ -338,7 +353,7 @@ fn glass_reflection_and_transmission_query_hdr_in_the_final_direction() {
             dispersion: None,
         },
     }];
-    let scene = Scene::from_config(&config).unwrap();
+    let scene = RenderJob::from_config(&config).unwrap();
     fs::remove_file(&hdr.0).unwrap();
     let mut checked = [false; 2];
     let mut expected = Vector3::zeros();
@@ -349,8 +364,8 @@ fn glass_reflection_and_transmission_query_hdr_in_the_final_direction() {
             .camera
             .ray_for_pixel_sample(0, 0, 1, 1, offset)
             .unwrap();
-        let hit = scene.intersect(&ray).unwrap();
-        let material = scene.material(hit.material_id.unwrap()).unwrap();
+        let hit = scene.scene.intersect(&ray).unwrap();
+        let material = scene.scene.material(hit.material_id);
         let sample = material
             .sample(-ray.direction, hit.normal, &mut rng)
             .unwrap();
@@ -364,7 +379,20 @@ fn glass_reflection_and_transmission_query_hdr_in_the_final_direction() {
     }
     assert_eq!(checked, [true; 2]);
     assert_rgb(
-        render_camera_glass(&scene, 1, 1, 256, 0).unwrap().pixels[0],
+        spectral_caustics::integrator::camera::integrate_rgb(
+            &scene,
+            &spectral_caustics::config::render::RenderSetting {
+                width: 1,
+                height: 1,
+                camera_spp: 256,
+                seed: 0,
+                ..Default::default()
+            },
+            None,
+        )
+        .map(|images| images.combined)
+        .unwrap()
+        .pixels()[0],
         linear_srgb_to_xyz(expected).unwrap(),
     );
 }
@@ -376,7 +404,7 @@ fn all_camera_entries_integrate_hdr_with_lambertian_without_changing_photon_ligh
         intensity: 0.25,
         ..hdr.config()
     });
-    let renderer = Render::new(RenderSetting {
+    let renderer = Renderer::new(RenderSetting {
         width: 4,
         height: 4,
         samples_per_pixel_axis: 1,
@@ -385,47 +413,107 @@ fn all_camera_entries_integrate_hdr_with_lambertian_without_changing_photon_ligh
     .unwrap();
     let mut solar_config = config.clone();
     solar_config.environment = None;
-    let solar = Scene::from_config(&solar_config).unwrap();
-    let with_environment = Scene::from_config(&config).unwrap();
-    let lighting_before = renderer.render_lighting(&solar).unwrap();
-    let lighting_after = renderer.render_lighting(&with_environment).unwrap();
-    assert_eq!(lighting_before.direct.pixels, lighting_after.direct.pixels);
+    let solar = RenderJob::from_config(&solar_config).unwrap();
+    let with_environment = RenderJob::from_config(&config).unwrap();
+    let lighting_before = spectral_caustics::integrator::photon::integrate_xyz(
+        &solar,
+        solar.photon.caustics_object_id,
+        solar.photon.ground_id.expect("receiver"),
+        (renderer).settings(),
+    )
+    .unwrap();
+    let lighting_after = spectral_caustics::integrator::photon::integrate_xyz(
+        &with_environment,
+        with_environment.photon.caustics_object_id,
+        with_environment.photon.ground_id.expect("receiver"),
+        (renderer).settings(),
+    )
+    .unwrap();
     assert_eq!(
-        lighting_before.caustics.pixels,
-        lighting_after.caustics.pixels
+        lighting_before.direct.as_ref().unwrap().pixels(),
+        lighting_after.direct.as_ref().unwrap().pixels()
+    );
+    assert_eq!(
+        lighting_before.caustics.pixels(),
+        lighting_after.caustics.pixels()
     );
     assert_eq!(
         lighting_before.sun_irradiance_xyz,
         lighting_after.sun_irradiance_xyz
     );
     assert_eq!(
-        renderer.render(&solar).unwrap().pixels,
-        renderer.render(&with_environment).unwrap().pixels
+        spectral_caustics::integrator::photon::integrate_xyz(
+            &solar,
+            solar.photon.caustics_object_id,
+            solar.photon.ground_id.expect("receiver"),
+            (renderer).settings()
+        )
+        .and_then(|images| images.combined())
+        .unwrap()
+        .pixels(),
+        spectral_caustics::integrator::photon::integrate_xyz(
+            &with_environment,
+            with_environment.photon.caustics_object_id,
+            with_environment.photon.ground_id.expect("receiver"),
+            (renderer).settings()
+        )
+        .and_then(|images| images.combined())
+        .unwrap()
+        .pixels()
     );
 
     config.light.as_parallel_mut().unwrap().total_flux = 0.0;
-    let mut scene = Scene::from_config(&config).unwrap();
+    let mut scene = RenderJob::from_config(&config).unwrap();
     fs::remove_file(&hdr.0).unwrap();
-    let lighting = renderer.render_lighting(&scene).unwrap();
+    let lighting = spectral_caustics::integrator::photon::integrate_xyz(
+        &scene,
+        scene.photon.caustics_object_id,
+        scene.photon.ground_id.expect("receiver"),
+        (renderer).settings(),
+    )
+    .unwrap();
     let expected = linear_srgb_to_xyz(Vector3::new(8.0, 4.0, 2.0) * (0.8 * 0.25)).unwrap();
     // 混合采样即使在均匀 HDRI 下也有方差；按解析期望进行统计验收。
     for samples in [1024, 4096] {
-        scene.environment_samples = samples;
-        let components = render_camera_glass_components(&scene, &lighting, 3, 2, 8, 42).unwrap();
+        scene.camera_options.environment_samples = samples;
+        let components = spectral_caustics::integrator::camera::integrate_rgb(
+            &scene,
+            &spectral_caustics::config::render::RenderSetting {
+                width: 3,
+                height: 2,
+                camera_spp: 8,
+                seed: 42,
+                ..Default::default()
+            },
+            Some(&lighting),
+        )
+        .unwrap();
         assert!(
             components
                 .caustics
-                .pixels
+                .pixels()
                 .iter()
                 .all(|p| *p == Vector3::zeros())
         );
         let images = [
-            render_camera_glass(&scene, 3, 2, 8, 42).unwrap(),
+            spectral_caustics::integrator::camera::integrate_rgb(
+                &scene,
+                &spectral_caustics::config::render::RenderSetting {
+                    width: 3,
+                    height: 2,
+                    camera_spp: 8,
+                    seed: 42,
+                    ..Default::default()
+                },
+                None,
+            )
+            .map(|images| images.combined)
+            .unwrap(),
             components.direct,
             components.combined,
         ];
         for image in images {
-            for xyz in image.pixels {
+            for xyz in image.pixels() {
                 assert!(
                     (xyz - expected).norm() < expected.norm() * 0.06,
                     "{xyz:?} != {expected:?}, environment_samples={samples}"
@@ -449,32 +537,50 @@ fn hdr_camera_components_add_up_for_background_diffuse_and_glass() {
         if view == 0 {
             config.camera.target = [0.0, 0.0, 4.0];
         }
-        let mut scene = Scene::from_config(&config).unwrap();
+        let mut scene = RenderJob::from_config(&config).unwrap();
         if view == 2 {
-            scene.add_with_material(
+            scene.scene.add(
                 Box::new(spectral_caustics::geometry::ground::Ground::new(2.0).unwrap()),
                 Box::new(spectral_caustics::material::dielectric::Dielectric::new(1.5).unwrap()),
             );
         }
         let mut lighting = SpectralLighting {
-            direct: Framebuffer::new(1, 1),
-            caustics: Framebuffer::new(1, 1),
-            receiver: scene.receiver,
+            direct: Some(Framebuffer::new(1, 1).unwrap()),
+            caustics: Framebuffer::new(1, 1).unwrap(),
+            receiver: scene.photon.receiver,
             light_wi: Vector3::z(),
             sun_irradiance_xyz: Vector3::new(0.2, 0.3, 0.4),
         };
         // 这张 sampled direct 不能参与相机解析直射。
-        lighting.direct.pixels.fill(Vector3::repeat(100.0));
-        lighting.caustics.pixels.fill(Vector3::new(0.4, 0.2, 0.1));
+        lighting
+            .direct
+            .as_mut()
+            .unwrap()
+            .pixels_mut()
+            .fill(Vector3::repeat(100.0));
+        lighting
+            .caustics
+            .pixels_mut()
+            .fill(Vector3::new(0.4, 0.2, 0.1));
         for (spp, seed) in [(1, 0), (16, 42), (7, 123)] {
-            let images =
-                render_camera_glass_components(&scene, &lighting, 7, 5, spp, seed).unwrap();
+            let images = spectral_caustics::integrator::camera::integrate_rgb(
+                &scene,
+                &spectral_caustics::config::render::RenderSetting {
+                    width: 7,
+                    height: 5,
+                    camera_spp: spp,
+                    seed,
+                    ..Default::default()
+                },
+                Some(&lighting),
+            )
+            .unwrap();
             for ((direct, caustics), combined) in images
                 .direct
-                .pixels
+                .pixels()
                 .iter()
-                .zip(&images.caustics.pixels)
-                .zip(&images.combined.pixels)
+                .zip(images.caustics.pixels())
+                .zip(images.combined.pixels())
             {
                 assert_rgb(*direct + caustics, *combined);
             }
@@ -482,12 +588,24 @@ fn hdr_camera_components_add_up_for_background_diffuse_and_glass() {
                 assert!(
                     images
                         .caustics
-                        .pixels
+                        .pixels()
                         .iter()
                         .all(|p| *p == Vector3::zeros())
                 );
-                let background = render_camera_glass(&scene, 7, 5, spp, seed).unwrap();
-                assert_eq!(images.direct.pixels, background.pixels);
+                let background = spectral_caustics::integrator::camera::integrate_rgb(
+                    &scene,
+                    &spectral_caustics::config::render::RenderSetting {
+                        width: 7,
+                        height: 5,
+                        camera_spp: spp,
+                        seed,
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .map(|images| images.combined)
+                .unwrap();
+                assert_eq!(images.direct.pixels(), background.pixels());
             }
         }
     }
@@ -629,7 +747,7 @@ fn environment_pdf_rejects_invalid_directions_and_handles_extreme_finite_scales(
 }
 
 #[test]
-fn direction_pdf_is_independent_of_intensity_and_invalid_environments_preserve_rng() {
+fn direction_pdf_is_independent_of_intensity_and_invalid_edits_preserve_the_environment() {
     let hdr = TemporaryHdr::new(false);
     for map_path in [None, Some(hdr.0.clone())] {
         let mut environment = Environment::try_from(&EnvironmentConfig {
@@ -642,7 +760,7 @@ fn direction_pdf_is_independent_of_intensity_and_invalid_environments_preserve_r
         let reference = environment.sample_direction(&mut reference_rng).unwrap();
         let radiance = environment.radiance(reference.direction).unwrap();
         for intensity in [0.0, 0.5, 2.0, f64::MAX] {
-            environment.intensity = intensity;
+            environment.set_intensity(intensity).unwrap();
             assert_eq!(
                 environment.sample_direction(&mut StdRng::seed_from_u64(42)),
                 Some(reference)
@@ -658,18 +776,18 @@ fn direction_pdf_is_independent_of_intensity_and_invalid_environments_preserve_r
                 );
             }
         }
-        let mut rng = StdRng::seed_from_u64(42);
-        let mut untouched = rng.clone();
         for intensity in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            environment.intensity = intensity;
-            assert!(environment.sample_direction(&mut rng).is_none());
-            assert!(environment.pdf_direction(Vector3::z()).is_none());
+            assert!(environment.set_intensity(intensity).is_err());
         }
-        environment.intensity = 1.0;
-        environment.horizon_color.x = f64::NAN;
-        assert!(environment.sample_direction(&mut rng).is_none());
-        assert!(environment.pdf_direction(Vector3::z()).is_none());
-        assert_eq!(rng.random::<u64>(), untouched.random::<u64>());
+        assert!(
+            environment
+                .set_gradient(Vector3::repeat(f64::NAN), Vector3::zeros())
+                .is_err()
+        );
+        assert_eq!(
+            environment.sample_direction(&mut StdRng::seed_from_u64(42)),
+            Some(reference)
+        );
     }
 }
 
@@ -733,8 +851,8 @@ fn mixed_hdri_camera_is_thread_independent_and_preserves_caustics() {
         environment_samples: 3,
         ..Default::default()
     };
-    let mut scene = Scene::from_config(&config).unwrap();
-    let without_environment = Scene::from_config(&SceneConfig {
+    let mut scene = RenderJob::from_config(&config).unwrap();
+    let without_environment = RenderJob::from_config(&SceneConfig {
         environment: None,
         ..config
     })
@@ -747,11 +865,26 @@ fn mixed_hdri_camera_is_thread_independent_and_preserves_caustics() {
         thread_count: Some(1),
         ..Default::default()
     };
-    let renderer = Render::new(settings.clone()).unwrap();
-    let lighting = renderer.render_lighting(&scene).unwrap();
-    let solar_lighting = renderer.render_lighting(&without_environment).unwrap();
-    assert_eq!(lighting.direct.pixels, solar_lighting.direct.pixels);
-    assert_eq!(lighting.caustics.pixels, solar_lighting.caustics.pixels);
+    let renderer = Renderer::new(settings.clone()).unwrap();
+    let lighting = spectral_caustics::integrator::photon::integrate_xyz(
+        &scene,
+        scene.photon.caustics_object_id,
+        scene.photon.ground_id.expect("receiver"),
+        (renderer).settings(),
+    )
+    .unwrap();
+    let solar_lighting = spectral_caustics::integrator::photon::integrate_xyz(
+        &without_environment,
+        without_environment.photon.caustics_object_id,
+        without_environment.photon.ground_id.expect("receiver"),
+        (renderer).settings(),
+    )
+    .unwrap();
+    assert_eq!(
+        lighting.direct.as_ref().unwrap().pixels(),
+        solar_lighting.direct.as_ref().unwrap().pixels()
+    );
+    assert_eq!(lighting.caustics.pixels(), solar_lighting.caustics.pixels());
     assert_eq!(
         lighting.sun_irradiance_xyz,
         solar_lighting.sun_irradiance_xyz
@@ -760,37 +893,64 @@ fn mixed_hdri_camera_is_thread_independent_and_preserves_caustics() {
         EnvironmentMisHeuristic::Balance,
         EnvironmentMisHeuristic::Power,
     ] {
-        scene.environment_mis_heuristic = heuristic;
+        scene.camera_options.environment_mis_heuristic = heuristic;
         for samples in [1, 2, 3, 4, 8] {
-            scene.environment_samples = samples;
+            scene.camera_options.environment_samples = samples;
             for seed in [0, 42] {
-                let baseline = renderer
-                    .render_camera_glass_components(&scene, &lighting, 16, seed)
-                    .unwrap();
-                let solar = renderer
-                    .render_camera_glass_components(&without_environment, &solar_lighting, 16, seed)
-                    .unwrap();
-                assert_eq!(baseline.caustics.pixels, solar.caustics.pixels);
-                assert_ne!(baseline.direct.pixels, solar.direct.pixels);
+                let baseline = spectral_caustics::integrator::camera::integrate_rgb(
+                    &scene,
+                    &spectral_caustics::config::render::RenderSetting {
+                        width: (renderer).settings().width,
+                        height: (renderer).settings().height,
+                        camera_spp: 16,
+                        seed,
+                        ..Default::default()
+                    },
+                    Some(&lighting),
+                )
+                .unwrap();
+                let solar = spectral_caustics::integrator::camera::integrate_rgb(
+                    &without_environment,
+                    &spectral_caustics::config::render::RenderSetting {
+                        width: (renderer).settings().width,
+                        height: (renderer).settings().height,
+                        camera_spp: 16,
+                        seed,
+                        ..Default::default()
+                    },
+                    Some(&solar_lighting),
+                )
+                .unwrap();
+                assert_eq!(baseline.caustics.pixels(), solar.caustics.pixels());
+                assert_ne!(baseline.direct.pixels(), solar.direct.pixels());
                 for threads in [1, 2, 4] {
-                    let parallel = Render::new(RenderSetting {
+                    let parallel = Renderer::new(RenderSetting {
                         thread_count: Some(threads),
                         ..settings.clone()
                     })
                     .unwrap();
                     for _ in 0..2 {
-                        let images = parallel
-                            .render_camera_glass_components(&scene, &lighting, 16, seed)
-                            .unwrap();
-                        assert_eq!(images.direct.pixels, baseline.direct.pixels);
-                        assert_eq!(images.caustics.pixels, baseline.caustics.pixels);
-                        assert_eq!(images.combined.pixels, baseline.combined.pixels);
+                        let images = spectral_caustics::integrator::camera::integrate_rgb(
+                            &scene,
+                            &spectral_caustics::config::render::RenderSetting {
+                                width: (parallel).settings().width,
+                                height: (parallel).settings().height,
+                                camera_spp: 16,
+                                seed,
+                                ..Default::default()
+                            },
+                            Some(&lighting),
+                        )
+                        .unwrap();
+                        assert_eq!(images.direct.pixels(), baseline.direct.pixels());
+                        assert_eq!(images.caustics.pixels(), baseline.caustics.pixels());
+                        assert_eq!(images.combined.pixels(), baseline.combined.pixels());
                         for ((direct, caustics), combined) in images
                             .direct
-                            .pixels
+                            .pixels()
                             .iter()
-                            .zip(&images.caustics.pixels)
-                            .zip(&images.combined.pixels)
+                            .zip(images.caustics.pixels())
+                            .zip(images.combined.pixels())
                         {
                             assert!((direct + caustics - combined).norm() < 1e-12);
                         }

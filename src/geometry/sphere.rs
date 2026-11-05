@@ -1,10 +1,9 @@
 //! 由球心和半径（米）定义的解析球面；几何法线始终朝外。
 
-use super::{
-    hit::Hit,
-    object::Hittable,
-    ray::{INTERSECTION_EPSILON, Ray},
-};
+use super::hit::GeometryHit as Hit;
+use super::object::Hittable;
+use super::ray::INTERSECTION_EPSILON;
+use super::ray::Ray;
 use nalgebra::Vector3;
 
 #[derive(Debug, Clone, Copy)]
@@ -14,7 +13,11 @@ pub struct Sphere {
 }
 
 impl Sphere {
-    /// 拒绝非有限球心、非正半径，以及半径平方/包围范围的溢出或下溢。
+    /// 按球心和半径创建解析球面，供光线直接求交。
+    ///
+    /// 输入：有限球心 center（米）和正半径 radius（米）。
+    ///
+    /// 输出：Sphere；半径、半径平方或坐标范围无法有效表示时返回 None。
     pub fn new(center: Vector3<f64>, radius: f64) -> Option<Self> {
         let radius_squared = radius * radius;
         if !radius.is_finite()
@@ -32,6 +35,12 @@ impl Sphere {
 }
 
 impl Hittable for Sphere {
+    /// 求光线与球面最近的正向交点；从球内出发时返回出射交点。
+    ///
+    /// 输入：Ray；输出：最近的 Hit，未命中或数值无效返回 None；法线始终朝球外。
+    ///
+    /// 公式：令 q=o-center、a=d·d、b=q·d，则 t=(-b±√D)/a，D=a·radius²-‖q×d‖²。
+    /// 依次尝试较小、较大根，只接受 t>ε；n=normalize(P-center)。
     fn intersect(&self, ray: &Ray) -> Option<Hit> {
         if ray
             .origin
@@ -71,7 +80,6 @@ impl Hittable for Sphere {
             coords,
             normal: outward / length,
             distance,
-            ..Hit::default()
         })
     }
 }
@@ -102,7 +110,6 @@ mod tests {
                 assert!((hit.normal - axis).norm() < 1e-12);
                 assert!((hit.normal.norm() - 1.0).abs() < 1e-12);
                 assert_eq!(hit.normal.dot(&ray.direction) < 0.0, entering);
-                assert_eq!((hit.object_id, hit.material_id), (None, None));
             }
         }
     }

@@ -1,31 +1,39 @@
 //! 公平总路径预算下的 Packet 对比；所有统计均来自曝光/ACES 前的线性 XYZ。
 use nalgebra::Vector3;
-use serde_json::{Value, json};
-use spectral_caustics::{
-    config::Config,
-    optics::iormode::IorMode,
-    render::{Render, framebuffer::Framebuffer},
-    scene::Scene,
-};
-use std::{error::Error, fs, io::Write, path::Path, time::Instant};
+use serde_json::Value;
+use serde_json::json;
+use spectral_caustics::config::Config;
+use spectral_caustics::config::RenderJob;
+use spectral_caustics::film::Framebuffer;
+use spectral_caustics::optics::dispersion::IorMode;
+use spectral_caustics::renderer::Renderer;
+use std::error::Error;
+use std::fs;
+use std::io::Write;
+use std::path::Path;
+use std::time::Instant;
 
 fn render_saved(
     config: &mut Config,
-    scene: &Scene,
+    scene: &RenderJob,
     directory: &Path,
     name: &str,
-) -> Result<(Framebuffer, f64), Box<dyn Error>> {
+) -> Result<(Framebuffer, f64), Box<dyn Error + Send + Sync>> {
     config.render.output_path = directory.join(format!("{name}.png"));
     config.save(directory.join(format!("{name}.json")))?;
-    let renderer = Render::new(config.render.clone())?;
+    let renderer = Renderer::new(config.render.clone())?;
     let start = Instant::now();
-    let image = renderer.render_camera(scene)?;
+    let image = renderer.render(scene).map(|images| images.combined)?;
     let seconds = start.elapsed().as_secs_f64();
-    renderer.save(&image, &config.render.output_path)?;
+    spectral_caustics::output::save_png_with_exposure(
+        &image,
+        &config.render.output_path,
+        (renderer).settings().exposure,
+    )?;
     // 无头部，行优先，每像素依次 X/Y/Z，IEEE f64 little-endian；尺寸在同名 JSON 中。
     let mut raw =
         std::io::BufWriter::new(fs::File::create(directory.join(format!("{name}.xyz64")))?);
-    for pixel in &image.pixels {
+    for pixel in image.pixels() {
         for value in pixel.iter() {
             raw.write_all(&value.to_le_bytes())?;
         }
@@ -33,7 +41,10 @@ fn render_saved(
     raw.flush()?;
     println!(
         "{name}: {}x{}, {} paths/pixel, packet={}, {seconds:.3}s",
-        image.width, image.height, config.render.camera_spp, config.render.spectral_packet_size
+        image.width(),
+        image.height(),
+        config.render.camera_spp,
+        config.render.spectral_packet_size
     );
     Ok((image, seconds))
 }
@@ -59,19 +70,19 @@ fn metrics(images: &[Framebuffer], reference: &Framebuffer, mask: &[bool]) -> Va
             continue;
         }
         pixels += 1;
-        let mean = images.iter().map(|im| im.pixels[i]).sum::<Vector3<f64>>() / n;
+        let mean = images.iter().map(|im| im.pixels()[i]).sum::<Vector3<f64>>() / n;
         let xy_mean = images
             .iter()
-            .map(|im| chromaticity(im.pixels[i]))
+            .map(|im| chromaticity(im.pixels()[i]))
             .sum::<Vector3<f64>>()
             / n;
         mean_xyz += mean;
-        mean_mse += (mean - reference.pixels[i]).norm_squared() / 3.0;
+        mean_mse += (mean - reference.pixels()[i]).norm_squared() / 3.0;
         for image in images {
-            let d = image.pixels[i] - mean;
+            let d = image.pixels()[i] - mean;
             variance += d.component_mul(&d) / (n - 1.0);
-            xy_variance += (chromaticity(image.pixels[i]) - xy_mean).norm_squared() / (n - 1.0);
-            mse += (image.pixels[i] - reference.pixels[i]).norm_squared() / (3.0 * n);
+            xy_variance += (chromaticity(image.pixels()[i]) - xy_mean).norm_squared() / (n - 1.0);
+            mse += (image.pixels()[i] - reference.pixels()[i]).norm_squared() / (3.0 * n);
         }
     }
     let count = pixels as f64;
@@ -85,7 +96,7 @@ fn metrics(images: &[Framebuffer], reference: &Framebuffer, mask: &[bool]) -> Va
     })
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut config = Config::load("configs/sphere_spectral.json")?;
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() > 5 {
@@ -93,7 +104,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "用法：spectral_packet_compare [总SPP] [边长] [输出目录] [种子数>=2] [参考SPP]".into(),
         );
     }
-    let parse = |i: usize, default: usize| -> Result<usize, Box<dyn Error>> {
+    let parse = |i: usize, default: usize| -> Result<usize, Box<dyn Error + Send + Sync>> {
         Ok(args
             .get(i)
             .map(|s| s.parse())
@@ -117,8 +128,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     config.render.camera_spp = spp;
     config.render.spectral_packet_size = 4;
     config.validate()?;
-    let scene = Scene::from_config(&config.scene)?;
-    let threads = Render::new(config.render.clone())?.thread_count();
+    let scene = config.build()?;
+    let threads = Renderer::new(config.render.clone())?.thread_count();
     fs::create_dir_all(&directory)?;
     let seeds: Vec<u64> = (0..seed_count)
         .map(|i| 42_u64.checked_add(i as u64).ok_or("种子溢出"))
@@ -130,8 +141,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ray_for_pixel(i % size, i / size, size, size)
                 .unwrap();
             scene
+                .scene
                 .intersect(&ray)
-                .is_some_and(|hit| hit.object_id == scene.caustics_object_id)
+                .is_some_and(|hit| Some(hit.object_id) == scene.photon.caustics_object_id)
         })
         .collect();
     // 用四邻域中心射线定义球轮廓边缘；球内部不含这些像素。
@@ -186,15 +198,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         for p in 0..2 {
-            let mut average = Framebuffer::new(size, size);
+            let mut average = Framebuffer::new(size, size)?;
             for image in &images[p] {
-                for (dst, src) in average.pixels.iter_mut().zip(&image.pixels) {
+                for (dst, src) in average.pixels_mut().iter_mut().zip(image.pixels()) {
                     *dst += src / seed_count as f64;
                 }
             }
-            Render::new(config.render.clone())?.save(
+            spectral_caustics::output::save_png_with_exposure(
                 &average,
                 directory.join(format!("{name}_packet{}_mean.png", [1, 4][p])),
+                config.render.exposure,
             )?;
             cases.push(json!({
                 "ior_mode": name, "packet_size": ([1, 4][p]),

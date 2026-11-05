@@ -1,45 +1,13 @@
 //! Snell 折射、折射率模式与 CIE/D65 光谱积分。
 
 pub mod dispersion;
-pub mod emission;
-pub mod iormode;
-pub mod spectrum;
-
-use nalgebra::Vector3;
-
-/// Snell 折射：direction、normal 应为单位向量，normal 朝向入射介质。
-/// eta_i 是入射介质折射率，eta_t 是出射介质折射率；全反射或非法数值返回 None。
-pub fn refract(
-    direction: Vector3<f64>,
-    normal: Vector3<f64>,
-    eta_i: f64,
-    eta_t: f64,
-) -> Option<Vector3<f64>> {
-    if !direction.iter().chain(normal.iter()).all(|v| v.is_finite())
-        || !eta_i.is_finite()
-        || eta_i <= 0.0
-        || !eta_t.is_finite()
-        || eta_t <= 0.0
-    {
-        return None;
-    }
-    let cosi = -normal.dot(&direction);
-    if cosi < 0.0 {
-        return None;
-    }
-    let eta = eta_i / eta_t;
-    let k = 1.0 - eta * eta * (1.0 - cosi * cosi);
-    if !k.is_finite() || k < 0.0 {
-        None
-    } else {
-        let refracted = eta * direction + (eta * cosi - k.sqrt()) * normal;
-        refracted.iter().all(|v| v.is_finite()).then_some(refracted)
-    }
-}
+pub mod interface;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::interface::refract;
+
+    use nalgebra::Vector3;
 
     #[test]
     fn normal_incidence_is_unchanged_and_total_internal_reflection_returns_none() {

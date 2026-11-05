@@ -1,14 +1,14 @@
 //! 同一几何、seed、波长/像素采样配置，对比光谱相机的 Constant IOR 与 Dispersion。
 
-use spectral_caustics::{
-    config::{Config, rendersetting::CameraMode},
-    optics::iormode::IorMode,
-    render::Render,
-    scene::Scene,
-};
-use std::{error::Error, path::PathBuf, time::Instant};
+use spectral_caustics::config::Config;
+use spectral_caustics::config::render::CameraMode;
+use spectral_caustics::optics::dispersion::IorMode;
+use spectral_caustics::renderer::Renderer;
+use std::error::Error;
+use std::path::PathBuf;
+use std::time::Instant;
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() > 4 {
         return Err(
@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .to_path_buf()
     });
     config.render.camera_mode = CameraMode::Spectral;
-    let scene = Scene::from_config(&config.scene)?;
+    let scene = config.build()?;
     std::fs::create_dir_all(&directory)?;
     for (name, mode) in [
         ("constant", IorMode::Constant),
@@ -46,9 +46,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.render.mode = mode;
         config.render.output_path = directory.join(format!("camera_{name}.png"));
         config.save(directory.join(format!("{name}.json")))?;
-        let renderer = Render::new(config.render.clone())?;
-        let image = renderer.render_camera(&scene)?;
-        renderer.save(&image, &config.render.output_path)?;
+        let renderer = Renderer::new(config.render.clone())?;
+        let image = renderer.render(&scene).map(|images| images.combined)?;
+        spectral_caustics::output::save_png_with_exposure(
+            &image,
+            &config.render.output_path,
+            (renderer).settings().exposure,
+        )?;
         println!(
             "{name}: {}，{}×{}，{} SPP，{:.3}s",
             config.render.output_path.display(),

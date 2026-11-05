@@ -1,23 +1,31 @@
 //! 单面、均匀 Lambertian 发光圆盘；通量采用项目的 D65/Y 相对标尺。
 
-use crate::{
-    geometry::ray::Ray,
-    material::{to_world, unit_vector},
-};
+use crate::geometry::ray::Ray;
+use crate::material::to_world;
+use crate::material::unit_vector;
 use nalgebra::Vector3;
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::PI;
+use std::f64::consts::TAU;
 
 #[derive(Debug, Clone, Copy)]
 pub struct DiskAreaLight {
-    pub center: Vector3<f64>,
-    pub normal: Vector3<f64>,
-    pub radius: f64,
-    pub total_flux: f64,
+    /// 圆盘中心的世界坐标，单位米。
+    pub(crate) center: Vector3<f64>,
+    /// 指向发光半球的法线，构造时归一化。
+    pub(crate) normal: Vector3<f64>,
+    /// 圆盘半径，单位米；面积 A=π·radius²。
+    pub(crate) radius: f64,
+    /// 单面发出的相对总通量 Φ，采用 D65/Y 标尺，未标定为瓦特。
+    pub(crate) total_flux: f64,
+    area: f64,
+    radiance: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct DiskPositionSample {
+    /// 抽到的发光位置，世界坐标，单位米。
     pub position: Vector3<f64>,
+    /// 该位置朝向发光半球的单位法线。
     pub normal: Vector3<f64>,
     /// 相对于面积 dA，单位 m⁻²。
     pub pdf_area: f64,
@@ -25,8 +33,11 @@ pub struct DiskPositionSample {
 
 #[derive(Debug, Clone, Copy)]
 pub struct DiskEmissionSample {
+    /// 从圆盘位置向发光半球发出的射线。
     pub ray: Ray,
+    /// 发射位置的单位法线，供余弦与 PDF 核对。
     pub normal: Vector3<f64>,
+    /// 发射位置的面积采样密度 p_A=1/A，单位 m⁻²。
     pub pdf_area: f64,
     /// 相对于立体角 dω，单位 sr⁻¹；cos(theta)/π。
     pub pdf_direction: f64,
@@ -34,77 +45,93 @@ pub struct DiskEmissionSample {
 
 #[derive(Debug, Clone, Copy)]
 pub struct DiskDirectSample {
+    /// 抽到的发光位置，世界坐标，单位米。
     pub position: Vector3<f64>,
+    /// 从着色点指向该发光位置的单位方向。
     pub wi: Vector3<f64>,
+    /// 着色点与发光位置之间的距离，单位米。
     pub distance: f64,
+    /// 发光侧余弦 max(n_light·(-wi),0)，背面不贡献照明。
     pub cosine_light: f64,
+    /// 发光位置的面积采样密度 p_A=1/A，单位 m⁻²。
     pub pdf_area: f64,
     /// Le*cos(theta_light)/(distance²*pdf_area)，尚未乘 BSDF、接收余弦或 D65。
     pub incident_weight: f64,
 }
 
+/// 检查输入的两个采样值是否都在 [0,1)；返回 bool，供圆盘位置和发射方向采样共用。
 fn valid_uv(u: [f64; 2]) -> bool {
     u.iter().all(|v| (0.0..1.0).contains(v))
 }
 
 impl DiskAreaLight {
+    /// 创建单面均匀发光圆盘，供面积直接光和光子发射共用。
+    ///
+    /// 输入：世界中心 center（米）、朝发光半球的 normal、正半径 radius（米）和非负相对总通量 Φ。
+    ///
+    /// 输出：法线归一化且参数有效的 DiskAreaLight；几何、面积、PDF 或辐亮度无效返回 Err。
     pub fn new(
         center: Vector3<f64>,
         normal: Vector3<f64>,
         radius: f64,
         total_flux: f64,
     ) -> Result<Self, String> {
-        let light = Self {
+        let normal = unit_vector(normal).ok_or("disk normal must be finite and nonzero")?;
+        let area = PI * radius * radius;
+        let radiance = (total_flux / area) / PI;
+        if !radius.is_finite()
+            || radius <= 0.0
+            || !area.is_finite()
+            || area <= 0.0
+            || !area.recip().is_finite()
+            || !total_flux.is_finite()
+            || total_flux < 0.0
+            || !radiance.is_finite()
+            || center
+                .iter()
+                .any(|v| !v.is_finite() || !(v.abs() + radius).is_finite())
+        {
+            return Err("invalid disk geometry, area, flux or radiance".into());
+        }
+        Ok(Self {
             center,
-            normal: unit_vector(normal).ok_or("圆盘光源法线须有限且非零")?,
+            normal,
             radius,
             total_flux,
-        };
-        light.validate()?;
-        Ok(light)
+            area,
+            radiance,
+        })
+    }
+    pub fn center(&self) -> Vector3<f64> {
+        self.center
+    }
+    pub fn normal(&self) -> Vector3<f64> {
+        self.normal
+    }
+    pub fn radius(&self) -> f64 {
+        self.radius
+    }
+    pub fn total_flux(&self) -> f64 {
+        self.total_flux
+    }
+    pub fn area(&self) -> f64 {
+        self.area
+    }
+    /// Le=Φ/(πA), without spectral density. Cached at construction.
+    pub fn radiance(&self) -> f64 {
+        self.radiance
     }
 
-    pub fn area(&self) -> Option<f64> {
-        let area = PI * self.radius * self.radius;
-        (self.radius.is_finite()
-            && self.radius > 0.0
-            && area.is_finite()
-            && area > 0.0
-            && area.recip().is_finite())
-        .then_some(area)
-    }
-
-    /// 单面总通量 Φ = A*π*Le，返回不含 D65 密度的辐亮度系数。
-    pub fn radiance(&self) -> Option<f64> {
-        let le = (self.total_flux / self.area()?) / PI;
-        (self.total_flux.is_finite() && self.total_flux >= 0.0 && le.is_finite()).then_some(le)
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        if self.center.iter().any(|v| !v.is_finite())
-            || unit_vector(self.normal).is_none()
-            || self.radiance().is_none()
-        {
-            return Err(
-                "disk_area 的 center/normal/radius/total_flux 无效或面积/PDF/辐亮度溢出".into(),
-            );
-        }
-        // 确保圆盘的世界范围可表示，避免有限中心加半径后溢出。
-        if self
-            .center
-            .iter()
-            .any(|v| !(v.abs() + self.radius).is_finite())
-        {
-            return Err("disk_area 世界范围溢出".into());
-        }
-        Ok(())
-    }
-
+    /// 在发光圆盘上均匀抽取一点，供直接光和光子发射使用。
+    ///
+    /// 输入：两个 [0,1) 样本 u；输出：位置、单位法线、面积密度 p_A=1/(πr²)，无效时 None。
+    ///
+    /// 公式：局部半径 s=r√u₀，方位角 φ=2πu₁，点为 center+to_world((s cosφ,s sinφ,0))。
     pub fn sample_position(&self, u: [f64; 2]) -> Option<DiskPositionSample> {
         if !valid_uv(u) {
             return None;
         }
-        let n = unit_vector(self.normal)?;
+        let n = self.normal;
         let r = self.radius * u[0].sqrt();
         let phi = TAU * u[1];
         let position = self.center + to_world(Vector3::new(r * phi.cos(), r * phi.sin(), 0.0), n)?;
@@ -114,12 +141,16 @@ impl DiskAreaLight {
             .then_some(DiskPositionSample {
                 position,
                 normal: n,
-                pdf_area: self.area()?.recip(),
+                pdf_area: self.area.recip(),
             })
     }
 
-    /// 全半球余弦发射，不裁剪方向到玻璃。每条匹配采样的通量为 Φ/N：
-    /// Le*cos(theta)/(N*p_A*p_ω) = [Φ/(πA)]*cos(theta)/[N*(1/A)*(cos(theta)/π)]。
+    /// 同时采样圆盘上的起点和发光半球方向，生成光子发射记录。
+    ///
+    /// 输入：各含两个 [0,1) 数的 position_u/direction_u；输出：Ray、法线、p_A 与 p_ω，无效时 None。
+    ///
+    /// 公式：p_A=1/A，p_ω=cosθ/π；方向覆盖整个发光半球，不限定为指向玻璃。
+    /// 匹配的每条光子通量 L_e cosθ/(N p_A p_ω)=Φ/N，由调用方施加，不能再除一次 PDF。
     pub fn sample_emission(
         &self,
         position_u: [f64; 2],
@@ -142,7 +173,14 @@ impl DiskAreaLight {
         })
     }
 
-    /// 圆盘均匀面积 NEE；背面返回零贡献（None），不补采。非法几何/数值溢出明确报错。
+    /// 从着色点抽取一个圆盘发光位置，准备面积直接光采样的几何权重。
+    ///
+    /// 输入：世界着色点 position（米）和两个 [0,1) 样本 u。
+    ///
+    /// 输出：Some(位置、指向光源的 wi、距离 r、PDF、入射权重)；光源背面为 Ok(None)，非法几何/溢出为 Err。
+    ///
+    /// 公式：incident_weight=L_e·cosθ_light/(r² p_A)=Φ·cosθ_light/(πr²)。
+    /// 这里 r 是采样点间距离；调用方还须乘 BSDF、接收余弦、D65、可见性并按样本数平均，不补采背面样本。
     pub fn sample_direct(
         &self,
         position: Vector3<f64>,

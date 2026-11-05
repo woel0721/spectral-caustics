@@ -1,40 +1,51 @@
 use nalgebra::Vector3;
-use rand::{RngCore, SeedableRng, rngs::StdRng};
-use spectral_caustics::{
-    config::{
-        Config,
-        materialconfig::MaterialConfig,
-        rendersetting::{CameraMode, RenderSetting},
-        sceneconfig::{EnvironmentConfig, EnvironmentMisHeuristic, ObjectConfig},
-    },
-    geometry::{ground::Ground, hit::Hit, object::Hittable, ray::Ray, sphere::Sphere},
-    material::{
-        BsdfValue, EvaluateMode, Material, ScatterType, SpectralBsdfSample,
-        dielectric::{Dielectric, fresnel_dielectric},
-        lambertian::Lambertian,
-        mirror::Mirror,
-    },
-    optics::{
-        dispersion::Cauchy,
-        emission::{d65_spectrum, rgb_emission},
-        iormode::IorMode,
-        spectrum::{cie_xyz, rgb_reflectance},
-    },
-    render::{
-        Render, SpectralPathState, framebuffer::Framebuffer,
-        integrator::spectral::render_fixed_wavelength_camera, render_camera_glass,
-        render_spectral_camera, render_spectral_camera_with_packet, trace_spectral_camera_path,
-    },
-    scene::{Environment, Scene},
+use rand::RngCore;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use spectral_caustics::config::Config;
+use spectral_caustics::config::RenderJob;
+use spectral_caustics::config::material::MaterialConfig;
+use spectral_caustics::config::render::CameraMode;
+use spectral_caustics::config::render::RenderSetting;
+use spectral_caustics::config::scene::EnvironmentConfig;
+use spectral_caustics::config::scene::EnvironmentMisHeuristic;
+use spectral_caustics::config::scene::ObjectConfig;
+#[cfg(feature = "diagnostics")]
+use spectral_caustics::diagnostics::render_fixed_wavelength_camera;
+use spectral_caustics::environment::Environment;
+use spectral_caustics::film::Framebuffer;
+use spectral_caustics::geometry::ground::Ground;
+use spectral_caustics::geometry::hit::GeometryHit;
+use spectral_caustics::geometry::object::Hittable;
+use spectral_caustics::geometry::ray::Ray;
+use spectral_caustics::geometry::sphere::Sphere;
+use spectral_caustics::integrator::camera::{
+    path::trace_camera_path,
+    transport::Caustics,
+    types::{CameraPathRngs, CameraPathState},
 };
-use std::{
-    f64::consts::PI,
-    fs,
-    path::PathBuf,
-    process::Command,
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use spectral_caustics::material::BsdfSample;
+use spectral_caustics::material::Material;
+use spectral_caustics::material::ScatterType;
+use spectral_caustics::material::dielectric::Dielectric;
+use spectral_caustics::material::lambertian::Lambertian;
+use spectral_caustics::material::mirror::Mirror;
+use spectral_caustics::optics::dispersion::Cauchy;
+use spectral_caustics::optics::dispersion::IorMode;
+use spectral_caustics::optics::interface::fresnel_dielectric;
+use spectral_caustics::renderer::Renderer;
+use spectral_caustics::spectrum::cie_xyz;
+use spectral_caustics::spectrum::emission::d65_spectrum;
+use spectral_caustics::spectrum::emission::rgb_emission;
+use spectral_caustics::spectrum::rgb_reflectance;
+use std::f64::consts::PI;
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 struct FixedRng {
     value: u64,
@@ -71,11 +82,11 @@ fn settings(spp: usize) -> RenderSetting {
     }
 }
 fn mean(image: &Framebuffer) -> Vector3<f64> {
-    image.pixels.iter().copied().sum::<Vector3<f64>>() / image.pixels.len() as f64
+    image.pixels().iter().copied().sum::<Vector3<f64>>() / image.pixels().len() as f64
 }
 fn same(a: &Framebuffer, b: &Framebuffer) {
-    assert_eq!((a.width, a.height), (b.width, b.height));
-    for (a, b) in a.pixels.iter().zip(&b.pixels) {
+    assert_eq!((a.width(), a.height()), (b.width(), b.height()));
+    for (a, b) in a.pixels().iter().zip(b.pixels()) {
         for (a, b) in a.iter().zip(b.iter()) {
             assert_eq!(a.to_bits(), b.to_bits());
         }
@@ -89,48 +100,72 @@ fn integrate(f: impl Fn(f64) -> f64) -> Vector3<f64> {
         })
         .sum()
 }
-fn empty() -> Scene {
-    let mut scene = Scene::new();
-    scene.environment = None;
-    scene.background_color = Vector3::repeat(1.0);
-    scene.light.as_parallel_mut().unwrap().total_flux = 0.0;
+fn empty() -> RenderJob {
+    let mut scene = RenderJob::new();
+    scene.scene.environment = None;
+    scene.scene.background_color = Vector3::repeat(1.0);
+    scene.scene.light.as_parallel_mut().unwrap().total_flux = 0.0;
     scene.ground_checkerboard = None;
     scene
 }
-fn ground_scene() -> Scene {
+fn ground_scene() -> RenderJob {
     let mut scene = empty();
-    let id = scene.add_with_material(
+    let id = scene.scene.add(
         Box::new(Ground::new(0.0).unwrap()),
         Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()),
     );
-    scene.ground_id = Some(id);
-    scene.light.as_parallel_mut().unwrap().direction = -Vector3::z();
+    scene.photon.ground_id = Some(id);
+    scene.scene.light.as_parallel_mut().unwrap().direction = -Vector3::z();
     scene
 }
-fn probe(scene: &Scene, nm: f64, depth: usize) -> SpectralPathState {
+fn probe(
+    scene: &RenderJob,
+    nm: f64,
+    depth: usize,
+) -> CameraPathState<spectral_caustics::integrator::camera::transport::Spectral> {
     let ray = Ray::new(Vector3::new(0.2, 0.1, 3.0), -Vector3::z()).unwrap();
-    let mut state = SpectralPathState::new(ray, nm, depth).unwrap();
+    let mut state = CameraPathState::spectral(ray, nm, depth).unwrap();
     let mut scattering = StdRng::seed_from_u64(42);
     let mut environment = StdRng::seed_from_u64(43);
-    trace_spectral_camera_path(
+    trace_camera_path(
         scene,
         &mut state,
+        &mut CameraPathRngs {
+            camera: &mut scattering,
+            environment: &mut environment,
+            diffuse: &mut FixedRng::new(0),
+        },
+        (scene)
+            .scene
+            .light
+            .analytic_sun()
+            .unwrap()
+            .unwrap_or((Vector3::z(), 0.0))
+            .0,
+        (scene)
+            .scene
+            .light
+            .analytic_sun()
+            .unwrap()
+            .unwrap_or((Vector3::z(), 0.0))
+            .1,
+        (None).map_or(Caustics::None, Caustics::Spectral),
         IorMode::Dispersion,
-        &mut scattering,
-        &mut environment,
-        &mut FixedRng::new(0),
+        #[cfg(feature = "diagnostics")]
+        None,
     )
     .unwrap();
     state
 }
 
+#[cfg(feature = "diagnostics")]
 #[test]
 fn ground_sun_debug_removes_only_ground_sun_at_every_vertex_and_preserves_rng() {
     let mut scene = ground_scene();
-    scene.light.as_parallel_mut().unwrap().total_flux = 8.0;
-    scene.environment = Some(Environment::try_from(&EnvironmentConfig::default()).unwrap());
-    let run = |scene: &Scene, disabled, later| {
-        let mut state = SpectralPathState::new(
+    scene.scene.light.as_parallel_mut().unwrap().total_flux = 8.0;
+    scene.scene.environment = Some(Environment::try_from(&EnvironmentConfig::default()).unwrap());
+    let run = |scene: &RenderJob, disabled, later| {
+        let mut state = CameraPathState::spectral(
             Ray::new(Vector3::new(0.2, 0.1, 3.0), -Vector3::z()).unwrap(),
             550.0,
             0,
@@ -141,13 +176,32 @@ fn ground_sun_debug_removes_only_ground_sun_at_every_vertex_and_preserves_rng() 
         state.has_non_delta_vertex = later;
         let [mut prefix, mut environment, mut continuation] =
             [42, 43, 44].map(StdRng::seed_from_u64);
-        trace_spectral_camera_path(
+        trace_camera_path(
             scene,
             &mut state,
+            &mut CameraPathRngs {
+                camera: &mut prefix,
+                environment: &mut environment,
+                diffuse: &mut continuation,
+            },
+            (scene)
+                .scene
+                .light
+                .analytic_sun()
+                .unwrap()
+                .unwrap_or((Vector3::z(), 0.0))
+                .0,
+            (scene)
+                .scene
+                .light
+                .analytic_sun()
+                .unwrap()
+                .unwrap_or((Vector3::z(), 0.0))
+                .1,
+            (None).map_or(Caustics::None, Caustics::Spectral),
             IorMode::Dispersion,
-            &mut prefix,
-            &mut environment,
-            &mut continuation,
+            #[cfg(feature = "diagnostics")]
+            None,
         )
         .unwrap();
         (
@@ -162,25 +216,31 @@ fn ground_sun_debug_removes_only_ground_sun_at_every_vertex_and_preserves_rng() 
     for later in [false, true] {
         let (normal, rng) = run(&scene, false, later);
         let (dark, debug_rng) = run(&scene, true, later);
-        let (_, strength) = scene.light.sunlight().unwrap();
+        let (_, strength) = scene.scene.light.sunlight().unwrap();
         let sun = 0.37 * rgb_reflectance(Vector3::repeat(0.8), 550.0).unwrap() / PI
             * strength
             * d65_spectrum(550.0).unwrap();
-        assert!((normal.radiance - dark.radiance - sun).abs() < 1e-14);
+        assert!((normal.radiance.direct - dark.radiance.direct - sun).abs() < 1e-14);
         assert_eq!(rng, debug_rng);
         assert_eq!(normal.throughput, dark.throughput);
-        assert!(dark.radiance > 0.0, "环境照明应保留");
+        assert!(dark.radiance.direct > 0.0, "环境照明应保留");
         // 独立的零通量太阳对照只用于确认被移除的是太阳项，调试实现本身不改光源。
-        scene.light.as_parallel_mut().unwrap().total_flux = 0.0;
+        scene.scene.light.as_parallel_mut().unwrap().total_flux = 0.0;
         let (environment_only, _) = run(&scene, false, later);
-        scene.light.as_parallel_mut().unwrap().total_flux = 8.0;
-        assert_eq!(dark.radiance.to_bits(), environment_only.radiance.to_bits());
+        scene.scene.light.as_parallel_mut().unwrap().total_flux = 8.0;
+        assert_eq!(
+            dark.radiance.direct.to_bits(),
+            environment_only.radiance.direct.to_bits()
+        );
     }
     // 同一 Lambertian 表面没有被绑定为接收地面时，仍正常接收太阳直射。
-    scene.ground_id = None;
+    scene.photon.ground_id = None;
     let (normal, rng) = run(&scene, false, false);
     let (debug, debug_rng) = run(&scene, true, false);
-    assert_eq!(normal.radiance.to_bits(), debug.radiance.to_bits());
+    assert_eq!(
+        normal.radiance.direct.to_bits(),
+        debug.radiance.direct.to_bits()
+    );
     assert_eq!(rng, debug_rng);
 }
 
@@ -188,13 +248,15 @@ fn ground_sun_debug_removes_only_ground_sun_at_every_vertex_and_preserves_rng() 
 fn hero_wavelength_integrates_d65_white_and_converges_without_a_second_delta_lambda() {
     let scene = empty();
     let expected = integrate(|nm| d65_spectrum(nm).unwrap());
-    let low = Render::new(settings(16))
+    let low = Renderer::new(settings(16))
         .unwrap()
-        .render_camera(&scene)
+        .render(&scene)
+        .map(|images| images.combined)
         .unwrap();
-    let high = Render::new(settings(16384))
+    let high = Renderer::new(settings(16384))
         .unwrap()
-        .render_camera(&scene)
+        .render(&scene)
+        .map(|images| images.combined)
         .unwrap();
     let error = (mean(&high) - expected).norm();
     assert!(error < 0.012, "MC white {error}: {:?}", mean(&high));
@@ -204,43 +266,61 @@ fn hero_wavelength_integrates_d65_white_and_converges_without_a_second_delta_lam
 
 #[test]
 fn camera_visits_each_wavelength_stratum_once_including_one_and_odd_spp() {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+    use std::sync::Mutex;
     struct Capture(Arc<Mutex<Vec<f64>>>);
     impl Material for Capture {
         fn supports_spectral(&self) -> bool {
             true
         }
-        fn evaluate(
+        fn evaluate_rgb(
             &self,
             _wi: Vector3<f64>,
             _wo: Vector3<f64>,
-            _normal: Vector3<f64>,
-            mode: EvaluateMode,
-        ) -> BsdfValue {
-            match mode {
-                EvaluateMode::Spectral { wavelength_nm } => {
-                    self.0.lock().unwrap().push(wavelength_nm);
-                    BsdfValue::Spectral(0.0)
-                }
-                EvaluateMode::Rgb => BsdfValue::Rgb(Vector3::zeros()),
-            }
+            _n: Vector3<f64>,
+        ) -> Vector3<f64> {
+            Vector3::zeros()
+        }
+        fn evaluate_spectral(
+            &self,
+            _wi: Vector3<f64>,
+            _wo: Vector3<f64>,
+            _n: Vector3<f64>,
+            nm: f64,
+        ) -> f64 {
+            self.0.lock().unwrap().push(nm);
+            0.0
         }
     }
     for spp in [1, 2, 7, 64] {
         let wavelengths = Arc::new(Mutex::new(Vec::new()));
         let mut scene = empty();
-        let camera = spectral_caustics::config::cameraconfig::CameraConfig {
+        let camera = spectral_caustics::config::camera::CameraConfig {
             position: [0.0, 0.0, 2.0],
             target: [0.0; 3],
             up: [0.0, 1.0, 0.0],
             ..Default::default()
         };
         scene.camera = spectral_caustics::camera::Camera::from_config(&camera).unwrap();
-        scene.add_with_material(
+        scene.scene.add(
             Box::new(Ground::new(0.0).unwrap()),
             Box::new(Capture(wavelengths.clone())),
         );
-        render_spectral_camera(&scene, 1, 1, spp, 42, IorMode::Dispersion).unwrap();
+        spectral_caustics::integrator::camera::integrate_spectral(
+            &scene,
+            &spectral_caustics::config::render::RenderSetting {
+                width: 1,
+                height: 1,
+                camera_spp: spp,
+                spectral_packet_size: 1,
+                seed: 42,
+                mode: IorMode::Dispersion,
+                ..Default::default()
+            },
+            None,
+        )
+        .map(|images| images.combined)
+        .unwrap();
         let wavelengths = wavelengths.lock().unwrap();
         assert_eq!(wavelengths.len(), spp);
         for (i, &nm) in wavelengths.iter().enumerate() {
@@ -271,17 +351,17 @@ impl Material for PacketProbe {
     fn has_non_delta(&self) -> bool {
         false
     }
-    fn evaluate(
+    fn evaluate_rgb(&self, _wi: Vector3<f64>, _wo: Vector3<f64>, _n: Vector3<f64>) -> Vector3<f64> {
+        Vector3::zeros()
+    }
+    fn evaluate_spectral(
         &self,
         _wi: Vector3<f64>,
         _wo: Vector3<f64>,
         _n: Vector3<f64>,
-        mode: EvaluateMode,
-    ) -> BsdfValue {
-        match mode {
-            EvaluateMode::Spectral { .. } => BsdfValue::Spectral(0.0),
-            EvaluateMode::Rgb => BsdfValue::Rgb(Vector3::zeros()),
-        }
+        _wavelength_nm: f64,
+    ) -> f64 {
+        0.0
     }
     fn sample_spectral(
         &self,
@@ -290,7 +370,7 @@ impl Material for PacketProbe {
         nm: f64,
         _mode: IorMode,
         rng: &mut dyn RngCore,
-    ) -> Option<SpectralBsdfSample> {
+    ) -> Option<BsdfSample<f64>> {
         self.records.lock().unwrap().push((nm, wo, rng.next_u64()));
         if self.stop_blue && nm < 480.0 {
             for _ in 0..97 {
@@ -298,7 +378,7 @@ impl Material for PacketProbe {
             }
             return None;
         }
-        Some(SpectralBsdfSample {
+        Some(BsdfSample {
             wi: Vector3::z(),
             weight: packet_probe_weight(nm),
             pdf: None,
@@ -309,7 +389,7 @@ impl Material for PacketProbe {
 fn packet_probe_weight(nm: f64) -> f64 {
     (((nm - 380.0) / 100.0).floor() + 1.0) * 0.2
 }
-fn packet_probe_scene(stop_blue: bool) -> (Scene, PacketRecords) {
+fn packet_probe_scene(stop_blue: bool) -> (RenderJob, PacketRecords) {
     let records = Arc::new(Mutex::new(Vec::new()));
     let scene = downward_plane_scene(Box::new(PacketProbe {
         records: records.clone(),
@@ -318,10 +398,10 @@ fn packet_probe_scene(stop_blue: bool) -> (Scene, PacketRecords) {
     (scene, records)
 }
 
-fn downward_plane_scene(material: Box<dyn Material>) -> Scene {
+fn downward_plane_scene(material: Box<dyn Material>) -> RenderJob {
     let mut scene = empty();
     scene.camera = spectral_caustics::camera::Camera::from_config(
-        &spectral_caustics::config::cameraconfig::CameraConfig {
+        &spectral_caustics::config::camera::CameraConfig {
             position: [0.0, 0.0, 2.0],
             target: [0.0; 3],
             up: [0.0, 1.0, 0.0],
@@ -329,7 +409,9 @@ fn downward_plane_scene(material: Box<dyn Material>) -> Scene {
         },
     )
     .unwrap();
-    scene.add_with_material(Box::new(Ground::new(0.0).unwrap()), material);
+    scene
+        .scene
+        .add(Box::new(Ground::new(0.0).unwrap()), material);
     scene
 }
 
@@ -337,9 +419,21 @@ fn downward_plane_scene(material: Box<dyn Material>) -> Scene {
 fn packet_four_shares_primary_rays_visits_every_fine_stratum_and_integrates_independent_scalars() {
     for spp in [4, 16, 512] {
         let (scene, records) = packet_probe_scene(false);
-        let image =
-            render_spectral_camera_with_packet(&scene, 1, 1, spp, 4, 42, IorMode::Dispersion)
-                .unwrap();
+        let image = spectral_caustics::integrator::camera::integrate_spectral(
+            &scene,
+            &spectral_caustics::config::render::RenderSetting {
+                width: 1,
+                height: 1,
+                camera_spp: spp,
+                spectral_packet_size: 4,
+                seed: 42,
+                mode: IorMode::Dispersion,
+                ..Default::default()
+            },
+            None,
+        )
+        .map(|images| images.combined)
+        .unwrap();
         let records = records.lock().unwrap();
         assert_eq!(records.len(), spp);
         let mut visits = vec![0; spp];
@@ -366,7 +460,7 @@ fn packet_four_shares_primary_rays_visits_every_fine_stratum_and_integrates_inde
             }
         }
         assert!(visits.iter().all(|&n| n == 1));
-        assert!((image.pixels[0] - expected).norm() < 1e-13);
+        assert!((image.pixels()[0] - expected).norm() < 1e-13);
     }
 }
 
@@ -380,14 +474,22 @@ fn packet_common_random_numbers_align_environment_and_continuation_samples() {
         fn supports_spectral(&self) -> bool {
             true
         }
-        fn evaluate(
+        fn evaluate_rgb(
             &self,
             wi: Vector3<f64>,
             wo: Vector3<f64>,
             n: Vector3<f64>,
-            mode: EvaluateMode,
-        ) -> BsdfValue {
-            self.inner.evaluate(wi, wo, n, mode)
+        ) -> Vector3<f64> {
+            self.inner.evaluate_rgb(wi, wo, n)
+        }
+        fn evaluate_spectral(
+            &self,
+            wi: Vector3<f64>,
+            wo: Vector3<f64>,
+            n: Vector3<f64>,
+            nm: f64,
+        ) -> f64 {
+            self.inner.evaluate_spectral(wi, wo, n, nm)
         }
         fn pdf(&self, wi: Vector3<f64>, wo: Vector3<f64>, n: Vector3<f64>) -> f64 {
             self.inner.pdf(wi, wo, n)
@@ -399,7 +501,7 @@ fn packet_common_random_numbers_align_environment_and_continuation_samples() {
             nm: f64,
             mode: IorMode,
             rng: &mut dyn RngCore,
-        ) -> Option<SpectralBsdfSample> {
+        ) -> Option<BsdfSample<f64>> {
             let draw = rng.next_u64();
             let sample = self.inner.sample_spectral(wo, n, nm, mode, rng)?;
             self.records.lock().unwrap().push((nm, sample.wi, draw));
@@ -411,12 +513,25 @@ fn packet_common_random_numbers_align_environment_and_continuation_samples() {
         inner: Lambertian::new(Vector3::repeat(0.8)).unwrap(),
         records: records.clone(),
     }));
-    scene.environment = Some(Environment::try_from(&EnvironmentConfig::default()).unwrap());
-    scene.environment_samples = 3;
-    scene.max_diffuse_bounces = 1;
-    let image =
-        render_spectral_camera_with_packet(&scene, 1, 1, 8, 4, 42, IorMode::Constant).unwrap();
-    assert!(image.pixels[0].y > 0.0);
+    scene.scene.environment = Some(Environment::try_from(&EnvironmentConfig::default()).unwrap());
+    scene.camera_options.environment_samples = 3;
+    scene.camera_options.max_diffuse_bounces = 1;
+    let image = spectral_caustics::integrator::camera::integrate_spectral(
+        &scene,
+        &spectral_caustics::config::render::RenderSetting {
+            width: 1,
+            height: 1,
+            camera_spp: 8,
+            spectral_packet_size: 4,
+            seed: 42,
+            mode: IorMode::Constant,
+            ..Default::default()
+        },
+        None,
+    )
+    .map(|images| images.combined)
+    .unwrap();
+    assert!(image.pixels()[0].y > 0.0);
     let records = records.lock().unwrap();
     // 每个 Lane 三次环境 BSDF 采样，再做一次续追 BSDF 采样；共两个 Packet。
     assert_eq!(records.len(), 32);
@@ -438,7 +553,7 @@ fn packet_common_random_numbers_align_environment_and_continuation_samples() {
 
 #[test]
 fn packet_common_fresnel_draws_align_constant_ior_without_forcing_dispersion_directions() {
-    type GlassRecords = Arc<Mutex<Vec<(f64, SpectralBsdfSample)>>>;
+    type GlassRecords = Arc<Mutex<Vec<(f64, BsdfSample<f64>)>>>;
     struct CaptureGlass {
         inner: Dielectric,
         records: GlassRecords,
@@ -453,14 +568,13 @@ fn packet_common_fresnel_draws_align_constant_ior_without_forcing_dispersion_dir
         fn has_non_delta(&self) -> bool {
             false
         }
-        fn evaluate(
+        fn evaluate_rgb(
             &self,
             wi: Vector3<f64>,
             wo: Vector3<f64>,
             n: Vector3<f64>,
-            mode: EvaluateMode,
-        ) -> BsdfValue {
-            self.inner.evaluate(wi, wo, n, mode)
+        ) -> Vector3<f64> {
+            self.inner.evaluate_rgb(wi, wo, n)
         }
         fn sample_spectral(
             &self,
@@ -469,7 +583,7 @@ fn packet_common_fresnel_draws_align_constant_ior_without_forcing_dispersion_dir
             nm: f64,
             mode: IorMode,
             rng: &mut dyn RngCore,
-        ) -> Option<SpectralBsdfSample> {
+        ) -> Option<BsdfSample<f64>> {
             let sample = self.inner.sample_spectral(wo, n, nm, mode, rng)?;
             self.records.lock().unwrap().push((nm, sample));
             Some(sample)
@@ -481,7 +595,21 @@ fn packet_common_fresnel_draws_align_constant_ior_without_forcing_dispersion_dir
             inner: Dielectric::with_dispersion(1.52, Some(Cauchy::default())).unwrap(),
             records: records.clone(),
         }));
-        render_spectral_camera_with_packet(&scene, 1, 1, 16, 4, 42, mode).unwrap();
+        spectral_caustics::integrator::camera::integrate_spectral(
+            &scene,
+            &spectral_caustics::config::render::RenderSetting {
+                width: 1,
+                height: 1,
+                camera_spp: 16,
+                spectral_packet_size: 4,
+                seed: 42,
+                mode,
+                ..Default::default()
+            },
+            None,
+        )
+        .map(|images| images.combined)
+        .unwrap();
         let records = records.lock().unwrap();
         assert_eq!(records.len(), 16);
         if mode == IorMode::Constant {
@@ -504,10 +632,37 @@ fn packet_common_fresnel_draws_align_constant_ior_without_forcing_dispersion_dir
 #[test]
 fn terminating_one_lane_preserves_other_lane_wavelengths_rays_rngs_and_radiance() {
     let (scene, reference) = packet_probe_scene(false);
-    render_spectral_camera_with_packet(&scene, 1, 1, 16, 4, 42, IorMode::Constant).unwrap();
+    spectral_caustics::integrator::camera::integrate_spectral(
+        &scene,
+        &spectral_caustics::config::render::RenderSetting {
+            width: 1,
+            height: 1,
+            camera_spp: 16,
+            spectral_packet_size: 4,
+            seed: 42,
+            mode: IorMode::Constant,
+            ..Default::default()
+        },
+        None,
+    )
+    .map(|images| images.combined)
+    .unwrap();
     let (scene, terminated) = packet_probe_scene(true);
-    let image =
-        render_spectral_camera_with_packet(&scene, 1, 1, 16, 4, 42, IorMode::Constant).unwrap();
+    let image = spectral_caustics::integrator::camera::integrate_spectral(
+        &scene,
+        &spectral_caustics::config::render::RenderSetting {
+            width: 1,
+            height: 1,
+            camera_spp: 16,
+            spectral_packet_size: 4,
+            seed: 42,
+            mode: IorMode::Constant,
+            ..Default::default()
+        },
+        None,
+    )
+    .map(|images| images.combined)
+    .unwrap();
     let reference = reference.lock().unwrap();
     let terminated = terminated.lock().unwrap();
     assert_eq!(*reference, *terminated);
@@ -516,9 +671,10 @@ fn terminating_one_lane_preserves_other_lane_wavelengths_rays_rngs_and_radiance(
         expected +=
             cie_xyz(nm).unwrap() * (packet_probe_weight(nm) * d65_spectrum(nm).unwrap() * 25.0);
     }
-    assert!((image.pixels[0] - expected).norm() < 1e-13);
+    assert!((image.pixels()[0] - expected).norm() < 1e-13);
 }
 
+#[cfg(feature = "diagnostics")]
 #[test]
 fn fixed_wavelength_camera_shares_rays_crn_and_keeps_scalar_radiance_units() {
     let (scene, records) = packet_probe_scene(false);
@@ -544,11 +700,12 @@ fn fixed_wavelength_camera_shares_rays_crn_and_keeps_scalar_radiance_units() {
     }
 }
 
+#[cfg(feature = "diagnostics")]
 #[test]
 fn fixed_wavelength_camera_is_thread_invariant_and_rejects_invalid_work() {
     let mut c = Config::from_json(include_str!("../configs/sphere_spectral.json")).unwrap();
     c.scene.environment_samples = 2;
-    let scene = Scene::from_config(&c.scene).unwrap();
+    let scene = c.build().unwrap();
     let wavelengths = [450.0, 550.0, 650.0, 550.0];
     for mode in [IorMode::Constant, IorMode::Dispersion] {
         let mut reference = None;
@@ -600,10 +757,24 @@ fn fixed_wavelength_camera_is_thread_invariant_and_rejects_invalid_work() {
 }
 
 #[test]
-fn packet_one_keeps_legacy_public_entry_and_seeded_primary_sampling() {
+fn packet_one_keeps_independent_seeded_primary_sampling() {
     use rand::Rng;
     let (scene, records) = packet_probe_scene(false);
-    let legacy = render_spectral_camera(&scene, 1, 1, 7, 42, IorMode::Constant).unwrap();
+    let reference = spectral_caustics::integrator::camera::integrate_spectral(
+        &scene,
+        &spectral_caustics::config::render::RenderSetting {
+            width: 1,
+            height: 1,
+            camera_spp: 7,
+            spectral_packet_size: 1,
+            seed: 42,
+            mode: IorMode::Constant,
+            ..Default::default()
+        },
+        None,
+    )
+    .map(|images| images.combined)
+    .unwrap();
     // pixel_seed(42, 0, CAMERA_STREAM=0) 的原种子；波长流和路径流不能扰动抖动。
     let mut jitter = StdRng::seed_from_u64(12058926934050108962);
     for &(_, wo, _) in records.lock().unwrap().iter() {
@@ -620,19 +791,16 @@ fn packet_one_keeps_legacy_public_entry_and_seeded_primary_sampling() {
         assert_eq!(-ray.direction, wo);
     }
     same(
-        &legacy,
-        &render_spectral_camera_with_packet(&scene, 1, 1, 7, 1, 42, IorMode::Constant).unwrap(),
-    );
-    same(
-        &legacy,
-        &Render::new(RenderSetting {
+        &reference,
+        &Renderer::new(RenderSetting {
             width: 1,
             height: 1,
             mode: IorMode::Constant,
             ..settings(7)
         })
         .unwrap()
-        .render_camera(&scene)
+        .render(&scene)
+        .map(|images| images.combined)
         .unwrap(),
     );
 }
@@ -642,12 +810,13 @@ fn packet_four_d65_white_and_energy_match_the_single_wavelength_integral() {
     let scene = empty();
     let expected = integrate(|nm| d65_spectrum(nm).unwrap());
     let image = |spp, packet| {
-        Render::new(RenderSetting {
+        Renderer::new(RenderSetting {
             spectral_packet_size: packet,
             ..settings(spp)
         })
         .unwrap()
-        .render_camera(&scene)
+        .render(&scene)
+        .map(|images| images.combined)
         .unwrap()
     };
     let low = mean(&image(16, 4));
@@ -669,38 +838,106 @@ fn packet_validation_rejects_invalid_sizes_quotas_and_overflow_before_allocation
     let scene = empty();
     for packet in [0, 2, 3, 8, usize::MAX] {
         assert!(
-            render_spectral_camera_with_packet(&scene, 1, 1, 16, packet, 42, IorMode::Constant)
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("1 或 4")
+            spectral_caustics::integrator::camera::integrate_spectral(
+                &scene,
+                &spectral_caustics::config::render::RenderSetting {
+                    width: 1,
+                    height: 1,
+                    camera_spp: 16,
+                    spectral_packet_size: packet,
+                    seed: 42,
+                    mode: IorMode::Constant,
+                    ..Default::default()
+                },
+                None
+            )
+            .map(|images| images.combined)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("1 或 4")
         );
     }
     for spp in [1, 2, 7] {
         assert!(
-            render_spectral_camera_with_packet(&scene, 1, 1, spp, 4, 42, IorMode::Constant)
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("整除")
+            spectral_caustics::integrator::camera::integrate_spectral(
+                &scene,
+                &spectral_caustics::config::render::RenderSetting {
+                    width: 1,
+                    height: 1,
+                    camera_spp: spp,
+                    spectral_packet_size: 4,
+                    seed: 42,
+                    mode: IorMode::Constant,
+                    ..Default::default()
+                },
+                None
+            )
+            .map(|images| images.combined)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("整除")
         );
     }
-    assert!(render_spectral_camera_with_packet(&scene, 1, 1, 0, 4, 42, IorMode::Constant).is_err());
     assert!(
-        render_spectral_camera_with_packet(&scene, 2, 1, usize::MAX - 3, 4, 42, IorMode::Constant)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("溢出")
+        spectral_caustics::integrator::camera::integrate_spectral(
+            &scene,
+            &spectral_caustics::config::render::RenderSetting {
+                width: 1,
+                height: 1,
+                camera_spp: 0,
+                spectral_packet_size: 4,
+                seed: 42,
+                mode: IorMode::Constant,
+                ..Default::default()
+            },
+            None
+        )
+        .map(|images| images.combined)
+        .is_err()
+    );
+    assert!(
+        spectral_caustics::integrator::camera::integrate_spectral(
+            &scene,
+            &spectral_caustics::config::render::RenderSetting {
+                width: 2,
+                height: 1,
+                camera_spp: usize::MAX - 3,
+                spectral_packet_size: 4,
+                seed: 42,
+                mode: IorMode::Constant,
+                ..Default::default()
+            },
+            None
+        )
+        .map(|images| images.combined)
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("溢出")
     );
     let mut overflow = scene;
-    overflow.environment_samples = usize::MAX / 8;
+    overflow.camera_options.environment_samples = usize::MAX / 8;
     assert!(
-        render_spectral_camera_with_packet(&overflow, 1, 1, 16, 4, 42, IorMode::Constant)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("溢出")
+        spectral_caustics::integrator::camera::integrate_spectral(
+            &overflow,
+            &spectral_caustics::config::render::RenderSetting {
+                width: 1,
+                height: 1,
+                camera_spp: 16,
+                spectral_packet_size: 4,
+                seed: 42,
+                mode: IorMode::Constant,
+                ..Default::default()
+            },
+            None
+        )
+        .map(|images| images.combined)
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("溢出")
     );
 }
 
@@ -715,25 +952,55 @@ fn packet_setting_preserves_rgb_camera_and_source_caustic_components() {
     c.render.wavelength_step_nm = 100.0;
     c.scene.environment = None;
     c.scene.max_diffuse_bounces = 0;
-    let scene = Scene::from_config(&c.scene).unwrap();
-    let one = Render::new(c.render.clone()).unwrap();
+    let scene = c.build().unwrap();
+    let one = Renderer::new(c.render.clone()).unwrap();
     c.render.spectral_packet_size = 4;
-    let four = Render::new(c.render.clone()).unwrap();
+    let four = Renderer::new(c.render.clone()).unwrap();
     same(
-        &one.render_camera(&scene).unwrap(),
-        &four.render_camera(&scene).unwrap(),
+        &one.render(&scene).map(|images| images.combined).unwrap(),
+        &four.render(&scene).map(|images| images.combined).unwrap(),
     );
-    let a = one.render_lighting(&scene).unwrap();
-    let b = four.render_lighting(&scene).unwrap();
-    same(&a.direct, &b.direct);
+    let a = spectral_caustics::integrator::photon::integrate_xyz(
+        &scene,
+        scene.photon.caustics_object_id,
+        scene.photon.ground_id.expect("receiver"),
+        (one).settings(),
+    )
+    .unwrap();
+    let b = spectral_caustics::integrator::photon::integrate_xyz(
+        &scene,
+        scene.photon.caustics_object_id,
+        scene.photon.ground_id.expect("receiver"),
+        (four).settings(),
+    )
+    .unwrap();
+    same(a.direct.as_ref().unwrap(), b.direct.as_ref().unwrap());
     same(&a.caustics, &b.caustics);
-    assert!(a.caustics.pixels.iter().any(|p| p.y > 0.0));
-    let a = one
-        .render_camera_glass_components(&scene, &a, 8, c.render.seed)
-        .unwrap();
-    let b = four
-        .render_camera_glass_components(&scene, &b, 8, c.render.seed)
-        .unwrap();
+    assert!(a.caustics.pixels().iter().any(|p| p.y > 0.0));
+    let a = spectral_caustics::integrator::camera::integrate_rgb(
+        &scene,
+        &spectral_caustics::config::render::RenderSetting {
+            width: (one).settings().width,
+            height: (one).settings().height,
+            camera_spp: 8,
+            seed: c.render.seed,
+            ..Default::default()
+        },
+        Some(&a),
+    )
+    .unwrap();
+    let b = spectral_caustics::integrator::camera::integrate_rgb(
+        &scene,
+        &spectral_caustics::config::render::RenderSetting {
+            width: (four).settings().width,
+            height: (four).settings().height,
+            camera_spp: 8,
+            seed: c.render.seed,
+            ..Default::default()
+        },
+        Some(&b),
+    )
+    .unwrap();
     for (x, y) in [
         (&a.direct, &b.direct),
         (&a.caustics, &b.caustics),
@@ -809,32 +1076,51 @@ fn spectral_glass_fresnel_probabilities_and_radiance_eta_weights_are_compensated
 #[test]
 fn sphere_two_spectral_interfaces_cancel_eta_weights_and_keep_one_wavelength() {
     let mut scene = empty();
-    scene.add_with_material(
+    scene.scene.add(
         Box::new(Sphere::new(Vector3::new(0.0, 0.0, 1.5), 0.8).unwrap()),
         Box::new(Dielectric::with_dispersion(1.52, Some(Cauchy::default())).unwrap()),
     );
     let mut directions = Vec::new();
     for nm in [450.0, 650.0] {
-        let mut state = SpectralPathState::new(
+        let mut state = CameraPathState::spectral(
             Ray::new(Vector3::new(0.4, 0.0, 3.0), -Vector3::z()).unwrap(),
             nm,
             0,
         )
         .unwrap();
-        trace_spectral_camera_path(
+        trace_camera_path(
             &scene,
             &mut state,
+            &mut CameraPathRngs {
+                camera: &mut FixedRng::new(u64::MAX),
+                environment: &mut FixedRng::new(0),
+                diffuse: &mut FixedRng::new(0),
+            },
+            scene
+                .scene
+                .light
+                .analytic_sun()
+                .unwrap()
+                .unwrap_or((Vector3::z(), 0.0))
+                .0,
+            scene
+                .scene
+                .light
+                .analytic_sun()
+                .unwrap()
+                .unwrap_or((Vector3::z(), 0.0))
+                .1,
+            (None).map_or(Caustics::None, Caustics::Spectral),
             IorMode::Dispersion,
-            &mut FixedRng::new(u64::MAX),
-            &mut FixedRng::new(0),
-            &mut FixedRng::new(0),
+            #[cfg(feature = "diagnostics")]
+            None,
         )
         .unwrap();
-        assert_eq!(state.wavelength_nm, nm);
+        assert_eq!(state.transport.wavelength_nm, nm);
         assert_eq!(state.path_depth, 2);
         assert_eq!(state.non_delta_bounces, 0);
         assert!((state.throughput - 1.0).abs() < 1e-12);
-        assert!((state.radiance - d65_spectrum(nm).unwrap()).abs() < 1e-12);
+        assert!((state.radiance.direct - d65_spectrum(nm).unwrap()).abs() < 1e-12);
         directions.push(state.ray.direction);
     }
     assert!((directions[0] - directions[1]).norm() > 1e-3);
@@ -860,14 +1146,7 @@ fn lambertian_and_mirror_spectral_weights_come_from_reconstruction_and_match_the
             assert_eq!(s.weight, rgb_reflectance(color, nm).unwrap());
             assert!(s.weight >= 0.0 && s.weight <= 1.0);
             if let Some(pdf) = s.pdf {
-                let BsdfValue::Spectral(f) = material.evaluate(
-                    s.wi,
-                    Vector3::z(),
-                    Vector3::z(),
-                    EvaluateMode::Spectral { wavelength_nm: nm },
-                ) else {
-                    panic!()
-                };
+                let f = material.evaluate_spectral(s.wi, Vector3::z(), Vector3::z(), nm);
                 assert_eq!(
                     pdf,
                     material.pdf_spectral(s.wi, Vector3::z(), Vector3::z(), nm)
@@ -883,14 +1162,14 @@ fn lambertian_and_mirror_spectral_weights_come_from_reconstruction_and_match_the
 #[test]
 fn scalar_direct_sun_matches_spectral_lambertian_and_spatial_flux_normalization() {
     let mut scene = ground_scene();
-    scene.light.as_parallel_mut().unwrap().total_flux = 8.0;
-    let strength = scene.light.sunlight().unwrap().1;
+    scene.scene.light.as_parallel_mut().unwrap().total_flux = 8.0;
+    let strength = scene.scene.light.sunlight().unwrap().1;
     for nm in [450.0, 550.0, 650.0] {
         let state = probe(&scene, nm, 0);
         let expected = rgb_reflectance(Vector3::repeat(0.8), nm).unwrap() / PI
             * strength
             * d65_spectrum(nm).unwrap();
-        assert!((state.radiance - expected).abs() < 1e-13);
+        assert!((state.radiance.direct - expected).abs() < 1e-13);
         assert_eq!(state.path_depth, 0);
         assert_eq!(state.throughput, 1.0);
     }
@@ -899,9 +1178,10 @@ fn scalar_direct_sun_matches_spectral_lambertian_and_spatial_flux_normalization(
             * strength
             * d65_spectrum(nm).unwrap()
     });
-    let high = Render::new(settings(4096))
+    let high = Renderer::new(settings(4096))
         .unwrap()
-        .render_camera(&scene)
+        .render(&scene)
+        .map(|images| images.combined)
         .unwrap();
     assert!((mean(&high) - expected).norm() < 0.002);
 }
@@ -914,24 +1194,30 @@ fn environment_nee_and_diffuse_escape_are_not_double_counted_and_hdr_gain_is_pre
         zenith_linear_rgb: [7.0; 3],
         ..EnvironmentConfig::default()
     };
-    scene.environment = Some(Environment::try_from(&environment).unwrap());
+    scene.scene.environment = Some(Environment::try_from(&environment).unwrap());
     for depth in [0, 1, 4] {
         let state = probe(&scene, 550.0, depth);
         let expected = rgb_reflectance(Vector3::repeat(0.8), 550.0).unwrap()
             * 7.0
             * d65_spectrum(550.0).unwrap();
-        assert!((state.radiance - expected).abs() < 1e-12);
+        assert!((state.radiance.direct - expected).abs() < 1e-12);
         assert_eq!(state.non_delta_bounces, usize::from(depth > 0));
     }
-    let before = probe(&scene, 450.0, 0).radiance;
-    scene.environment.as_mut().unwrap().intensity = 100.0;
-    assert!((probe(&scene, 450.0, 0).radiance - before * 100.0).abs() < 1e-12);
+    let before = probe(&scene, 450.0, 0).radiance.direct;
+    scene
+        .scene
+        .environment
+        .as_mut()
+        .unwrap()
+        .set_intensity(100.0)
+        .unwrap();
+    assert!((probe(&scene, 450.0, 0).radiance.direct - before * 100.0).abs() < 1e-12);
 }
 
 #[test]
 fn environment_escape_uses_full_scalar_throughput_only_after_delta() {
     let mut scene = empty();
-    scene.environment = Some(
+    scene.scene.environment = Some(
         Environment::try_from(&EnvironmentConfig {
             horizon_linear_rgb: [3.0; 3],
             zenith_linear_rgb: [3.0; 3],
@@ -945,19 +1231,38 @@ fn environment_escape_uses_full_scalar_throughput_only_after_delta() {
         (ScatterType::SpecularReflection, true),
     ] {
         let mut state =
-            SpectralPathState::new(Ray::new(Vector3::zeros(), Vector3::z()).unwrap(), 550.0, 4)
+            CameraPathState::spectral(Ray::new(Vector3::zeros(), Vector3::z()).unwrap(), 550.0, 4)
                 .unwrap();
         state.has_non_delta_vertex = true;
         state.last_scatter = Some(event);
         state.throughput = 0.2;
-        state.radiance = 0.123;
-        trace_spectral_camera_path(
+        state.radiance.direct = 0.123;
+        trace_camera_path(
             &scene,
             &mut state,
+            &mut CameraPathRngs {
+                camera: &mut FixedRng::new(0),
+                environment: &mut FixedRng::new(0),
+                diffuse: &mut FixedRng::new(0),
+            },
+            scene
+                .scene
+                .light
+                .analytic_sun()
+                .unwrap()
+                .unwrap_or((Vector3::z(), 0.0))
+                .0,
+            scene
+                .scene
+                .light
+                .analytic_sun()
+                .unwrap()
+                .unwrap_or((Vector3::z(), 0.0))
+                .1,
+            (None).map_or(Caustics::None, Caustics::Spectral),
             IorMode::Dispersion,
-            &mut FixedRng::new(0),
-            &mut FixedRng::new(0),
-            &mut FixedRng::new(0),
+            #[cfg(feature = "diagnostics")]
+            None,
         )
         .unwrap();
         let extra = if include {
@@ -965,7 +1270,7 @@ fn environment_escape_uses_full_scalar_throughput_only_after_delta() {
         } else {
             0.0
         };
-        assert!((state.radiance - 0.123 - extra).abs() < 1e-12);
+        assert!((state.radiance.direct - 0.123 - extra).abs() < 1e-12);
     }
 }
 
@@ -974,17 +1279,16 @@ struct Plane {
     normal: Vector3<f64>,
 }
 impl Hittable for Plane {
-    fn intersect(&self, ray: &Ray) -> Option<Hit> {
+    fn intersect(&self, ray: &Ray) -> Option<GeometryHit> {
         let t = (self.z - ray.origin.z) / ray.direction.z;
-        (t.is_finite() && t > 1e-6).then(|| Hit {
+        (t.is_finite() && t > 1e-6).then(|| GeometryHit {
             coords: ray.at(t),
             normal: self.normal,
             distance: t,
-            ..Hit::default()
         })
     }
 }
-fn chamber(diffuse: bool) -> Scene {
+fn chamber(diffuse: bool) -> RenderJob {
     let mut scene = empty();
     for (z, n) in [(-1.0, Vector3::z()), (1.0, -Vector3::z())] {
         let m: Box<dyn Material> = if diffuse {
@@ -992,7 +1296,7 @@ fn chamber(diffuse: bool) -> Scene {
         } else {
             Box::new(Mirror::new(Vector3::repeat(1.0)).unwrap())
         };
-        scene.add_with_material(Box::new(Plane { z, normal: n }), m);
+        scene.scene.add(Box::new(Plane { z, normal: n }), m);
     }
     scene
 }
@@ -1000,28 +1304,66 @@ fn chamber(diffuse: bool) -> Scene {
 #[test]
 fn spectral_paths_keep_the_32_delta_budget_and_roulette_after_three_continuous_connections() {
     let ray = Ray::new(Vector3::zeros(), Vector3::z()).unwrap();
-    let mut state = SpectralPathState::new(ray, 550.0, 0).unwrap();
-    trace_spectral_camera_path(
+    let mut state = CameraPathState::spectral(ray, 550.0, 0).unwrap();
+    trace_camera_path(
         &chamber(false),
         &mut state,
+        &mut CameraPathRngs {
+            camera: &mut FixedRng::new(0),
+            environment: &mut FixedRng::new(0),
+            diffuse: &mut FixedRng::new(0),
+        },
+        chamber(false)
+            .scene
+            .light
+            .analytic_sun()
+            .unwrap()
+            .unwrap_or((Vector3::z(), 0.0))
+            .0,
+        chamber(false)
+            .scene
+            .light
+            .analytic_sun()
+            .unwrap()
+            .unwrap_or((Vector3::z(), 0.0))
+            .1,
+        (None).map_or(Caustics::None, Caustics::Spectral),
         IorMode::Dispersion,
-        &mut FixedRng::new(0),
-        &mut FixedRng::new(0),
-        &mut FixedRng::new(0),
+        #[cfg(feature = "diagnostics")]
+        None,
     )
     .unwrap();
     assert_eq!(state.delta_events(), 32);
-    assert_eq!(state.radiance, 0.0);
+    assert_eq!(state.radiance.direct, 0.0);
     for depth in [0, 1, 2, 3, 4] {
-        let mut state = SpectralPathState::new(ray, 550.0, depth).unwrap();
+        let mut state = CameraPathState::spectral(ray, 550.0, depth).unwrap();
         let mut rng = FixedRng::new(u64::MAX);
-        trace_spectral_camera_path(
+        trace_camera_path(
             &chamber(true),
             &mut state,
+            &mut CameraPathRngs {
+                camera: &mut FixedRng::new(0),
+                environment: &mut FixedRng::new(0),
+                diffuse: &mut rng,
+            },
+            chamber(true)
+                .scene
+                .light
+                .analytic_sun()
+                .unwrap()
+                .unwrap_or((Vector3::z(), 0.0))
+                .0,
+            chamber(true)
+                .scene
+                .light
+                .analytic_sun()
+                .unwrap()
+                .unwrap_or((Vector3::z(), 0.0))
+                .1,
+            (None).map_or(Caustics::None, Caustics::Spectral),
             IorMode::Dispersion,
-            &mut FixedRng::new(0),
-            &mut FixedRng::new(0),
-            &mut rng,
+            #[cfg(feature = "diagnostics")]
+            None,
         )
         .unwrap();
         assert_eq!(state.non_delta_bounces, depth.min(3));
@@ -1029,7 +1371,7 @@ fn spectral_paths_keep_the_32_delta_budget_and_roulette_after_three_continuous_c
 }
 
 #[test]
-fn spectral_modes_repeat_bitwise_across_threads_and_rgb_entry_stays_compatible() {
+fn camera_modes_repeat_bitwise_across_threads_and_renderer_uses_integrators() {
     let mut c = Config::from_json(include_str!("../configs/sphere_spectral.json")).unwrap();
     c.render.width = 12;
     c.render.height = 10;
@@ -1047,15 +1389,16 @@ fn spectral_modes_repeat_bitwise_across_threads_and_rgb_entry_stays_compatible()
                 c.scene.environment_mis_heuristic = heuristic;
                 for depth in [0, 4] {
                     c.scene.max_diffuse_bounces = depth;
-                    let scene = Scene::from_config(&c.scene).unwrap();
+                    let scene = c.build().unwrap();
                     let mut reference = None;
                     for threads in [1, 2, 4, 1] {
                         c.render.thread_count = Some(threads);
-                        let image = Render::new(c.render.clone())
+                        let image = Renderer::new(c.render.clone())
                             .unwrap()
-                            .render_camera(&scene)
+                            .render(&scene)
+                            .map(|images| images.combined)
                             .unwrap();
-                        assert!(image.pixels.iter().any(|p| p.y > 0.0));
+                        assert!(image.pixels().iter().any(|p| p.y > 0.0));
                         if let Some(previous) = &reference {
                             same(&image, previous);
                         }
@@ -1065,17 +1408,27 @@ fn spectral_modes_repeat_bitwise_across_threads_and_rgb_entry_stays_compatible()
                 }
             }
         }
-        assert_ne!(modes[0].pixels, modes[4].pixels);
+        assert_ne!(modes[0].pixels(), modes[4].pixels());
     }
     c.render.camera_mode = CameraMode::Rgb;
-    let scene = Scene::from_config(&c.scene).unwrap();
-    let image = Render::new(c.render.clone())
+    let scene = c.build().unwrap();
+    let image = Renderer::new(c.render.clone())
         .unwrap()
-        .render_camera(&scene)
+        .render(&scene)
+        .map(|images| images.combined)
         .unwrap();
+    let lighting = spectral_caustics::integrator::photon::integrate_xyz(
+        &scene,
+        scene.photon.caustics_object_id,
+        scene.photon.ground_id.unwrap(),
+        &c.render,
+    )
+    .unwrap();
     same(
         &image,
-        &render_camera_glass(&scene, 12, 10, 12, c.render.seed).unwrap(),
+        &spectral_caustics::integrator::camera::integrate_rgb(&scene, &c.render, Some(&lighting))
+            .unwrap()
+            .combined,
     );
 }
 
@@ -1105,7 +1458,7 @@ fn spectral_hdri_balance_power_and_odd_quotas_converge_to_a_uniform_emitter() {
         .encode(&[image::Rgb([4.0_f32; 3]); 8], 4, 2)
         .unwrap();
     let mut scene = ground_scene();
-    scene.environment = Some(
+    scene.scene.environment = Some(
         Environment::try_from(&EnvironmentConfig {
             map_path: Some(path),
             ..EnvironmentConfig::default()
@@ -1118,29 +1471,48 @@ fn spectral_hdri_balance_power_and_odd_quotas_converge_to_a_uniform_emitter() {
         EnvironmentMisHeuristic::Balance,
         EnvironmentMisHeuristic::Power,
     ] {
-        scene.environment_mis_heuristic = heuristic;
+        scene.camera_options.environment_mis_heuristic = heuristic;
         for count in [1, 2, 3, 8] {
-            scene.environment_samples = count;
+            scene.camera_options.environment_samples = count;
             let mut environment = StdRng::seed_from_u64(42);
             let mut scattering = StdRng::seed_from_u64(43);
             let mut mean = 0.0;
             for _ in 0..8192 {
-                let mut state = SpectralPathState::new(
+                let mut state = CameraPathState::spectral(
                     Ray::new(Vector3::new(0.0, 0.0, 2.0), -Vector3::z()).unwrap(),
                     550.0,
                     0,
                 )
                 .unwrap();
-                trace_spectral_camera_path(
+                trace_camera_path(
                     &scene,
                     &mut state,
+                    &mut CameraPathRngs {
+                        camera: &mut scattering,
+                        environment: &mut environment,
+                        diffuse: &mut FixedRng::new(0),
+                    },
+                    scene
+                        .scene
+                        .light
+                        .analytic_sun()
+                        .unwrap()
+                        .unwrap_or((Vector3::z(), 0.0))
+                        .0,
+                    scene
+                        .scene
+                        .light
+                        .analytic_sun()
+                        .unwrap()
+                        .unwrap_or((Vector3::z(), 0.0))
+                        .1,
+                    (None).map_or(Caustics::None, Caustics::Spectral),
                     IorMode::Dispersion,
-                    &mut scattering,
-                    &mut environment,
-                    &mut FixedRng::new(0),
+                    #[cfg(feature = "diagnostics")]
+                    None,
                 )
                 .unwrap();
-                mean += state.radiance / 8192.0;
+                mean += state.radiance.direct / 8192.0;
             }
             assert!(
                 (mean / expected - 1.0).abs() < 0.025,
@@ -1171,11 +1543,18 @@ fn spectral_config_defaults_roundtrips_rejects_ggx_and_cli_renders_xyz_output() 
         .output()
         .unwrap();
     assert!(output.status.success(), "{:?}", output);
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Hero wavelength"));
+    assert!(!output.stdout.is_empty());
     let image = image::open(&c.render.output_path).unwrap().into_rgb8();
     assert_eq!(image.dimensions(), (16, 12));
     assert!(image.pixels().any(|p| p.0.iter().any(|v| *v > 0)));
-    assert!(!dir.0.join("camera_caustics.png").exists());
+    assert!(dir.0.join("camera_caustics.png").exists());
+    assert!(
+        image::open(dir.0.join("camera_caustics.png"))
+            .unwrap()
+            .into_rgb8()
+            .pixels()
+            .all(|p| p.0 == [0; 3])
+    );
     if let ObjectConfig::Sphere { material, .. } = &mut c.scene.objects[0] {
         *material = MaterialConfig::GgxMetal {
             eta: [0.2; 3],
@@ -1190,39 +1569,103 @@ fn spectral_config_defaults_roundtrips_rejects_ggx_and_cli_renders_xyz_output() 
     assert!(c.validate().unwrap_err().contains("GGX"));
     c.render.camera_mode = CameraMode::Rgb;
     assert!(c.validate().is_ok());
-    let scene = Scene::from_config(&c.scene).unwrap();
+    let scene = c.build().unwrap();
     assert!(
-        render_spectral_camera(&scene, 8, 6, 1, 42, IorMode::Dispersion)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("GGX")
+        spectral_caustics::integrator::camera::integrate_spectral(
+            &scene,
+            &spectral_caustics::config::render::RenderSetting {
+                width: 8,
+                height: 6,
+                camera_spp: 1,
+                spectral_packet_size: 1,
+                seed: 42,
+                mode: IorMode::Dispersion,
+                ..Default::default()
+            },
+            None
+        )
+        .map(|images| images.combined)
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("GGX")
     );
 }
 
 #[test]
 fn spectral_invalid_workloads_and_path_states_fail_explicitly() {
     let scene = empty();
-    assert!(render_spectral_camera(&scene, 8, 6, 0, 42, IorMode::Dispersion).is_err());
-    assert!(render_spectral_camera(&scene, 0, 6, 1, 42, IorMode::Dispersion).is_err());
+    assert!(
+        spectral_caustics::integrator::camera::integrate_spectral(
+            &scene,
+            &spectral_caustics::config::render::RenderSetting {
+                width: 8,
+                height: 6,
+                camera_spp: 0,
+                spectral_packet_size: 1,
+                seed: 42,
+                mode: IorMode::Dispersion,
+                ..Default::default()
+            },
+            None
+        )
+        .map(|images| images.combined)
+        .is_err()
+    );
+    assert!(
+        spectral_caustics::integrator::camera::integrate_spectral(
+            &scene,
+            &spectral_caustics::config::render::RenderSetting {
+                width: 0,
+                height: 6,
+                camera_spp: 1,
+                spectral_packet_size: 1,
+                seed: 42,
+                mode: IorMode::Dispersion,
+                ..Default::default()
+            },
+            None
+        )
+        .map(|images| images.combined)
+        .is_err()
+    );
     let ray = Ray::new(Vector3::zeros(), Vector3::z()).unwrap();
     for nm in [379.0, 781.0, f64::NAN] {
-        assert!(SpectralPathState::new(ray, nm, 0).is_err());
+        assert!(CameraPathState::spectral(ray, nm, 0).is_err());
     }
-    assert!(SpectralPathState::new(ray, 550.0, 1025).is_err());
+    assert!(CameraPathState::spectral(ray, 550.0, 1025).is_err());
     let mut bad_ray = ray;
     bad_ray.direction = Vector3::repeat(f64::NAN);
-    assert!(SpectralPathState::new(bad_ray, 550.0, 0).is_err());
-    let mut state = SpectralPathState::new(ray, 550.0, 0).unwrap();
+    assert!(CameraPathState::spectral(bad_ray, 550.0, 0).is_err());
+    let mut state = CameraPathState::spectral(ray, 550.0, 0).unwrap();
     state.throughput = f64::NAN;
     assert!(
-        trace_spectral_camera_path(
+        trace_camera_path(
             &scene,
             &mut state,
+            &mut CameraPathRngs {
+                camera: &mut FixedRng::new(0),
+                environment: &mut FixedRng::new(0),
+                diffuse: &mut FixedRng::new(0)
+            },
+            scene
+                .scene
+                .light
+                .analytic_sun()
+                .unwrap()
+                .unwrap_or((Vector3::z(), 0.0))
+                .0,
+            scene
+                .scene
+                .light
+                .analytic_sun()
+                .unwrap()
+                .unwrap_or((Vector3::z(), 0.0))
+                .1,
+            (None).map_or(Caustics::None, Caustics::Spectral),
             IorMode::Dispersion,
-            &mut FixedRng::new(0),
-            &mut FixedRng::new(0),
-            &mut FixedRng::new(0),
+            #[cfg(feature = "diagnostics")]
+            None
         )
         .is_err()
     );
@@ -1247,7 +1690,7 @@ fn colored_hdr_odd_mis_with_glass_occlusion_matches_independent_hemisphere_quadr
         .encode(&pixels, 8, 4)
         .unwrap();
     let mut scene = ground_scene();
-    scene.environment = Some(
+    scene.scene.environment = Some(
         Environment::try_from(&EnvironmentConfig {
             map_path: Some(path),
             rotation_degrees: 35.0,
@@ -1256,9 +1699,9 @@ fn colored_hdr_odd_mis_with_glass_occlusion_matches_independent_hemisphere_quadr
         })
         .unwrap(),
     );
-    scene.environment_samples = 3;
+    scene.camera_options.environment_samples = 3;
     // 摄像机位于遮挡球下方；球只遮挡地面的环境照明，局部 NEE 对玻璃仍采用二值可见性。
-    scene.add_with_material(
+    scene.scene.add(
         Box::new(Sphere::new(Vector3::z(), 0.4).unwrap()),
         Box::new(Dielectric::new(1.52).unwrap()),
     );
@@ -1277,7 +1720,13 @@ fn colored_hdr_odd_mis_with_glass_occlusion_matches_independent_hemisphere_quadr
                 let sin = (1.0 - cos * cos).sqrt();
                 let wi = Vector3::new(sin * phi.cos(), sin * phi.sin(), cos);
                 let li = rgb_emission(
-                    scene.environment.as_ref().unwrap().radiance(wi).unwrap(),
+                    scene
+                        .scene
+                        .environment
+                        .as_ref()
+                        .unwrap()
+                        .radiance(wi)
+                        .unwrap(),
                     nm,
                 )
                 .unwrap();
@@ -1288,22 +1737,41 @@ fn colored_hdr_odd_mis_with_glass_occlusion_matches_independent_hemisphere_quadr
             EnvironmentMisHeuristic::Balance,
             EnvironmentMisHeuristic::Power,
         ] {
-            scene.environment_mis_heuristic = heuristic;
+            scene.camera_options.environment_mis_heuristic = heuristic;
             let mut environment = StdRng::seed_from_u64(42);
             let mut scattering = StdRng::seed_from_u64(43);
             let mut estimate = 0.0;
             for _ in 0..32768 {
-                let mut state = SpectralPathState::new(ray, nm, 0).unwrap();
-                trace_spectral_camera_path(
+                let mut state = CameraPathState::spectral(ray, nm, 0).unwrap();
+                trace_camera_path(
                     &scene,
                     &mut state,
+                    &mut CameraPathRngs {
+                        camera: &mut scattering,
+                        environment: &mut environment,
+                        diffuse: &mut FixedRng::new(0),
+                    },
+                    scene
+                        .scene
+                        .light
+                        .analytic_sun()
+                        .unwrap()
+                        .unwrap_or((Vector3::z(), 0.0))
+                        .0,
+                    scene
+                        .scene
+                        .light
+                        .analytic_sun()
+                        .unwrap()
+                        .unwrap_or((Vector3::z(), 0.0))
+                        .1,
+                    (None).map_or(Caustics::None, Caustics::Spectral),
                     IorMode::Dispersion,
-                    &mut scattering,
-                    &mut environment,
-                    &mut FixedRng::new(0),
+                    #[cfg(feature = "diagnostics")]
+                    None,
                 )
                 .unwrap();
-                estimate += state.radiance / 32768.0;
+                estimate += state.radiance.direct / 32768.0;
             }
             assert!(
                 (estimate / reference - 1.0).abs() < 0.035,
@@ -1316,8 +1784,8 @@ fn colored_hdr_odd_mis_with_glass_occlusion_matches_independent_hemisphere_quadr
 #[test]
 fn deeper_continuation_does_not_consume_glass_prefix_or_first_environment_streams() {
     let mut scene = chamber(true);
-    scene.environment = Some(Environment::try_from(&EnvironmentConfig::default()).unwrap());
-    scene.add_with_material(
+    scene.scene.environment = Some(Environment::try_from(&EnvironmentConfig::default()).unwrap());
+    scene.scene.add(
         Box::new(Sphere::new(Vector3::zeros(), 0.25).unwrap()),
         Box::new(Dielectric::new(1.52).unwrap()),
     );
@@ -1328,14 +1796,33 @@ fn deeper_continuation_does_not_consume_glass_prefix_or_first_environment_stream
         let mut prefix = StdRng::seed_from_u64(42);
         let mut environment = StdRng::seed_from_u64(43);
         let mut continuation = StdRng::seed_from_u64(44);
-        let mut state = SpectralPathState::new(ray, 550.0, depth).unwrap();
-        trace_spectral_camera_path(
+        let mut state = CameraPathState::spectral(ray, 550.0, depth).unwrap();
+        trace_camera_path(
             &scene,
             &mut state,
+            &mut CameraPathRngs {
+                camera: &mut prefix,
+                environment: &mut environment,
+                diffuse: &mut continuation,
+            },
+            scene
+                .scene
+                .light
+                .analytic_sun()
+                .unwrap()
+                .unwrap_or((Vector3::z(), 0.0))
+                .0,
+            scene
+                .scene
+                .light
+                .analytic_sun()
+                .unwrap()
+                .unwrap_or((Vector3::z(), 0.0))
+                .1,
+            (None).map_or(Caustics::None, Caustics::Spectral),
             IorMode::Dispersion,
-            &mut prefix,
-            &mut environment,
-            &mut continuation,
+            #[cfg(feature = "diagnostics")]
+            None,
         )
         .unwrap();
         let values = (prefix.next_u64(), environment.next_u64());

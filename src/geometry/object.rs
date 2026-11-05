@@ -1,17 +1,16 @@
 //! 可求交物体的统一接口；具体的求交算法由各物体实现。
 
-use super::{hit::Hit, ray::Ray};
+use super::hit::GeometryHit as Hit;
+use super::ray::Ray;
 
 /// 实现此 trait 的类型可以接受光线查询，并允许并行追踪时共享只读引用。
 pub trait Hittable: Send + Sync {
-    /// 查找光线正向的最近几何交点。
+    /// 查询一条光线最先碰到物体的哪个位置，供相机、阴影和光子追踪共用。
     ///
-    /// - ray 的方向应为单位向量，此时 t 的单位是米。
-    /// - 实现时使用 epsilon 排除自相交，仅接受有限的正向距离。
-    /// - 当前几何求交不读取 ray.t_min、ray.t_max，两个字段保留待后续查询使用。
-    /// - 没有命中或计算结果非有限时，返回 None。
-    /// - 求交算法负责填写 Hit，并通过 Some(hit) 返回命中记录。
+    /// 输入：世界空间 Ray，方向应为单位向量，因此距离 t 的单位为米。
     ///
-    /// 此处只定义接口；三角形、网格等类型各自实现具体算法。
+    /// 输出：最近的有限正向交点 Some(Hit)；未命中或数值无效时返回 None。
+    /// 求交须排除 t≤INTERSECTION_EPSILON 的自交。
+    /// 几何只填写坐标、法线和距离，物体/材质编号由 RenderJob::intersect 补充。
     fn intersect(&self, ray: &Ray) -> Option<Hit>;
 }

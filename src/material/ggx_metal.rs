@@ -1,7 +1,12 @@
 //! RGB 各向同性单次散射金属；缺失的微表面多次散射能量不补偿。
-use super::{BsdfSample, BsdfValue, EvaluateMode, Material, ScatterType, ggx, unit_vector};
+use super::BsdfSample;
+use super::Material;
+use super::ScatterType;
+use super::ggx;
+use super::unit_vector;
 use nalgebra::Vector3;
-use rand::{Rng, RngCore};
+use rand::Rng;
+use rand::RngCore;
 
 /// alpha=roughness²；极小粗糙度切换为理想镜面，避免尖峰的数值不稳定。
 pub const SMOOTH_ROUGHNESS: f64 = 1e-3;
@@ -13,8 +18,11 @@ pub struct GgxMetal {
     roughness: f64,
 }
 impl GgxMetal {
-    /// eta/k 为相对于空气的 RGB 复折射率参数，不是实测光谱数据。
-    /// eta>0，k>=0，roughness∈[0,1]，所有分量必须有限。
+    /// 创建单次散射的各向同性 GGX 金属。
+    ///
+    /// 输入：RGB 复折射率参数 eta/k（相对空气）和 roughness∈`[0,1]`，所有值有限且 eta>0、k≥0。
+    ///
+    /// 输出：GgxMetal；参数无效返回 Err。只支持 RGB，没有对应的实测光谱模型。
     pub fn new(eta: Vector3<f64>, k: Vector3<f64>, roughness: f64) -> Result<Self, String> {
         if eta.iter().any(|v| !v.is_finite() || *v <= 0.0) {
             return Err("material.eta 的三个分量必须有限且大于零".into());
@@ -27,35 +35,41 @@ impl GgxMetal {
         }
         Ok(Self { eta, k, roughness })
     }
+    /// 判断粗糙度是否小到应采用理想镜面；返回 roughness≤1e-3，供求值和采样选择一致的分支。
     fn smooth(&self) -> bool {
         self.roughness <= SMOOTH_ROUGHNESS
     }
+    /// 把材质粗糙度转换为 GGX 分布参数，返回 α=roughness²。
     fn alpha(&self) -> f64 {
         self.roughness * self.roughness
     }
 }
 impl Material for GgxMetal {
-    fn evaluate(
+    /// 计算金属将 wi 方向入射光反射到 wo 的 RGB BRDF。
+    ///
+    /// 输入：wi/wo、法线及求值模式；输出：f=F·D·G/(4cosθ_i cosθ_o)，单位 sr⁻¹。
+    /// F 为导体 Fresnel、D 为 GGX 法线分布、G 为 Smith 遮蔽；不补偿微表面多次散射。
+    /// 背面、非法数值、光谱模式或理想镜面分支返回零；镜面分支通过 sample 计光。
+    fn evaluate_rgb(
         &self,
         wi: Vector3<f64>,
         wo: Vector3<f64>,
         normal: Vector3<f64>,
-        mode: EvaluateMode,
-    ) -> BsdfValue {
+    ) -> Vector3<f64> {
         // RGB eta/k 没有唯一的光谱解释；此材质不提供光谱 BSDF。
-        if mode != EvaluateMode::Rgb || self.smooth() {
-            return BsdfValue::zero(mode);
+        if false || self.smooth() {
+            return Vector3::zeros();
         }
         let (Some(wi), Some(wo), Some(n)) = (unit_vector(wi), unit_vector(wo), unit_vector(normal))
         else {
-            return BsdfValue::zero(mode);
+            return Vector3::zeros();
         };
         let (ci, co) = (n.dot(&wi), n.dot(&wo));
         if ci <= 0.0 || co <= 0.0 {
-            return BsdfValue::zero(mode);
+            return Vector3::zeros();
         }
         let Some(h) = unit_vector(wi + wo) else {
-            return BsdfValue::zero(mode);
+            return Vector3::zeros();
         };
         let d = ggx::d(n.dot(&h).clamp(0.0, 1.0), self.alpha());
         let g = ggx::g(ci, co, self.alpha());
@@ -63,11 +77,15 @@ impl Material for GgxMetal {
         // 先约去一个余弦，避免 ci*co 在近切线方向提前下溢。
         let value = f * (d * (g / ci) / (4.0 * co));
         if value.iter().all(|v| v.is_finite()) {
-            BsdfValue::Rgb(value)
+            value
         } else {
-            BsdfValue::zero(mode)
+            Vector3::zeros()
         }
     }
+    /// 给 RGB 金属路径采样下一次反射，并提供完整权重。
+    ///
+    /// 输入：wo、法线和 RNG；输出：反射方向 wi、权重、PDF 与事件，无效反射返回 None 且不补采。
+    /// 光滑分支 wi=2(n·wo)n-wo，W=F，pdf=None；粗糙分支先采 h，再反射，W=f·cosθ_i/p。
     fn sample(
         &self,
         wo: Vector3<f64>,
@@ -98,9 +116,7 @@ impl Material for GgxMetal {
         if !pdf.is_finite() || pdf <= 0.0 {
             return None;
         }
-        let BsdfValue::Rgb(f) = self.evaluate(wi, wo, n, EvaluateMode::Rgb) else {
-            return None;
-        };
+        let f = self.evaluate_rgb(wi, wo, n);
         let weight = f * (n.dot(&wi) / pdf);
         if !weight.iter().all(|v| v.is_finite() && *v >= 0.0) {
             return None;
@@ -112,6 +128,10 @@ impl Material for GgxMetal {
             event: ScatterType::GlossyReflection,
         })
     }
+    /// 查询 GGX 反射方向的采样密度，供路径权重与环境 MIS 使用。
+    ///
+    /// 输入：wi/wo 和法线；输出：p=D(h)|n·h|/(4|wo·h|)，h=normalize(wi+wo)。
+    /// 光滑 Delta 分支、非法方向或无效半球返回 0。
     fn pdf(&self, wi: Vector3<f64>, wo: Vector3<f64>, normal: Vector3<f64>) -> f64 {
         if self.smooth() {
             return 0.0;
@@ -122,9 +142,11 @@ impl Material for GgxMetal {
         };
         ggx::reflection_pdf(wi, wo, n, self.alpha())
     }
+    /// 返回是否采用粗糙 GGX 分支；为 true 时可以用 BRDF/PDF 做直接光积分。
     fn has_non_delta(&self) -> bool {
         !self.smooth()
     }
+    /// 返回是否采用理想镜面分支；为 true 时路径按离散反射事件推进。
     fn has_delta(&self) -> bool {
         self.smooth()
     }

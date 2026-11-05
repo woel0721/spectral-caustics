@@ -1,41 +1,23 @@
-//! 材质定义 BSDF 与完整采样权重；几何负责求交，积分器负责计光和路径推进。
+//! 描述光碰到表面后怎样反射或透射，向积分器提供散射值和下一条光线的采样记录。
+//!
+//! BSDF 是表面散射分布函数：给定入射/出射方向，描述光在这些方向之间的分配；
+//! 只有反射时也称 BRDF。PDF 是采样的概率密度，方向 PDF 的单位为 sr⁻¹（每球面度）。
+//! wi/wo 都从交点向外指，分别指向光源/上一顶点；normal 为世界空间几何法线。
+//! Delta 表示理想镜面或透射的离散方向事件，不能用普通方向密度计算其贡献。
+//! 采样权重 W 已包含 BSDF、余弦和概率补偿，积分器只需把路径权重 β 乘以 W。
 
+pub mod checkerboard;
 pub mod dielectric;
 mod ggx;
 pub mod ggx_metal;
 pub mod lambertian;
 pub mod mirror;
 
-use crate::config::materialconfig::MaterialConfig;
+use crate::config::material::MaterialConfig;
 use dielectric::Dielectric;
 use lambertian::Lambertian;
 use nalgebra::Vector3;
 use rand::RngCore;
-
-/// BSDF 求值模式；光谱模式携带要查询的波长（nm）。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum EvaluateMode {
-    Rgb,
-    Spectral { wavelength_nm: f64 },
-}
-
-/// BSDF 数值（sr⁻¹），变体与传入的 EvaluateMode 对应。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BsdfValue {
-    /// 三通道线性 RGB BSDF。
-    Rgb(Vector3<f64>),
-    /// 单个波长的标量 BSDF，不含 CIE 或波长积分权重。
-    Spectral(f64),
-}
-
-impl BsdfValue {
-    fn zero(mode: EvaluateMode) -> Self {
-        match mode {
-            EvaluateMode::Rgb => Self::Rgb(Vector3::zeros()),
-            EvaluateMode::Spectral { .. } => Self::Spectral(0.0),
-        }
-    }
-}
 
 /// 采样到的散射事件，描述事件本身而非具体材质。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,53 +28,57 @@ pub enum ScatterType {
     SpecularTransmission,
 }
 impl ScatterType {
+    /// 判断本次事件是否为理想镜面反射/透射；返回 true 时应使用离散事件权重，而非普通方向 PDF。
     pub fn is_delta(self) -> bool {
         matches!(self, Self::SpecularReflection | Self::SpecularTransmission)
     }
 }
 
-/// RGB radiance 传输的一次完整 BSDF 采样。
+/// A sampled direction and fully compensated radiance weight. Delta has no solid-angle PDF.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BsdfSample {
-    /// 从交点向外指的单位世界方向。
+pub struct BsdfSample<V = Vector3<f64>> {
     pub wi: Vector3<f64>,
-    /// 连续事件为 f * |n·wi| / p；Delta 已除离散选择概率。
-    /// Dielectric 透射已包含 (eta_i/eta_t)²，调用方只乘一次。
-    pub weight: Vector3<f64>,
-    /// 相对于立体角的完整采样密度（含混合分量选择概率）；Delta 为 None。
+    pub weight: V,
     pub pdf: Option<f64>,
     pub event: ScatterType,
 }
-
-/// 独立的单波长 radiance 采样；权重含 f*cos/pdf 或已补偿概率的 Delta 权重。
-/// 不包含 CIE 匹配函数、光谱采样 PDF 或光源光谱。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SpectralBsdfSample {
-    pub wi: Vector3<f64>,
-    pub weight: f64,
-    pub pdf: Option<f64>,
-    pub event: ScatterType,
-}
-
-/// 可通过 `Box<dyn Material>` 保存和并行只读访问的运行时材质。
 pub trait Material: Send + Sync {
-    /// 显式声明光谱采样能力；RGB eta/k 的 GGX 等模型不能自动退化为单通道。
-    fn supports_spectral(&self) -> bool {
-        false
+    fn evaluate_rgb(
+        &self,
+        wi: Vector3<f64>,
+        wo: Vector3<f64>,
+        normal: Vector3<f64>,
+    ) -> Vector3<f64>;
+    fn evaluate_spectral(
+        &self,
+        _wi: Vector3<f64>,
+        _wo: Vector3<f64>,
+        _normal: Vector3<f64>,
+        _wavelength_nm: f64,
+    ) -> f64 {
+        0.0
     }
-
+    fn sample(
+        &self,
+        _wo: Vector3<f64>,
+        _normal: Vector3<f64>,
+        _rng: &mut dyn RngCore,
+    ) -> Option<BsdfSample> {
+        None
+    }
     fn sample_spectral(
         &self,
         _wo: Vector3<f64>,
         _normal: Vector3<f64>,
         _wavelength_nm: f64,
-        _ior_mode: crate::optics::iormode::IorMode,
+        _ior_mode: crate::optics::dispersion::IorMode,
         _rng: &mut dyn RngCore,
-    ) -> Option<SpectralBsdfSample> {
+    ) -> Option<BsdfSample<f64>> {
         None
     }
-
-    /// 本阶段 Lambertian 的方向 PDF 与波长无关；Delta 材质仍为零。
+    fn pdf(&self, _wi: Vector3<f64>, _wo: Vector3<f64>, _normal: Vector3<f64>) -> f64 {
+        0.0
+    }
     fn pdf_spectral(
         &self,
         wi: Vector3<f64>,
@@ -102,78 +88,32 @@ pub trait Material: Send + Sync {
     ) -> f64 {
         self.pdf(wi, wo, normal)
     }
-    /// 按 mode 返回给定方向的 BSDF 值，单位为 sr⁻¹。
-    ///
-    /// wi、wo 均从交点向外指：wi 指向光源，wo 指向观察者。
-    /// normal 是世界空间表面法线；调用方可按需要先将它朝向 wo。
-    /// 输入方向会归一化；零向量、非有限值或模长溢出返回零。
-    /// Rgb 返回 BsdfValue::Rgb；Lambertian 为 albedo / π。
-    /// Spectral 返回 BsdfValue::Spectral；Lambertian 为 rho(λ) / π。
-    /// wavelength_nm 必须为正有限值，否则返回光谱标量零。
-    /// 此值不含入射辐亮度、CIE、余弦项、PDF、波长积分权重、曝光或 sRGB 编码。
-    /// 非法输入、无效反射方向及理想 delta 材质返回对应 mode 的零值；
-    /// delta 贡献通过 sample 返回的离散记录计算，XYZ 转换由积分器处理。
-    fn evaluate(
-        &self,
-        wi: Vector3<f64>,
-        wo: Vector3<f64>,
-        normal: Vector3<f64>,
-        mode: EvaluateMode,
-    ) -> BsdfValue;
-
-    /// 返回已包含 BSDF、余弦和完整采样概率的 RGB throughput weight。
-    /// wo 与 normal 必须有效；normal 保留朝外几何方向，介质自行判断内外。
-    /// 混合材质按原始概率选择事件，不能重采样被拒绝的方向。
-    fn sample(
-        &self,
-        _wo: Vector3<f64>,
-        _normal: Vector3<f64>,
-        _rng: &mut dyn RngCore,
-    ) -> Option<BsdfSample> {
-        None
+    fn supports_spectral(&self) -> bool {
+        false
     }
-
-    /// sample 在给定 wo 时生成 wi 的条件概率密度 p(wi | wo)，相对于立体角 dω。
-    ///
-    /// 单位为 sr⁻¹；输入方向会归一化。非法方向或采样范围外返回 0.0。
-    /// Lambertian 正半球内为 max(normal · wi, 0) / π，不含 albedo 或 BSDF 值。
-    /// 默认返回 0.0；理想 delta 材质的普通方向密度也为零，不能视为离散事件概率。
-    fn pdf(&self, _wi: Vector3<f64>, _wo: Vector3<f64>, _normal: Vector3<f64>) -> f64 {
-        0.0
-    }
-
-    /// 是否存在可由 evaluate/pdf 处理的连续分量；混合材质可同时返回两种能力。
     fn has_non_delta(&self) -> bool {
         true
     }
     fn has_delta(&self) -> bool {
         false
     }
-
-    /// 方向无关的 Lambertian RGB 反射率；仅用于无方向信息的辐照度图绑定。
-    /// 默认不支持该绑定，不能从单个方向的 BSDF 值推测材质类型。
     fn irradiance_reflectance(&self) -> Option<Vector3<f64>> {
         None
     }
-
-    /// 理想双界面介质的折射率；Some 显式允许独立的玻璃光谱焦散算法。
-    /// 粗糙/其他透射模型不得借此声明兼容。
     fn ior(&self) -> Option<f64> {
         None
     }
-
-    /// 独立的光源双透射通量追踪接口，不改变 RGB BSDF 采样。
-    /// 无色散的理想介质可以直接复用 ior；其他材质仍返回 None。
     fn photon_ior(
         &self,
         _wavelength_nm: Option<f64>,
-        _mode: crate::optics::iormode::IorMode,
+        _mode: crate::optics::dispersion::IorMode,
     ) -> Option<f64> {
         self.ior()
     }
 }
-
-/// JSON 保留可序列化的 enum，运行时构建为具体材质的 trait object。
+/// 将可序列化的材质配置构建为运行时材质，供场景绑定和并行追踪。
+///
+/// 输入：MaterialConfig；输出：`Box<dyn Material>`，参数无效返回 Err。
 pub fn from_config(config: &MaterialConfig) -> Result<Box<dyn Material>, String> {
     match config {
         MaterialConfig::Lambertian { albedo } => {
@@ -193,12 +133,12 @@ pub fn from_config(config: &MaterialConfig) -> Result<Box<dyn Material>, String>
     }
 }
 
-/// 将局部方向转换到世界空间，局部 +Z 对应归一化后的表面法线。
+/// 把法线局部坐标系中的向量变为世界向量，供半球方向和圆盘位置采样使用。
 ///
-/// 围绕法线构造确定的右手正交基 (tangent, bitangent, normal)，
-/// 返回 local.x * tangent + local.y * bitangent + local.z * normal。
-/// 保留方向长度和局部 z 的正负；零向量仍返回零，不做平移或额外归一化。
-/// 非有限局部分量、无法归一化的法线或计算溢出返回 None。
+/// 输入：局部向量 local 和有效法线 normal；输出：世界向量，非有限、法线退化或溢出返回 None。
+///
+/// 公式：world=local.x·t+local.y·b+local.z·n，(t,b,n) 为围绕单位法线构建的右手正交基。
+/// 局部 +Z 对应法线方向；不平移、不额外归一化，保留向量长度及局部 z 的正负。
 pub fn to_world(local: Vector3<f64>, normal: Vector3<f64>) -> Option<Vector3<f64>> {
     if !local.iter().all(|value| value.is_finite()) {
         return None;
@@ -216,6 +156,9 @@ pub fn to_world(local: Vector3<f64>, normal: Vector3<f64>) -> Option<Vector3<f64
     world.iter().all(|value| value.is_finite()).then_some(world)
 }
 
+/// 将输入向量归一化，供材质和照明共用方向校验。
+///
+/// 输入：有限非零 vector；输出：vector/‖vector‖，长度为零、非有限或模长溢出返回 None。
 pub(crate) fn unit_vector(vector: Vector3<f64>) -> Option<Vector3<f64>> {
     if !vector.iter().all(|value| value.is_finite()) {
         return None;

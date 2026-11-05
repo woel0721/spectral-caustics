@@ -4,7 +4,8 @@ pub mod map;
 
 pub use map::EnvironmentMap;
 
-use crate::{config::sceneconfig::EnvironmentConfig, material::unit_vector};
+use crate::config::scene::EnvironmentConfig;
+use crate::material::unit_vector;
 use nalgebra::Vector3;
 use rand::RngCore;
 use std::error::Error;
@@ -22,17 +23,21 @@ pub struct EnvironmentSample {
 /// 全部为相对线性 RGB 辐亮度，解析太阳仍由 Scene.light 独立提供。
 #[derive(Debug)]
 pub struct Environment {
-    pub horizon_color: Vector3<f64>,
-    pub zenith_color: Vector3<f64>,
-    pub intensity: f64,
+    horizon_color: Vector3<f64>,
+    zenith_color: Vector3<f64>,
+    intensity: f64,
     map: Option<EnvironmentMap>,
     /// 构建时缓存正旋转角的 (sin, cos)，查询时使用其逆变换。
     rotation_sin_cos: (f64, f64),
 }
 
 impl TryFrom<&EnvironmentConfig> for Environment {
-    type Error = Box<dyn Error>;
+    type Error = Box<dyn Error + Send + Sync>;
 
+    /// 把环境配置构建为可反复查询的运行时环境，避免渲染期间反复读取 HDR 文件。
+    ///
+    /// 输入：EnvironmentConfig；输出：Environment，配置无效或 HDR 加载失败返回 Err。
+    /// 缓存绕 Z 旋转的 sin/cos；有 map_path 时加载 HDR，否则使用地平线到天顶的渐变。
     fn try_from(config: &EnvironmentConfig) -> Result<Self, Self::Error> {
         config.validate()?;
         let map = config
@@ -64,17 +69,17 @@ impl TryFrom<&EnvironmentConfig> for Environment {
 }
 
 impl Environment {
-    /// 是否加载了 HDRI；积分器据此选择混合采样，渐变天空保留原 BSDF 随机流。
+    /// 返回是否已加载 HDR 贴图；积分器据此选择环境与材质的混合方向采样。
     pub fn has_map(&self) -> bool {
         self.map.is_some()
     }
 
-    /// HDRI 局部方向经 Rz(+rotation) 转到世界；渐变天空暂用均匀球面采样。
-    /// 采样缓存只读，强度不参与归一化 PDF；非法运行时参数不消耗 RNG。
+    /// 从环境分布抽取一个方向，供环境直接光积分使用。
+    ///
+    /// 输入：调用方的可变 RNG；输出：世界单位方向及其完整 PDF（sr⁻¹），数值奇异时返回 None。
+    /// HDR 方向由局部空间按 Rz(+rotation) 旋到世界；渐变环境此接口采用均匀球面 p=1/(4π)。
+    /// 环境亮度倍率不改变归一化后的采样 PDF。
     pub fn sample_direction(&self, rng: &mut dyn RngCore) -> Option<EnvironmentSample> {
-        if !self.is_valid() {
-            return None;
-        }
         let Some(map) = &self.map else {
             return Some(map::sample_uniform_sphere(rng));
         };
@@ -91,12 +96,11 @@ impl Environment {
         })
     }
 
-    /// 世界方向用 Rz(-rotation) 查询同一分布；纯旋转不改变立体角密度。
-    /// 有限非零方向会归一化，NaN、Infinity 和零向量返回 None。
+    /// 查询环境采样生成某个世界方向的概率，供 MIS 比较采样策略。
+    ///
+    /// 输入：有限非零 direction（内部归一化）；输出：完整立体角密度，单位 sr⁻¹，无效时 None。
+    /// HDR 先用 Rz(-rotation) 转回贴图方向；旋转不改变密度，渐变环境返回 1/(4π)。
     pub fn pdf_direction(&self, direction: Vector3<f64>) -> Option<f64> {
-        if !self.is_valid() {
-            return None;
-        }
         let direction = map::normalized_direction(direction)?;
         let Some(map) = &self.map else {
             return Some(map::UNIFORM_SPHERE_PDF);
@@ -109,23 +113,46 @@ impl Environment {
         ))
     }
 
-    pub fn is_valid(&self) -> bool {
+    pub fn horizon_color(&self) -> Vector3<f64> {
         self.horizon_color
+    }
+    pub fn zenith_color(&self) -> Vector3<f64> {
+        self.zenith_color
+    }
+    pub fn intensity(&self) -> f64 {
+        self.intensity
+    }
+    /// Validate an external intensity change without reloading the HDR map.
+    pub fn set_intensity(&mut self, intensity: f64) -> Result<(), &'static str> {
+        if !intensity.is_finite() || intensity < 0.0 {
+            return Err("environment intensity must be finite and nonnegative");
+        }
+        self.intensity = intensity;
+        Ok(())
+    }
+    pub fn set_gradient(
+        &mut self,
+        horizon: Vector3<f64>,
+        zenith: Vector3<f64>,
+    ) -> Result<(), &'static str> {
+        if horizon
             .iter()
-            .chain(self.zenith_color.iter())
-            .all(|value| value.is_finite() && *value >= 0.0)
-            && self.intensity.is_finite()
-            && self.intensity >= 0.0
-            && self.rotation_sin_cos.0.is_finite()
-            && self.rotation_sin_cos.1.is_finite()
+            .chain(zenith.iter())
+            .any(|v| !v.is_finite() || *v < 0.0)
+        {
+            return Err("environment colors must be finite and nonnegative");
+        }
+        self.horizon_color = horizon;
+        self.zenith_color = zenith;
+        Ok(())
     }
 
-    /// 相机背景和环境照明都查询这里；保留 HDR，不加曝光、sRGB 编码或裁剪。
-    /// 正角度表示环境绕 +Z 旋转，贴图查询方向为 Rz(-rotation) * direction。
+    /// 沿给定方向读取环境的线性 RGB 辐亮度，供相机背景和环境照明共用。
+    ///
+    /// 输入：世界方向 direction；输出：保留 HDR 的 RGB，无效方向、参数或结果溢出时 None。
+    /// HDR 查询 L=intensity·map(Rz(-rotation)d)；渐变用 t=clamp(normalize(d).z,0,1)，
+    /// L=intensity·[(1-t)·horizon+t·zenith]，下半球保持地平线颜色；不加曝光或显示编码。
     pub fn radiance(&self, direction: Vector3<f64>) -> Option<Vector3<f64>> {
-        if !self.is_valid() {
-            return None;
-        }
         let sampled = if let Some(map) = &self.map {
             if !direction.iter().all(|value| value.is_finite()) {
                 return None;

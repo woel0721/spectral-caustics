@@ -1,16 +1,19 @@
 //! Z-up 经纬度环境贴图；U 水平周期采样，V 在图片上下边界夹紧。
 
 use super::EnvironmentSample;
-use image::{DynamicImage, ImageDecoder, codecs::hdr::HdrDecoder};
+use image::DynamicImage;
+use image::ImageDecoder;
+use image::codecs::hdr::HdrDecoder;
 use nalgebra::Vector3;
-use rand::{Rng, RngCore};
-use std::{
-    error::Error,
-    f64::consts::{PI, TAU},
-    fs::File,
-    io::{BufReader, Read},
-    path::Path,
-};
+use rand::Rng;
+use rand::RngCore;
+use std::error::Error;
+use std::f64::consts::PI;
+use std::f64::consts::TAU;
+use std::fs::File;
+use std::io::BufReader;
+use std::io::Read;
+use std::path::Path;
 
 /// 非黑贴图的采样分布：95% 亮度重要性 + 5% 均匀球面，确保黑像素也有支持。
 const IMPORTANCE_FRACTION: f64 = 0.95;
@@ -30,23 +33,28 @@ pub struct EnvironmentMap {
 }
 
 impl EnvironmentMap {
-    /// 只解码 Radiance RGBE HDR，不通过 8-bit 或普通图片转换路径。
-    /// 使用 image 支持的标准 -Y +X 排列（从上到下、从左到右）；其他排列返回错误。
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, Box<dyn Error>> {
+    /// 读取一张 Radiance RGBE HDR，保留浮点亮度并预建采样分布。
+    ///
+    /// 输入：文件路径；输出：EnvironmentMap，文件、解码或像素校验失败时 Err。
+    /// 只支持标准 -Y +X（从上到下、从左到右）排列，不经过 8 位或 sRGB 转换。
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, Box<dyn Error + Send + Sync>> {
         Self::decode(BufReader::new(File::open(path)?))
     }
 
-    /// direction 指向所查询的世界方向，内部先归一化；零向量和非有限方向返回 None。
-    /// +Z/-Z 对应顶部/底部；+X、+Y、-Y 分别对应 U=0.5、0.75、0.25。
-    /// -X 为 U=0/1 的接缝，极点统一取 U=0.5（经度任意）；只访问已缓存的像素。
+    /// 沿贴图局部方向查询线性 RGB 辐亮度，供环境背景与直接光求值。
+    ///
+    /// 输入：有限非零 direction，内部归一化；输出：双线性插值的 HDR RGB，方向无效返回 None。
+    /// +Z/-Z 对应图像顶部/底部；+X、+Y、-Y 对应 U=0.5、0.75、0.25，-X 为 U=0/1 接缝，极点取 U=0.5。
     pub fn radiance(&self, direction: Vector3<f64>) -> Option<Vector3<f64>> {
         let (u, v) = direction_to_uv(direction)?;
         Some(self.sample_uv(u, v))
     }
 
-    /// 在贴图局部空间采样单位方向；pdf 相对于立体角 dω，单位 sr^-1。
-    /// 与 radiance 使用相同的 Z-up 经纬度约定，但 PDF 在像素球面区域内为常数。
-    /// RNG 由调用方持有，缓存只读；全黑贴图退化为均匀球面。
+    /// 优先朝环境亮处抽方向，减少 HDRI 直接光积分的噪声。
+    ///
+    /// 输入：可变 RNG；输出：贴图局部单位方向及完整混合 PDF（sr⁻¹），分布查询失败返回 None。
+    /// 分布为 p=0.95·p_importance+0.05/(4π)，保证黑像素方向也有非零概率；全黑图退化为均匀球面。
+    /// 像素按亮度乘立体角选取，像素内部均匀抽 φ 和 cosθ，因此对立体角均匀。
     pub fn sample_direction(&self, rng: &mut dyn RngCore) -> Option<EnvironmentSample> {
         if self.importance_cdf.is_empty() {
             return Some(sample_uniform_sphere(rng));
@@ -72,8 +80,12 @@ impl EnvironmentMap {
         })
     }
 
-    /// 查询任意有限非零局部方向的完整混合 PDF（sr^-1），内部归一化。
-    /// 接缝 U=1 wrap 到第 0 列，极点沿用 radiance 的 U=0.5 约定。
+    /// 查询 sample_direction 的完整方向密度，供环境 MIS 计算权重。
+    ///
+    /// 输入：贴图局部的有限非零方向；输出：p（sr⁻¹），非法方向返回 None。
+    ///
+    /// 公式：p=0.95·P_pixel/Ω_pixel+0.05/(4π)，全黑图为 1/(4π)。
+    /// P_pixel 采用实际 CDF 区间宽度；U=1 绕回首列，极点取 U=0.5，与抽样约定一致。
     pub fn pdf_direction(&self, direction: Vector3<f64>) -> Option<f64> {
         let (u, v) = direction_to_uv(direction)?;
         if self.importance_cdf.is_empty() {
@@ -90,7 +102,11 @@ impl EnvironmentMap {
         )
     }
 
-    fn decode(reader: impl Read) -> Result<Self, Box<dyn Error>> {
+    /// 从字节流解码 HDR 为浮点像素，再建立可查询的贴图。
+    ///
+    /// 输入：实现 Read 的 HDR 数据流；输出：EnvironmentMap，格式、尺寸或像素无效返回 Err。
+    /// 解码前检查像素缓冲大小，解码后不做 sRGB 传递函数变换。
+    fn decode(reader: impl Read) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let decoder = HdrDecoder::new(reader)?;
         let (width, height) = decoder.dimensions();
         let (width, height) = (usize::try_from(width)?, usize::try_from(height)?);
@@ -102,6 +118,9 @@ impl EnvironmentMap {
         Ok(Self::from_pixels(width, height, pixels)?)
     }
 
+    /// 把已有 HDR 像素构建为环境贴图，并缓存纬度边界和亮度采样分布。
+    ///
+    /// 输入：正宽高与行优先 `Vec<[f32;3]>`；输出：EnvironmentMap，长度不符、负/非法像素或分辨率失效返回 Err。
     fn from_pixels(width: usize, height: usize, pixels: Vec<[f32; 3]>) -> Result<Self, String> {
         if pixels.len() != pixel_count(width, height)? {
             return Err("环境贴图像素数量与宽高不匹配".into());
@@ -130,10 +149,17 @@ impl EnvironmentMap {
         Ok(map)
     }
 
+    /// 求一行中单个经纬图像素在球面上覆盖的立体角，供采样分布和 PDF 换算。
+    ///
+    /// 输入：有效行下标 row；输出：Ω=(2π/width)·(cosθ_top-cosθ_bottom)，单位 sr。
     fn pixel_solid_angle(&self, row: usize) -> f64 {
         (TAU / self.width as f64) * (self.row_cos_theta[row] - self.row_cos_theta[row + 1])
     }
 
+    /// 根据缓存像素建立按亮度采样的累积分布，写入 self.importance_cdf，无返回值。
+    ///
+    /// 输入：已校验的 self 像素和尺寸；公式：w_i=Y_i·Ω_i，CDF_j=Σ_{i<j}w_i/Σw_i，
+    /// 其中 Y=0.2126R+0.7152G+0.0722B；全黑图保留空分布，由采样入口退化为均匀球面。
     fn build_distribution(&mut self) {
         let mut cdf = Vec::with_capacity(self.pixels.len() + 1);
         cdf.push(0.0);
@@ -156,7 +182,12 @@ impl EnvironmentMap {
         }
     }
 
-    /// 输入有限 UV；整数像素坐标为像素中心，顶部 V=0，不做图片 y 翻转。
+    /// 在缓存 HDR 像素中做双线性插值，供方向查询取得辐亮度。
+    ///
+    /// 输入：有限 UV，顶部 V=0；输出：线性 RGB，不裁掉大于 1 的亮度。
+    ///
+    /// 公式：C=(1-dx)(1-dy)C00+dx(1-dy)C10+(1-dx)dy C01+dx dy C11。
+    /// U 周期绕回、V 夹到上下边缘；连续像素坐标的整数位置表示像素中心。
     fn sample_uv(&self, u: f64, v: f64) -> Vector3<f64> {
         let x = u.rem_euclid(1.0) * self.width as f64 - 0.5;
         let y = (v * self.height as f64 - 0.5).clamp(0.0, (self.height - 1) as f64);
@@ -183,6 +214,9 @@ impl EnvironmentMap {
     }
 }
 
+/// 校验环境图像尺寸及地址空间，供解码前安全检查。
+///
+/// 输入：width/height；输出：width·height，零尺寸、乘法或缓冲字节数溢出返回 Err。
 fn pixel_count(width: usize, height: usize) -> Result<usize, String> {
     if width == 0 || height == 0 {
         return Err("环境贴图宽高必须大于零".into());
@@ -195,6 +229,9 @@ fn pixel_count(width: usize, height: usize) -> Result<usize, String> {
     Ok(count)
 }
 
+/// 把有限非零方向稳定归一化，供 HDR 方向和 UV 查询使用。
+///
+/// 输入：direction；输出：单位向量，无效时 None；先除最大绝对分量，再除模长，避免平方和上溢/下溢。
 pub(super) fn normalized_direction(direction: Vector3<f64>) -> Option<Vector3<f64>> {
     if !direction.iter().all(|value| value.is_finite()) {
         return None;
@@ -208,11 +245,19 @@ pub(super) fn normalized_direction(direction: Vector3<f64>) -> Option<Vector3<f6
     Some(direction / direction.norm())
 }
 
+/// 把球面角转换成 Z-up 单位方向，供环境采样使用。
+///
+/// 输入：方位角 φ（弧度）和 cosθ∈[-1,1]；输出：(sinθ cosφ,sinθ sinφ,cosθ)，sinθ=√(1-cos²θ)。
 fn spherical_direction(phi: f64, cos_theta: f64) -> Vector3<f64> {
     let sin_theta = ((1.0 - cos_theta) * (1.0 + cos_theta)).max(0.0).sqrt();
     Vector3::new(sin_theta * phi.cos(), sin_theta * phi.sin(), cos_theta)
 }
 
+/// 在整个球面上均匀抽取方向，供黑色 HDR 和渐变环境回退使用。
+///
+/// 输入：可变 RNG；输出：单位方向及 p=1/(4π)。
+///
+/// 公式：φ=2πu-π，cosθ=1-2v，u/v 为独立 [0,1) 样本。
 pub(super) fn sample_uniform_sphere(rng: &mut dyn RngCore) -> EnvironmentSample {
     EnvironmentSample {
         direction: spherical_direction(
@@ -223,6 +268,11 @@ pub(super) fn sample_uniform_sphere(rng: &mut dyn RngCore) -> EnvironmentSample 
     }
 }
 
+/// 把贴图局部方向映射成经纬 UV，供 HDR 颜色和 PDF 查询共用。
+///
+/// 输入：有限非零方向，内部归一化；输出：(U,V)，无效方向返回 None。
+///
+/// 公式：φ=atan2(d_y,d_x)，θ=acos(d_z)，U=φ/(2π)+1/2，V=θ/π；极点统一 U=0.5。
 fn direction_to_uv(direction: Vector3<f64>) -> Option<(f64, f64)> {
     let direction = normalized_direction(direction)?;
     // 极点没有唯一经度，固定 U=0.5，避免 x/y 的有符号零改变查询列。
@@ -238,13 +288,15 @@ fn direction_to_uv(direction: Vector3<f64>) -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{Rgb, codecs::hdr::HdrEncoder};
-    use rand::{SeedableRng, rngs::StdRng};
-    use std::{
-        fs,
-        io::{Cursor, Write},
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use image::Rgb;
+    use image::codecs::hdr::HdrEncoder;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    use std::fs;
+    use std::io::Cursor;
+    use std::io::Write;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
 
     const PIXELS: [[f32; 3]; 4] = [
         [2.0, 4.0, 8.0],

@@ -14,7 +14,6 @@
     "thread_count": null,
     "max_spectral_blocks": 16,
     "output_path": "output/vertical_prism/through/camera.png",
-    "debug_path": false,
     "camera_mode": "spectral"
   },
   "scene": {
@@ -118,7 +117,8 @@
         2.0,
         2.0
       ],
-      "total_flux": 2.0
+      "total_flux": 2.0,
+      "type": "parallel"
     },
     "receiver": {
       "min_m": [
@@ -129,7 +129,6 @@
         3.0,
         5.0
       ]
-    },
-    "debug_object_id": 0
+    }
   }
 }

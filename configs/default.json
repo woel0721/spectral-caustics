@@ -16,18 +16,42 @@
   },
   "scene": {
     "camera": {
-      "position": [0.0, -5.5, 2.7],
-      "target": [0.0, 0.0, 0.68],
-      "up": [0.0, 0.0, 1.0],
+      "position": [
+        0.0,
+        -5.5,
+        2.7
+      ],
+      "target": [
+        0.0,
+        0.0,
+        0.68
+      ],
+      "up": [
+        0.0,
+        0.0,
+        1.0
+      ],
       "fov_y_degrees": 30.0
     },
-    "background_linear_rgb": [0.08, 0.10, 0.14],
+    "background_linear_rgb": [
+      0.08,
+      0.1,
+      0.14
+    ],
     "environment": {
       "map_path": "assets/HDRI/herkulessaulen_4k.hdr",
       "rotation_degrees": 0.0,
       "intensity": 1.0,
-      "horizon_linear_rgb": [0.16, 0.20, 0.28],
-      "zenith_linear_rgb": [0.04, 0.08, 0.18]
+      "horizon_linear_rgb": [
+        0.16,
+        0.2,
+        0.28
+      ],
+      "zenith_linear_rgb": [
+        0.04,
+        0.08,
+        0.18
+      ]
     },
     "environment_samples": 8,
     "environment_mis_heuristic": "power",
@@ -38,47 +62,100 @@
       "odd_scale": 0.25
     },
     "ground_margin_m": 0.5,
-    "debug_object_id": 0,
     "objects": [
       {
         "type": "sphere",
-        "center_m": [-1.55, 0.0, 0.68],
+        "center_m": [
+          -1.55,
+          0.0,
+          0.68
+        ],
         "radius_m": 0.65,
-        "material": { "type": "dielectric", "ior": 1.52 }
+        "material": {
+          "type": "dielectric",
+          "ior": 1.52
+        }
       },
       {
         "type": "sphere",
-        "center_m": [0.0, 0.0, 0.68],
+        "center_m": [
+          0.0,
+          0.0,
+          0.68
+        ],
         "radius_m": 0.65,
-        "material": { "type": "mirror", "reflectance": [0.95, 0.95, 0.95] }
+        "material": {
+          "type": "mirror",
+          "reflectance": [
+            0.95,
+            0.95,
+            0.95
+          ]
+        }
       },
       {
         "type": "sphere",
-        "center_m": [1.55, 0.0, 0.68],
+        "center_m": [
+          1.55,
+          0.0,
+          0.68
+        ],
         "radius_m": 0.65,
         "material": {
           "type": "ggx_metal",
-          "eta": [0.2, 0.2, 0.2],
-          "k": [3.0, 3.0, 3.0],
+          "eta": [
+            0.2,
+            0.2,
+            0.2
+          ],
+          "k": [
+            3.0,
+            3.0,
+            3.0
+          ],
           "roughness": 0.4
         }
       },
       {
         "type": "ground",
         "height_m": 0.0,
-        "material": { "type": "lambertian", "albedo": [0.8, 0.8, 0.8] }
+        "material": {
+          "type": "lambertian",
+          "albedo": [
+            0.8,
+            0.8,
+            0.8
+          ]
+        }
       }
     ],
     "light": {
       "height_m": 3.0,
-      "direction": [0.45, 0.0, -1.0],
-      "aperture_min_m": [-2.0, -2.0],
-      "aperture_max_m": [2.0, 2.0],
-      "total_flux": 8.0
+      "direction": [
+        0.45,
+        0.0,
+        -1.0
+      ],
+      "aperture_min_m": [
+        -2.0,
+        -2.0
+      ],
+      "aperture_max_m": [
+        2.0,
+        2.0
+      ],
+      "total_flux": 8.0,
+      "type": "parallel"
     },
     "receiver": {
-      "min_m": [-2.0, -2.0],
-      "max_m": [2.0, 2.0]
+      "min_m": [
+        -2.0,
+        -2.0
+      ],
+      "max_m": [
+        2.0,
+        2.0
+      ]
     }
   }
 }

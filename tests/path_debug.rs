@@ -1,20 +1,19 @@
-use spectral_caustics::{
-    config::{
-        Config,
-        materialconfig::MaterialConfig,
-        sceneconfig::{EnvironmentConfig, EnvironmentMisHeuristic, ObjectConfig},
-    },
-    render::{
-        CameraLightingImages, Render, framebuffer::Framebuffer, integrator::debug::PathTermination,
-    },
-    scene::Scene,
-};
-use std::{
-    fs,
-    path::PathBuf,
-    process::Command,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+#![cfg(feature = "diagnostics")]
+use spectral_caustics::config::Config;
+use spectral_caustics::config::material::MaterialConfig;
+use spectral_caustics::config::scene::EnvironmentConfig;
+use spectral_caustics::config::scene::EnvironmentMisHeuristic;
+use spectral_caustics::config::scene::ObjectConfig;
+#[cfg(feature = "diagnostics")]
+use spectral_caustics::diagnostics::StopReason;
+use spectral_caustics::film::Framebuffer;
+use spectral_caustics::integrator::camera::CameraLightingImages;
+use spectral_caustics::renderer::Renderer;
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 struct TemporaryDirectory(PathBuf);
 impl TemporaryDirectory {
@@ -58,15 +57,16 @@ fn config() -> Config {
     config.render.camera_spp = 12;
     config.render.samples_per_pixel_axis = 1;
     config.render.thread_count = Some(1);
+    config.render.diagnostics.target = Some(0);
     config.scene.environment_samples = 3;
     config.scene.max_diffuse_bounces = 4;
     config
 }
 
 fn identical(a: &Framebuffer, b: &Framebuffer) {
-    assert_eq!((a.width, a.height), (b.width, b.height));
-    assert_eq!(a.pixels.len(), b.pixels.len());
-    assert!(a.pixels.iter().zip(&b.pixels).all(|(a, b)| {
+    assert_eq!((a.width(), a.height()), (b.width(), b.height()));
+    assert_eq!(a.pixels().len(), b.pixels().len());
+    assert!(a.pixels().iter().zip(b.pixels()).all(|(a, b)| {
         a.iter()
             .zip(b.iter())
             .all(|(a, b)| a.to_bits() == b.to_bits())
@@ -78,21 +78,26 @@ fn identical_images(a: &CameraLightingImages, b: &CameraLightingImages) {
     identical(&a.combined, &b.combined);
 }
 
+#[cfg(feature = "diagnostics")]
 #[test]
 fn debug_path_defaults_false_roundtrips_and_rejects_non_bool_values() {
     let config = config();
-    assert!(!config.render.debug_path);
+    assert!(!config.render.diagnostics.path);
     let mut json: serde_json::Value = serde_json::from_str(&config.to_json().unwrap()).unwrap();
-    json["render"].as_object_mut().unwrap().remove("debug_path");
+    json["render"]["diagnostics"]
+        .as_object_mut()
+        .unwrap()
+        .remove("path");
     assert!(
         !Config::from_json(&json.to_string())
             .unwrap()
             .render
-            .debug_path
+            .diagnostics
+            .path
     );
-    json["render"]["debug_path"] = true.into();
+    json["render"]["diagnostics"]["path"] = true.into();
     let loaded = Config::from_json(&json.to_string()).unwrap();
-    assert!(loaded.render.debug_path);
+    assert!(loaded.render.diagnostics.path);
     assert_eq!(
         Config::from_json(&loaded.to_json().unwrap()).unwrap(),
         loaded
@@ -102,11 +107,19 @@ fn debug_path_defaults_false_roundtrips_and_rejects_non_bool_values() {
         serde_json::json!(1),
         serde_json::json!("true"),
     ] {
-        json["render"]["debug_path"] = value;
-        assert!(Config::from_json(&json.to_string()).is_err());
+        json["render"]["diagnostics"]["path"] = value;
+        assert!(
+            Config::from_json(&json.to_string())
+                .and_then(|config| {
+                    config.validate()?;
+                    Ok(config)
+                })
+                .is_err()
+        );
     }
 }
 
+#[cfg(feature = "diagnostics")]
 #[test]
 fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_environments() {
     let directory = TemporaryDirectory::new();
@@ -141,37 +154,70 @@ fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_en
                     ..Default::default()
                 });
                 config.scene.environment_mis_heuristic = heuristic;
-                if let ObjectConfig::Prism { material: m, .. } = &mut config.scene.objects[0] {
+                if let ObjectConfig::Prism {
+                    material: m,
+                    caustics,
+                    ..
+                } = &mut config.scene.objects[0]
+                {
+                    *caustics = matches!(material, MaterialConfig::Dielectric { .. });
                     *m = material.clone();
                 }
-                let scene = Scene::from_config(&config.scene).unwrap();
-                let renderer = Render::new(config.render.clone()).unwrap();
-                let lighting = renderer.render_lighting(&scene).unwrap();
-                let ordinary = renderer
-                    .render_camera_glass_components(&scene, &lighting, config.render.camera_spp, 42)
-                    .unwrap();
+                let scene = config.build().unwrap();
+                let renderer = Renderer::new(config.render.clone()).unwrap();
+                let lighting = spectral_caustics::integrator::photon::integrate_xyz(
+                    &scene,
+                    scene.photon.caustics_object_id,
+                    scene.photon.ground_id.expect("receiver"),
+                    (renderer).settings(),
+                )
+                .unwrap();
+                let ordinary = spectral_caustics::integrator::camera::integrate_rgb(
+                    &scene,
+                    &spectral_caustics::config::render::RenderSetting {
+                        width: (renderer).settings().width,
+                        height: (renderer).settings().height,
+                        camera_spp: config.render.camera_spp,
+                        seed: 42,
+                        ..Default::default()
+                    },
+                    Some(&lighting),
+                )
+                .unwrap();
                 assert!(ordinary.path_debug.is_none());
                 let mut reference = None;
                 for threads in [1, 2, 4, 1] {
                     config.render.thread_count = Some(threads);
-                    config.render.debug_path = true;
-                    let renderer = Render::new(config.render.clone()).unwrap();
-                    let photons = renderer.render_lighting(&scene).unwrap();
-                    identical(&photons.direct, &lighting.direct);
-                    identical(&photons.caustics, &lighting.caustics);
-                    let images = renderer
-                        .render_camera_glass_components(
-                            &scene,
-                            &photons,
-                            config.render.camera_spp,
-                            42,
-                        )
-                        .unwrap();
-                    identical_images(&images, &ordinary);
-                    if !cfg!(debug_assertions) {
-                        assert!(images.path_debug.is_none());
-                        continue;
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        config.render.diagnostics.path = true;
                     }
+                    let renderer = Renderer::new(config.render.clone()).unwrap();
+                    let photons = spectral_caustics::integrator::photon::integrate_xyz(
+                        &scene,
+                        scene.photon.caustics_object_id,
+                        scene.photon.ground_id.expect("receiver"),
+                        (renderer).settings(),
+                    )
+                    .unwrap();
+                    identical(
+                        photons.direct.as_ref().unwrap(),
+                        lighting.direct.as_ref().unwrap(),
+                    );
+                    identical(&photons.caustics, &lighting.caustics);
+                    let images = spectral_caustics::integrator::camera::integrate_rgb(
+                        &scene,
+                        &spectral_caustics::config::render::RenderSetting {
+                            width: (renderer).settings().width,
+                            height: (renderer).settings().height,
+                            camera_spp: config.render.camera_spp,
+                            seed: 42,
+                            ..config.render.clone()
+                        },
+                        Some(&photons),
+                    )
+                    .unwrap();
+                    identical_images(&images, &ordinary);
                     let stats = images.path_debug.as_ref().unwrap();
                     if let Some(expected) = &reference {
                         assert_eq!(stats, expected);
@@ -194,13 +240,14 @@ fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_en
                             .iter()
                             .any(|p| p.target_samples > 0 && p.target_samples < p.samples)
                     );
-                    assert!(stats.pixels.iter().any(|p| {
-                        p.terminations
-                            .contains_key(&PathTermination::EnvironmentEscape)
-                    }));
-                    let sum = |f: fn(
-                        &spectral_caustics::render::integrator::debug::PathDebugPixel,
-                    ) -> u64| stats.pixels.iter().map(f).sum::<u64>();
+                    assert!(
+                        stats.pixels.iter().any(|p| {
+                            p.terminations.contains_key(&StopReason::EnvironmentEscape)
+                        })
+                    );
+                    let sum = |f: fn(&spectral_caustics::diagnostics::PathDebugPixel) -> u64| {
+                        stats.pixels.iter().map(f).sum::<u64>()
+                    };
                     match &material {
                         MaterialConfig::Mirror { .. } => {
                             assert!(sum(|p| p.events.specular_reflection) > 0);
@@ -222,8 +269,9 @@ fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_en
     }
 }
 
+#[cfg(feature = "diagnostics")]
 #[test]
-fn command_line_gates_aovs_by_build_profile_and_protects_physical_outputs() {
+fn command_line_gates_aovs_by_feature_and_protects_physical_outputs() {
     let directory = TemporaryDirectory::new();
     let mut config = config();
     config.render.exposure = 0.0;
@@ -262,7 +310,10 @@ fn command_line_gates_aovs_by_build_profile_and_protects_physical_outputs() {
         .iter()
         .map(|name| fs::read(directory.0.join(name)).unwrap())
         .collect();
-    config.render.debug_path = true;
+    #[cfg(feature = "diagnostics")]
+    {
+        config.render.diagnostics.path = true;
+    }
     run(&config);
     for (name, expected) in ordinary_names.iter().zip(ordinary) {
         assert_eq!(fs::read(directory.0.join(name)).unwrap(), expected);
@@ -273,12 +324,6 @@ fn command_line_gates_aovs_by_build_profile_and_protects_physical_outputs() {
                 .pixels()
                 .all(|p| p.0 == [0; 3])
         );
-    }
-    if !cfg!(debug_assertions) {
-        for name in names {
-            assert!(!directory.0.join(name).exists());
-        }
-        return;
     }
     let aovs: Vec<_> = names
         .iter()

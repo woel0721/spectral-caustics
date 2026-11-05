@@ -1,21 +1,25 @@
 //! 水平地面 z = height；可选择有限矩形边界，几何求交通过 Hittable 返回记录。
 
-use super::{
-    hit::Hit,
-    object::Hittable,
-    ray::{INTERSECTION_EPSILON, PARALLEL_EPSILON, Ray},
-};
-use nalgebra::{Vector2, Vector3};
+use super::hit::GeometryHit as Hit;
+use super::object::Hittable;
+use super::ray::INTERSECTION_EPSILON;
+use super::ray::PARALLEL_EPSILON;
+use super::ray::Ray;
+use nalgebra::Vector2;
+use nalgebra::Vector3;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Ground {
-    /// 地面高度，单位为米；第一周场景使用 height = 0。
+    /// 地面所在水平面的世界 Z 坐标，单位为米。
     height: f64,
     bounds: Option<(Vector2<f64>, Vector2<f64>)>,
 }
 
 impl Ground {
-    /// 创建无限平面，保留几何示例/测试接口；配置场景使用 with_bounds。
+    /// 创建水平无限地面，供独立几何实验使用。
+    ///
+    /// 输入：有限高度 height（米）；输出：平面 z=height，非有限高度返回 None。
+    /// 配置场景使用 with_bounds 创建有限地面。
     pub fn new(height: f64) -> Option<Self> {
         if !height.is_finite() {
             return None;
@@ -26,8 +30,11 @@ impl Ground {
         })
     }
 
-    /// 创建有限矩形 [min.x,max.x] × [min.y,max.y]，边缘也参与求交。
-    /// 非法高度、边界、跨度或面积返回 None。
+    /// 创建具有矩形边界的水平地面，供相机求交和光子接收使用。
+    ///
+    /// 输入：高度 height 及 XY 边界 min/max（米），要求每轴 min<max。
+    ///
+    /// 输出：Ground，范围 [min.x,max.x]×[min.y,max.y] 包含边缘；非法高度、跨度或面积返回 None。
     pub fn with_bounds(height: f64, min: Vector2<f64>, max: Vector2<f64>) -> Option<Self> {
         let span = max - min;
         let area = span.x * span.y;
@@ -45,7 +52,12 @@ impl Ground {
 }
 
 impl Hittable for Ground {
-    /// 地面支持双面求交，几何法线固定为 +z，不随入射方向翻转。
+    /// 求光线与水平地面的交点，并检查它是否位于有限边界内。
+    ///
+    /// 输入：Ray；输出：正向 Hit，平行、越界、距离过近或数值无效返回 None。
+    ///
+    /// 公式：t=(height-origin.z)/direction.z，P=origin+t·direction。
+    /// 支持双面求交，返回的几何法线固定为世界 +Z。
     fn intersect(&self, ray: &Ray) -> Option<Hit> {
         if !ray.origin.iter().all(|v| v.is_finite()) || !ray.direction.iter().all(|v| v.is_finite())
         {
@@ -78,7 +90,6 @@ impl Hittable for Ground {
             coords,
             normal: Vector3::new(0.0, 0.0, 1.0),
             distance,
-            ..Hit::default()
         })
     }
 }
@@ -226,24 +237,6 @@ mod tests {
                 )))
                 .is_some()
         );
-    }
-
-    #[test]
-    fn reserved_distance_limits_do_not_affect_geometric_hit() {
-        let ground = Ground::new(0.0).unwrap();
-        let mut ray = downward_ray(Vector3::new(0.0, 0.0, 2.0));
-        for (min, max) in [
-            (0.0, 1.0),
-            (3.0, 4.0),
-            (3.0, 1.0),
-            (f64::NAN, f64::NEG_INFINITY),
-        ] {
-            ray.t_min = min;
-            ray.t_max = max;
-            let hit = ground.intersect(&ray).unwrap();
-            assert_eq!(hit.distance, 2.0);
-            assert_eq!(hit.coords, Vector3::zeros());
-        }
     }
 
     #[test]

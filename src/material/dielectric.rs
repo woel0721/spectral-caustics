@@ -1,9 +1,14 @@
 //! 理想光滑介质：普通 BSDF 为零，通过 Fresnel 概率采样反射/透射事件。
 
-use super::{BsdfSample, BsdfValue, EvaluateMode, Material, ScatterType, unit_vector};
-use crate::optics::{dispersion::Cauchy, iormode::IorMode, refract};
+use super::BsdfSample;
+use super::Material;
+use super::ScatterType;
+use super::unit_vector;
+use crate::optics::dispersion::Cauchy;
+use crate::optics::dispersion::IorMode;
 use nalgebra::Vector3;
-use rand::{Rng, RngCore};
+
+use rand::RngCore;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dielectric {
@@ -12,7 +17,9 @@ pub struct Dielectric {
 }
 
 impl Dielectric {
-    /// ior 为介质内部的无量纲折射率，必须有限且大于零。
+    /// 创建无色散的理想光滑玻璃，供 RGB 或固定 IOR 传输使用。
+    ///
+    /// 输入：介质内部的正有限折射率 ior（无量纲）；输出：Dielectric，非法值返回 Err。
     pub fn new(ior: f64) -> Result<Self, String> {
         if !ior.is_finite() || ior <= 0.0 {
             return Err("material.ior 必须有限且大于零".into());
@@ -23,7 +30,10 @@ impl Dielectric {
         })
     }
 
-    /// 光源端与独立光谱相机共用色散模型；RGB sample 始终保留给定的 ior。
+    /// 创建带可选色散模型的玻璃，供光子与光谱相机按波长查询折射率。
+    ///
+    /// 输入：常数 ior 和可选 Cauchy 模型；输出：校验后的 Dielectric，参数无效返回 Err。
+    /// RGB 采样仍使用 ior；Dispersion 模式使用 n(λ)=A+B/λ_μm²。
     pub fn with_dispersion(ior: f64, dispersion: Option<Cauchy>) -> Result<Self, String> {
         let mut glass = Self::new(ior)?;
         if let Some(model) = dispersion {
@@ -35,26 +45,26 @@ impl Dielectric {
 }
 
 impl Material for Dielectric {
-    fn evaluate(
+    /// 按输入 mode 返回零 BSDF：理想玻璃只在离散的反射/透射方向贡献，需用 sample 计算，不能用有限函数值代替。
+    fn evaluate_rgb(
         &self,
         _wi: Vector3<f64>,
         _wo: Vector3<f64>,
         _normal: Vector3<f64>,
-        mode: EvaluateMode,
-    ) -> BsdfValue {
+    ) -> Vector3<f64> {
         // Dirac delta 不能在镜面方向返回一个人为的有限值。
         // 与 PBRT 的理想 SpecularReflection/SpecularTransmission::f 一致。
-        BsdfValue::zero(mode)
+        Vector3::zeros()
     }
 
-    /// 采样空气与当前玻璃之间的理想镜面反射或透射，使用 radiance 约定。
+    /// 为 RGB 相机抽取空气/玻璃界面的反射或透射事件。
     ///
-    /// wo 从交点指向上一顶点，实际到达界面的射线方向是 -wo。
-    /// normal 必须是玻璃朝外的几何法线，不能预先朝向 wo；内部会归一化。
-    /// wo·normal > 0 时从空气进入玻璃，< 0 时从玻璃出射，并翻转折射法线。
-    /// 非法方向、切线 wo 或数值计算失败返回 None；非法方向不消耗随机数。
-    /// 全反射和 F=0 的确定事件不消耗随机数，其余事件使用一次均匀采样。
-    /// 当前固定外部折射率为 1，不用于嵌套介质或光源正向光子通量追踪。
+    /// 输入：指向上一顶点的 wo、朝外几何法线和 RNG；实际入射方向为 -wo。
+    ///
+    /// 输出：BsdfSample，反射权重为 1，透射权重为 (η_i/η_t)²，PDF 为 None；非法方向或数值失败返回 None。
+    /// wo·normal>0 表示空气入射，<0 表示玻璃出射；内部归一化，不允许调用方预先翻转几何法线。
+    /// 按 Fresnel 以 p_r=F、p_t=1-F 选事件，所以权重已约去 F/p_r 或 (1-F)/p_t。
+    /// 全反射或 F=0 不消耗 RNG，其余消耗一次；外部折射率固定为 1，不支持嵌套介质。
     fn sample(
         &self,
         wo: Vector3<f64>,
@@ -70,10 +80,15 @@ impl Material for Dielectric {
         })
     }
 
+    /// 返回 true：此玻璃能按单个波长计算折射率并采样界面事件。
     fn supports_spectral(&self) -> bool {
         true
     }
 
+    /// 为光谱相机采样一次玻璃界面，返回新方向和当前波长的标量 radiance 权重。
+    ///
+    /// 输入：wo、朝外法线、正有限波长（nm）、IOR 模式和 RNG；非法输入或采样失败返回 None。
+    /// Constant 用常数 ior，Dispersion 查询 Cauchy；反射 W=1，透射 W=(η_i/η_t)²。
     fn sample_spectral(
         &self,
         wo: Vector3<f64>,
@@ -81,7 +96,7 @@ impl Material for Dielectric {
         wavelength_nm: f64,
         ior_mode: IorMode,
         rng: &mut dyn RngCore,
-    ) -> Option<super::SpectralBsdfSample> {
+    ) -> Option<super::BsdfSample<f64>> {
         if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
             return None;
         }
@@ -93,17 +108,24 @@ impl Material for Dielectric {
         )
     }
 
+    /// 返回 false：理想玻璃没有连续方向上的散射，积分器不在此计算普通直接光。
     fn has_non_delta(&self) -> bool {
         false
     }
+    /// 返回 true：理想玻璃只通过离散反射或透射事件继续路径。
     fn has_delta(&self) -> bool {
         true
     }
 
+    /// 返回此玻璃保存的常数折射率 Some(ior)，用于 RGB 路径和理想介质能力查询。
     fn ior(&self) -> Option<f64> {
         Some(self.ior)
     }
 
+    /// 按模式查询本次光子/光谱路径的折射率。
+    ///
+    /// 输入：可选波长（nm）和模式；输出：Some(n)，需要色散波长但缺失或计算无效时返回 None。
+    /// Dispersion 且配置模型时用 n=A+B/λ_μm²，其余使用常数 ior。
     fn photon_ior(&self, wavelength_nm: Option<f64>, mode: IorMode) -> Option<f64> {
         match (mode, self.dispersion) {
             (IorMode::Dispersion, Some(model)) => model.ior(wavelength_nm?),
@@ -112,13 +134,17 @@ impl Material for Dielectric {
     }
 }
 
-/// RGB/光谱仅共享同一介质界面的几何与 Fresnel 随机选择，不共享 RGB 权重。
+/// 计算一次理想玻璃界面散射，供 RGB 和光谱采样共用几何及事件选择。
+///
+/// 输入：wo、朝外法线 n、玻璃折射率和 RNG；输出：标量采样记录，方向或计算无效时 None。
+/// 先按 wo·n 判断内外，再以 F/1-F 抽反射/透射；反射 wi=2(wo·n)n-wo，透射按 Snell 定律。
+/// 返回的 W 为 radiance 权重：反射为 1，透射为 (η_i/η_t)²；不是光子通量权重。
 fn sample_interface(
     wo: Vector3<f64>,
     normal: Vector3<f64>,
     ior: f64,
     rng: &mut dyn RngCore,
-) -> Option<super::SpectralBsdfSample> {
+) -> Option<super::BsdfSample<f64>> {
     let (wo, normal) = (unit_vector(wo)?, unit_vector(normal)?);
     let cos_o = wo.dot(&normal);
     if cos_o == 0.0 {
@@ -129,72 +155,41 @@ fn sample_interface(
     } else {
         (-normal, ior, 1.0)
     };
-    let cos_i = wo.dot(&normal);
-    let f = fresnel_dielectric(cos_i, eta_i, eta_t)?;
-    let reflection = f == 1.0 || (f > 0.0 && rng.random::<f64>() < f);
-    let sample = if reflection {
-        super::SpectralBsdfSample {
-            wi: unit_vector(2.0 * cos_i * normal - wo)?,
-            event: ScatterType::SpecularReflection,
-            pdf: None,
-            weight: 1.0,
-        }
-    } else {
-        super::SpectralBsdfSample {
-            wi: unit_vector(refract(-wo, normal, eta_i, eta_t)?)?,
-            event: ScatterType::SpecularTransmission,
-            pdf: None,
-            weight: (eta_i / eta_t).powi(2),
-        }
-    };
-    (sample.weight.is_finite() && sample.weight > 0.0).then_some(sample)
-}
-
-/// 理想光滑介质对非偏振光的精确 Fresnel 能量反射率，范围为 [0, 1]。
-///
-/// cos_i 取绝对值并夹紧到 [0, 1]；eta_i、eta_t 分别为入射、透射介质
-/// 的折射率，由调用方按传播方向指定，不随 cos_i 的符号自动交换。
-/// 非有限输入或非正折射率返回 None；全反射返回 Some(1.0)。
-pub fn fresnel_dielectric(cos_i: f64, eta_i: f64, eta_t: f64) -> Option<f64> {
-    if !cos_i.is_finite()
-        || !eta_i.is_finite()
-        || eta_i <= 0.0
-        || !eta_t.is_finite()
-        || eta_t <= 0.0
-    {
+    let interface = crate::optics::interface::sample_dielectric(-wo, normal, eta_i, eta_t, rng)?;
+    let weight = interface.radiance_weight();
+    if !weight.is_finite() || weight <= 0.0 {
         return None;
     }
-    let cos_i = cos_i.abs().min(1.0);
-    // 相同介质没有界面；先处理它，避免掠射时出现 0/0。
-    if eta_i == eta_t {
-        return Some(0.0);
-    }
-    if cos_i == 0.0 {
-        return Some(1.0);
-    }
-
-    // 同比缩放不改变 Snell 或 Fresnel 方程，避免大折射率的乘积/和溢出。
-    let scale = eta_i.max(eta_t);
-    let eta_i = eta_i / scale;
-    let eta_t = eta_t / scale;
-    let sin_i = (1.0 - cos_i * cos_i).sqrt();
-    let eta_sin_i = eta_i * sin_i;
-    // Snell: sin(theta_t) = eta_i * sin(theta_i) / eta_t。
-    // 先比较再相除，避免全反射时极大的折射率比值溢出。
-    if eta_sin_i >= eta_t {
-        return Some(1.0);
-    }
-    let sin_t = eta_sin_i / eta_t;
-    let cos_t = (1.0 - sin_t * sin_t).max(0.0).sqrt();
-    let r_s = (eta_i * cos_i - eta_t * cos_t) / (eta_i * cos_i + eta_t * cos_t);
-    let r_p = (eta_t * cos_i - eta_i * cos_t) / (eta_t * cos_i + eta_i * cos_t);
-    Some((0.5 * (r_s * r_s + r_p * r_p)).clamp(0.0, 1.0))
+    Some(super::BsdfSample {
+        wi: unit_vector(interface.direction)?,
+        event: match interface.event {
+            crate::optics::interface::DielectricEvent::Reflection => {
+                ScatterType::SpecularReflection
+            }
+            crate::optics::interface::DielectricEvent::Transmission => {
+                ScatterType::SpecularTransmission
+            }
+        },
+        pdf: None,
+        weight,
+    })
 }
 
+/// 计算非偏振光在理想介质界面上的能量反射比例，用于决定反射/透射。
+///
+/// 输入：入射角余弦 cos_i，以及正有限入射/透射折射率 η_i/η_t；cos_i 取绝对值并夹到 `[0,1]`。
+///
+/// 输出：F∈`[0,1]`；全反射返回 Some(1)，相同介质返回 Some(0)，非法输入返回 None。
+///
+/// 公式：sinθ_t=(η_i/η_t)sinθ_i，c_i=cosθ_i，c_t=cosθ_t；
+/// R_s=((η_i c_i-η_t c_t)/(η_i c_i+η_t c_t))²，R_p=((η_t c_i-η_i c_t)/(η_t c_i+η_i c_t))²，F=(R_s+R_p)/2。
+/// 调用方按传播方向指定两侧折射率，本函数不会根据 cos_i 的符号交换它们。
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{SeedableRng, rngs::StdRng};
+    use crate::optics::interface::fresnel_dielectric;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     fn glass_result(sample: Option<BsdfSample>) -> Option<BsdfSample> {
         let sample = sample?;
@@ -495,19 +490,14 @@ mod tests {
         assert!(!glass.has_non_delta());
         for wi in [Vector3::z(), -Vector3::z(), Vector3::repeat(f64::NAN)] {
             assert_eq!(
-                glass.evaluate(wi, Vector3::z(), Vector3::z(), EvaluateMode::Rgb),
-                BsdfValue::Rgb(Vector3::zeros())
+                glass.evaluate_rgb(wi, Vector3::z(), Vector3::z()),
+                (Vector3::zeros())
             );
             assert_eq!(glass.pdf(wi, Vector3::z(), Vector3::z()), 0.0);
             for wavelength_nm in [450.0, 550.0, 650.0, 0.0, -1.0, f64::NAN, f64::INFINITY] {
                 assert_eq!(
-                    glass.evaluate(
-                        wi,
-                        Vector3::z(),
-                        Vector3::z(),
-                        EvaluateMode::Spectral { wavelength_nm },
-                    ),
-                    BsdfValue::Spectral(0.0)
+                    glass.evaluate_spectral(wi, Vector3::z(), Vector3::z(), wavelength_nm),
+                    (0.0)
                 );
             }
         }

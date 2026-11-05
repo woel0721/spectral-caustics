@@ -1,6 +1,9 @@
 //! 默认三角截面沿 Y 轴拉伸；from_vertices 可构建任意朝向的凸三棱柱，共 8 个三角形。
 
-use super::{hit::Hit, object::Hittable, ray::Ray, triangle::Triangle};
+use super::hit::GeometryHit as Hit;
+use super::object::Hittable;
+use super::ray::Ray;
+use super::triangle::Triangle;
 use nalgebra::Vector3;
 
 #[derive(Debug)]
@@ -10,8 +13,10 @@ pub struct Prism {
 }
 
 impl Prism {
-    /// 沿用固定的 6 个顶点，长度单位为米；整个三棱镜位于 z = 0 地面上方。
-    /// 与 Triangle::new 保持一致，任何面构造失败时返回 None。
+    /// 创建内置六顶点三棱镜，供不读取 JSON 的几何示例使用。
+    ///
+    /// 输入：无；输出：沿 Y 轴从 -1 m 拉伸至 1 m 的三棱镜；面构建失败返回 None。
+    /// 三角截面位于 XZ 平面，底边 z=1 m，顶点 z=1.8 m。
     pub fn new() -> Option<Self> {
         // 前端三角形位于 y = -1，后端位于 y = 1。
         let vertices = [
@@ -25,7 +30,12 @@ impl Prism {
         Self::from_vertices(vertices)
     }
 
-    /// 按固定面连接方式构建配置中的六顶点凸三棱镜，并校验非退化与朝外法线。
+    /// 把六个顶点连接成封闭凸三棱柱，供不同朝向的三棱镜复用求交。
+    ///
+    /// 输入：两个三角端面的顶点 `[0,1,2]` 和 `[3,4,5]`，对应顶点以 0↔3、1↔4、2↔5 相连。
+    ///
+    /// 输出：含 8 个三角面的 Prism；退化、绕序错误、非凸或数值无效返回 None。
+    /// 校验公式：每面外法线 n 须满足 (center-va)·n<0，且所有顶点均在该面的内部半空间。
     pub fn from_vertices(vertices: [Vector3<f64>; 6]) -> Option<Self> {
         // 两个端面各 1 个三角形，三个矩形侧面各拆成 2 个三角形。
         // 顺序保证 (vb - va) × (vc - va) 朝向三棱镜外部。
@@ -70,6 +80,10 @@ impl Prism {
 }
 
 impl Hittable for Prism {
+    /// 查询三棱镜各三角面，返回离 Ray 起点最近的正向 Hit。
+    ///
+    /// 输入：世界空间 Ray；输出：最近交点，所有面都未命中时返回 None。
+    /// 取 min(t) 而非第一个命中的面，使结果与面存储顺序无关。
     fn intersect(&self, ray: &Ray) -> Option<Hit> {
         // Triangle 已检查正向距离、epsilon 和非有限值。
         // 必须检查所有面再比较距离，索引靠前的面不一定离光线起点最近。
@@ -124,8 +138,6 @@ mod tests {
         assert!((hit.distance - 2.0).abs() < 1e-12);
         assert!((hit.coords - Vector3::new(0.0, 1.0, 1.2)).norm() < 1e-12);
         assert_eq!(hit.normal, Vector3::new(0.0, 1.0, 0.0));
-        assert_eq!(hit.object_id, None);
-        assert_eq!(hit.material_id, None);
     }
 
     #[test]

@@ -12,8 +12,7 @@
     "seed": 42,
     "thread_count": null,
     "max_spectral_blocks": 16,
-    "output_path": "output/beveled_prism/lighting.png",
-    "debug_path": true
+    "output_path": "output/beveled_prism/lighting.png"
   },
   "scene": {
     "camera": {
@@ -116,7 +115,8 @@
         2.0,
         2.0
       ],
-      "total_flux": 8.0
+      "total_flux": 8.0,
+      "type": "parallel"
     },
     "receiver": {
       "min_m": [
@@ -127,7 +127,6 @@
         2.0,
         2.0
       ]
-    },
-    "debug_object_id": 0
+    }
   }
 }

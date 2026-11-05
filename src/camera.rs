@@ -1,7 +1,9 @@
 //! 针孔透视相机：从相机位置穿过像素中心或指定的像素内采样点。
 
-use crate::{config::cameraconfig::CameraConfig, geometry::ray::Ray};
-use nalgebra::{Vector2, Vector3};
+use crate::config::camera::CameraConfig;
+use crate::geometry::ray::Ray;
+use nalgebra::Vector2;
+use nalgebra::Vector3;
 
 /// 已校验的运行时相机，参数只读，预计算结果由所有像素复用。
 #[derive(Debug, Clone, PartialEq)]
@@ -22,7 +24,14 @@ pub struct Camera {
 }
 
 impl Camera {
-    /// 校验配置并预计算相机坐标系和投影尺度；改变配置后需重新构建相机。
+    /// 把相机配置转换为可直接生成光线的相机，提前算好所有像素共用的坐标系。
+    ///
+    /// 输入：世界坐标中的位置 P、目标 T、向上参考 U，以及垂直视场角 θ（度）。
+    ///
+    /// 输出：校验后的 Camera；位置重合、方向退化或视场角无效时返回 Err。
+    ///
+    /// 公式：f = normalize(T-P)，r = normalize(f×U)，u = r×f；成像平面半高 h = tan(θ/2)。
+    /// 配置变化后需要重新构建，相机不会自动读取原配置的新值。
     pub fn from_config(config: &CameraConfig) -> Result<Self, String> {
         let position = Vector3::from(config.position);
         let target = Vector3::from(config.target);
@@ -61,35 +70,44 @@ impl Camera {
         })
     }
 
+    /// 读取相机所在的世界坐标 P（米），返回坐标副本。
     pub fn position(&self) -> Vector3<f64> {
         self.position
     }
 
+    /// 读取相机正在看的目标位置 T（世界坐标，米），返回坐标副本。
     pub fn target(&self) -> Vector3<f64> {
         self.target
     }
 
+    /// 返回配置中的向上参考向量；它不一定是单位向量，也不一定与观察方向垂直。
     pub fn up(&self) -> Vector3<f64> {
         self.up
     }
 
+    /// 返回相机的垂直视场角，单位为度。
     pub fn fov_y_degrees(&self) -> f64 {
         self.fov_y_degrees
     }
 
-    /// (x, y) 是从零开始的像素下标；图片原点在左上，x 向右、y 向下。
-    /// 宽高由 RenderSetting 提供，画面宽高比为 width / height。
-    /// 光线起点为 position，穿过像素中心，方向由 Ray::new 归一化。
-    /// 使用构建时缓存的坐标系与半高；越界或零尺寸返回 None。
+    /// 生成从相机出发、穿过指定像素中心的光线，用于无像素内抖动的查询。
+    ///
+    /// 输入：零起始像素下标 (x,y) 与图像宽高；图像原点在左上角。
+    ///
+    /// 输出：方向已归一化的 Ray；零尺寸或坐标越界时返回 None。
+    /// 等价于 ray_for_pixel_sample(..., offset=(0.5,0.5))。
     pub fn ray_for_pixel(&self, x: usize, y: usize, width: usize, height: usize) -> Option<Ray> {
         self.ray_for_pixel_sample(x, y, width, height, Vector2::repeat(0.5))
     }
 
-    /// 从像素 (x, y) 内的 offset 位置生成主光线；offset 两轴必须位于 [0, 1)。
+    /// 把像素内的一个采样位置转换为世界空间主光线，用于抗锯齿采样。
     ///
-    /// (0, 0) 是像素左上角，(0.5, 0.5) 是中心，x 向右、y 向下。
-    /// 相机位置不变，采样点为 (x + offset.x, y + offset.y)；方向会归一化。
-    /// 调用方负责采样 offset 和管理 RNG；越界、零尺寸或非法偏移返回 None。
+    /// 输入：像素下标 (x,y)、宽高 W/H、两轴均在 [0,1) 的偏移 offset。
+    ///
+    /// 输出：起点为相机位置 P 的单位方向 Ray；尺寸、下标或偏移无效时返回 None。
+    ///
+    /// 公式：h=tan(fov_y/2)，w=hW/H；a=(2(x+offset.x)/W-1)w，b=(1-2(y+offset.y)/H)h。
+    /// 光线方向 d=normalize(forward+a·right+b·camera_up)；b 的符号使图像 y 轴向下。
     pub fn ray_for_pixel_sample(
         &self,
         x: usize,

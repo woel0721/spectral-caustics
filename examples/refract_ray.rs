@@ -1,13 +1,14 @@
 //! 单条光线：空气 -> 玻璃 -> 空气 -> 地面。
 
 use nalgebra::Vector3;
-use spectral_caustics::{
-    geometry::{ground::Ground, object::Hittable, prism::Prism, ray::Ray},
-    optics::refract,
-};
+use spectral_caustics::geometry::ground::Ground;
+use spectral_caustics::geometry::object::Hittable;
+use spectral_caustics::geometry::prism::Prism;
+use spectral_caustics::geometry::ray::Ray;
+use spectral_caustics::optics::interface::refract;
 use std::error::Error;
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let prism = Prism::new().ok_or("三棱镜构造失败")?;
     let ground = Ground::new(0.0).ok_or("地面构造失败")?;
     let air_ior = 1.0;

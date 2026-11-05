@@ -14,7 +14,6 @@
     "thread_count": null,
     "max_spectral_blocks": 16,
     "output_path": "output/vertical_prism/caustics/camera_combined.png",
-    "debug_path": false,
     "camera_mode": "rgb"
   },
   "scene": {
@@ -118,7 +117,8 @@
         3.7864285714285724,
         -2.813571428571429
       ],
-      "total_flux": 0.009
+      "total_flux": 0.009,
+      "type": "parallel"
     },
     "receiver": {
       "min_m": [
@@ -129,7 +129,6 @@
         -0.1,
         3.6
       ]
-    },
-    "debug_object_id": 0
+    }
   }
 }

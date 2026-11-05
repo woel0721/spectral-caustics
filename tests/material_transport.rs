@@ -1,15 +1,14 @@
 use nalgebra::Vector3;
-use rand::{SeedableRng, rngs::StdRng};
-use spectral_caustics::{
-    config::rendersetting::RenderSetting,
-    config::{
-        materialconfig::MaterialConfig,
-        sceneconfig::{ObjectConfig, SceneConfig},
-    },
-    material::{self, ScatterType},
-    render::caustics::render_spectral_lighting,
-    scene::Scene,
-};
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use spectral_caustics::config::RenderJob;
+use spectral_caustics::config::material::MaterialConfig;
+use spectral_caustics::config::render::RenderSetting;
+use spectral_caustics::config::scene::ObjectConfig;
+use spectral_caustics::config::scene::SceneConfig;
+use spectral_caustics::integrator::photon::integrate_xyz;
+use spectral_caustics::material;
+use spectral_caustics::material::ScatterType;
 
 #[test]
 fn mirror_json_roundtrip_builds_trait_object_and_validates_parameters() {
@@ -48,30 +47,46 @@ fn mirror_prism_does_not_generate_the_ideal_glass_spectral_caustic() {
         ..Default::default()
     };
     for object in &mut config.objects {
-        if let ObjectConfig::Prism { material, .. } = object {
+        if let ObjectConfig::Prism {
+            material, caustics, ..
+        } = object
+        {
+            *caustics = false;
             *material = MaterialConfig::Mirror {
                 reflectance: [0.9; 3],
             };
         }
     }
-    let scene = Scene::from_config(&config).unwrap();
+    let scene = RenderJob::from_config(&config).unwrap();
     let settings = RenderSetting {
         width: 32,
         height: 32,
         samples_per_pixel_axis: 2,
         ..Default::default()
     };
-    let lighting =
-        render_spectral_lighting(&scene, scene.prism_id, scene.ground_id.unwrap(), &settings)
-            .unwrap();
+    let lighting = integrate_xyz(
+        &scene,
+        scene.photon.caustics_object_id,
+        scene.photon.ground_id.unwrap(),
+        &settings,
+    )
+    .unwrap();
     assert!(
         lighting
             .caustics
-            .pixels
+            .pixels()
             .iter()
             .all(|p| *p == Vector3::zeros())
     );
-    assert!(lighting.direct.pixels.iter().any(|p| p.norm() > 0.0));
+    assert!(
+        lighting
+            .direct
+            .as_ref()
+            .unwrap()
+            .pixels()
+            .iter()
+            .any(|p| p.norm() > 0.0)
+    );
 }
 
 #[test]
@@ -84,7 +99,11 @@ fn ggx_json_roundtrips_full_config_and_rejects_invalid_parameters() {
             k: [3.0, 2.0, 1.0],
             roughness,
         };
-        if let ObjectConfig::Prism { material, .. } = &mut config.scene.objects[0] {
+        if let ObjectConfig::Prism {
+            material, caustics, ..
+        } = &mut config.scene.objects[0]
+        {
+            *caustics = false;
             *material = expected.clone();
         }
         let restored = Config::from_json(&config.to_json().unwrap()).unwrap();
@@ -121,10 +140,9 @@ fn ggx_json_roundtrips_full_config_and_rejects_invalid_parameters() {
 
 #[test]
 fn mirror_and_ggx_components_repeat_bitwise_across_threads_mis_depths_and_seeds() {
-    use spectral_caustics::{
-        config::sceneconfig::{EnvironmentConfig, EnvironmentMisHeuristic},
-        render::render_camera_glass_components,
-    };
+    use spectral_caustics::config::scene::EnvironmentConfig;
+    use spectral_caustics::config::scene::EnvironmentMisHeuristic;
+
     let settings = RenderSetting {
         width: 16,
         height: 12,
@@ -155,18 +173,28 @@ fn mirror_and_ggx_components_repeat_bitwise_across_threads_mis_depths_and_seeds(
             ..Default::default()
         };
         for object in &mut config.objects {
-            if let ObjectConfig::Prism { material: m, .. } = object {
+            if let ObjectConfig::Prism {
+                material: m,
+                caustics,
+                ..
+            } = object
+            {
+                *caustics = matches!(material, MaterialConfig::Dielectric { .. });
                 *m = material.clone();
             }
         }
-        let mut scene = Scene::from_config(&config).unwrap();
-        let lighting =
-            render_spectral_lighting(&scene, scene.prism_id, scene.ground_id.unwrap(), &settings)
-                .unwrap();
+        let mut scene = RenderJob::from_config(&config).unwrap();
+        let lighting = integrate_xyz(
+            &scene,
+            scene.photon.caustics_object_id,
+            scene.photon.ground_id.unwrap(),
+            &settings,
+        )
+        .unwrap();
         assert!(
             lighting
                 .caustics
-                .pixels
+                .pixels()
                 .iter()
                 .all(|p| *p == Vector3::zeros())
         );
@@ -174,9 +202,9 @@ fn mirror_and_ggx_components_repeat_bitwise_across_threads_mis_depths_and_seeds(
             EnvironmentMisHeuristic::Balance,
             EnvironmentMisHeuristic::Power,
         ] {
-            scene.environment_mis_heuristic = heuristic;
+            scene.camera_options.environment_mis_heuristic = heuristic;
             for depth in [0, 1, 4] {
-                scene.max_diffuse_bounces = depth;
+                scene.camera_options.max_diffuse_bounces = depth;
                 for seed in [42, 123] {
                     let mut reference = None;
                     for threads in [1, 2, 4, 1] {
@@ -185,22 +213,32 @@ fn mirror_and_ggx_components_repeat_bitwise_across_threads_mis_depths_and_seeds(
                             .build()
                             .unwrap()
                             .install(|| {
-                                render_camera_glass_components(&scene, &lighting, 16, 12, 8, seed)
-                                    .unwrap()
+                                spectral_caustics::integrator::camera::integrate_rgb(
+                                    &scene,
+                                    &spectral_caustics::config::render::RenderSetting {
+                                        width: 16,
+                                        height: 12,
+                                        camera_spp: 8,
+                                        seed,
+                                        ..Default::default()
+                                    },
+                                    Some(&lighting),
+                                )
+                                .unwrap()
                             });
-                        for i in 0..images.combined.pixels.len() {
+                        for i in 0..images.combined.pixels().len() {
                             assert!(
-                                (images.direct.pixels[i] + images.caustics.pixels[i]
-                                    - images.combined.pixels[i])
+                                (images.direct.pixels()[i] + images.caustics.pixels()[i]
+                                    - images.combined.pixels()[i])
                                     .norm()
                                     < 1e-12
                             );
-                            assert_eq!(images.caustics.pixels[i], Vector3::zeros());
+                            assert_eq!(images.caustics.pixels()[i], Vector3::zeros());
                         }
                         let bits: Vec<_> = [&images.direct, &images.caustics, &images.combined]
                             .into_iter()
                             .flat_map(|b| {
-                                b.pixels
+                                b.pixels()
                                     .iter()
                                     .map(|v| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()])
                             })
@@ -218,51 +256,7 @@ fn mirror_and_ggx_components_repeat_bitwise_across_threads_mis_depths_and_seeds(
 }
 
 #[test]
-fn reflective_prisms_ignore_preexisting_glass_caustic_maps_but_keep_direct() {
-    use spectral_caustics::render::render_camera_glass_components;
-    let settings = RenderSetting {
-        width: 32,
-        height: 24,
-        samples_per_pixel_axis: 2,
-        ..Default::default()
-    };
-    let mut config = SceneConfig::default();
-    let glass = Scene::from_config(&config).unwrap();
-    let lighting =
-        render_spectral_lighting(&glass, glass.prism_id, glass.ground_id.unwrap(), &settings)
-            .unwrap();
-    assert!(lighting.caustics.pixels.iter().any(|p| p.norm() > 0.0));
-    for material in [
-        MaterialConfig::Mirror {
-            reflectance: [0.9; 3],
-        },
-        MaterialConfig::GgxMetal {
-            eta: [1.5; 3],
-            k: [2.0; 3],
-            roughness: 0.5,
-        },
-    ] {
-        for object in &mut config.objects {
-            if let ObjectConfig::Prism { material: m, .. } = object {
-                *m = material.clone();
-            }
-        }
-        let scene = Scene::from_config(&config).unwrap();
-        let images = render_camera_glass_components(&scene, &lighting, 32, 24, 16, 42).unwrap();
-        assert!(
-            images
-                .caustics
-                .pixels
-                .iter()
-                .all(|p| *p == Vector3::zeros())
-        );
-        assert!(images.direct.pixels.iter().any(|p| p.norm() > 0.0));
-    }
-}
-
-#[test]
 fn ggx_ground_is_supported_by_rgb_camera_and_rejected_by_irradiance_binding() {
-    use spectral_caustics::render::{render_camera_glass, render_camera_glass_components};
     let mut config = SceneConfig::default();
     for object in &mut config.objects {
         if let ObjectConfig::Ground { material, .. } = object {
@@ -273,11 +267,11 @@ fn ggx_ground_is_supported_by_rgb_camera_and_rejected_by_irradiance_binding() {
             };
         }
     }
-    let scene = Scene::from_config(&config).unwrap();
-    let lighting = render_spectral_lighting(
+    let scene = RenderJob::from_config(&config).unwrap();
+    let lighting = integrate_xyz(
         &scene,
-        scene.prism_id,
-        scene.ground_id.unwrap(),
+        scene.photon.caustics_object_id,
+        scene.photon.ground_id.unwrap(),
         &RenderSetting {
             width: 16,
             height: 12,
@@ -286,12 +280,62 @@ fn ggx_ground_is_supported_by_rgb_camera_and_rejected_by_irradiance_binding() {
         },
     )
     .unwrap();
-    assert!(render_camera_glass_components(&scene, &lighting, 16, 12, 4, 42).is_err());
     assert!(
-        render_camera_glass(&scene, 16, 12, 4, 42)
-            .unwrap()
-            .pixels
-            .iter()
-            .any(|p| p.norm() > 0.0)
+        spectral_caustics::integrator::camera::integrate_rgb(
+            &scene,
+            &spectral_caustics::config::render::RenderSetting {
+                width: 16,
+                height: 12,
+                camera_spp: 4,
+                seed: 42,
+                ..Default::default()
+            },
+            Some(&lighting)
+        )
+        .is_err()
     );
+    assert!(
+        spectral_caustics::integrator::camera::integrate_rgb(
+            &scene,
+            &spectral_caustics::config::render::RenderSetting {
+                width: 16,
+                height: 12,
+                camera_spp: 4,
+                seed: 42,
+                ..Default::default()
+            },
+            None
+        )
+        .map(|images| images.combined)
+        .unwrap()
+        .pixels()
+        .iter()
+        .any(|p| p.norm() > 0.0)
+    );
+}
+
+#[test]
+fn caustics_selection_requires_dielectric_and_defaults_off_for_all_supported_shapes() {
+    use spectral_caustics::config::Config;
+    for source in [
+        include_str!("../configs/vertical_prism_caustics.json"),
+        include_str!("../configs/sphere_spectral.json"),
+        include_str!("../configs/vertical_prism_spectral_caustics.json"),
+    ] {
+        let mut value: serde_json::Value = serde_json::from_str(source).unwrap();
+        value["render"]["camera_mode"] = serde_json::json!("rgb");
+        value["scene"]["objects"][0]["material"] =
+            serde_json::json!({"type":"mirror","reflectance":[1.0,1.0,1.0]});
+        value["scene"]["objects"][0]["caustics"] = true.into();
+        let invalid = Config::from_json(&value.to_string()).unwrap();
+        assert!(invalid.validate().is_err());
+        assert!(invalid.build().is_err());
+        value["scene"]["objects"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("caustics");
+        let valid = Config::from_json(&value.to_string()).unwrap();
+        valid.validate().unwrap();
+        assert!(valid.build().unwrap().photon.caustics_object_id.is_none());
+    }
 }

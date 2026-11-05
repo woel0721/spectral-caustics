@@ -1,9 +1,14 @@
 //! 单面 Lambertian 漫反射，正半球内 f_r = albedo / π。
 
-use super::{BsdfSample, BsdfValue, EvaluateMode, Material, ScatterType, to_world, unit_vector};
-use crate::optics::spectrum::rgb_reflectance;
+use super::BsdfSample;
+use super::Material;
+use super::ScatterType;
+use super::to_world;
+use super::unit_vector;
+use crate::spectrum::rgb_reflectance;
 use nalgebra::Vector3;
-use rand::{Rng, RngCore};
+use rand::Rng;
+use rand::RngCore;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -12,7 +17,7 @@ pub struct Lambertian {
 }
 
 impl Lambertian {
-    /// albedo 为线性 RGB 反射率，各分量必须有限且位于 [0, 1]。
+    /// 创建理想漫反射材质。输入：有限线性 RGB 反射率 albedo，各分量在 `[0,1]`；输出：Lambertian，参数无效时 Err。
     pub fn new(albedo: Vector3<f64>) -> Result<Self, String> {
         if albedo
             .iter()
@@ -23,28 +28,36 @@ impl Lambertian {
         Ok(Self { albedo })
     }
 
+    /// 返回本材质的线性 RGB 反射率副本，各分量在 `[0,1]`，用于读取材质颜色。
     pub fn albedo(&self) -> Vector3<f64> {
         self.albedo
     }
 }
 
 impl Material for Lambertian {
+    /// 返回 true：可由 RGB 反射率近似重建 ρ(λ)，用于单波长路径。
     fn supports_spectral(&self) -> bool {
         true
     }
 
+    /// 给光谱漫反射路径生成下一方向和权重。
+    ///
+    /// 输入：wo、法线、波长（nm）与 RNG，IOR 模式不参与漫反射。
+    ///
+    /// 输出：余弦半球方向、PDF 和标量权重 W=ρ(λ)；光谱重建或方向采样失败返回 None。
+    /// 因为 fλ=ρ(λ)/π、p=cosθ/π，所以 fλ·cosθ/p=ρ(λ)。
     fn sample_spectral(
         &self,
         wo: Vector3<f64>,
         normal: Vector3<f64>,
         wavelength_nm: f64,
-        _: crate::optics::iormode::IorMode,
+        _: crate::optics::dispersion::IorMode,
         rng: &mut dyn RngCore,
-    ) -> Option<super::SpectralBsdfSample> {
+    ) -> Option<super::BsdfSample<f64>> {
         let weight = rgb_reflectance(self.albedo, wavelength_nm)?;
         // 只复用余弦方向和 PDF，光谱权重独立由 rho(λ) 计算。
         let sample = self.sample(wo, normal, rng)?;
-        Some(super::SpectralBsdfSample {
+        Some(super::BsdfSample {
             wi: sample.wi,
             weight,
             pdf: sample.pdf,
@@ -52,33 +65,54 @@ impl Material for Lambertian {
         })
     }
 
+    /// 返回 Some(albedo)，使地面光照可通过 L_o=ρ·E/π 从辐照度换算为反射辐亮度。
     fn irradiance_reflectance(&self) -> Option<Vector3<f64>> {
         Some(self.albedo)
     }
 
-    fn evaluate(
+    /// 计算给定方向的漫反射 BSDF，供直接光与环境积分使用。
+    ///
+    /// 输入：wi/wo、表面法线和 RGB/光谱模式；输出：f=albedo/π 或 fλ=ρ(λ)/π，单位 sr⁻¹。
+    /// 两个方向须在法线正半球；非法方向、非法波长或背面返回对应类型的零。
+    fn evaluate_rgb(
         &self,
         wi: Vector3<f64>,
         wo: Vector3<f64>,
         normal: Vector3<f64>,
-        mode: EvaluateMode,
-    ) -> BsdfValue {
+    ) -> Vector3<f64> {
         let (Some(wi), Some(wo), Some(normal)) =
             (unit_vector(wi), unit_vector(wo), unit_vector(normal))
         else {
-            return BsdfValue::zero(mode);
+            return Vector3::zeros();
         };
         if normal.dot(&wi) <= 0.0 || normal.dot(&wo) <= 0.0 {
-            return BsdfValue::zero(mode);
+            return Vector3::zeros();
         }
-        match mode {
-            EvaluateMode::Rgb => BsdfValue::Rgb(self.albedo / PI),
-            EvaluateMode::Spectral { wavelength_nm } => {
-                BsdfValue::Spectral(rgb_reflectance(self.albedo, wavelength_nm).unwrap_or(0.0) / PI)
-            }
+        self.albedo / PI
+    }
+    fn evaluate_spectral(
+        &self,
+        wi: Vector3<f64>,
+        wo: Vector3<f64>,
+        normal: Vector3<f64>,
+        wavelength_nm: f64,
+    ) -> f64 {
+        let (Some(wi), Some(wo), Some(normal)) =
+            (unit_vector(wi), unit_vector(wo), unit_vector(normal))
+        else {
+            return 0.0;
+        };
+        if normal.dot(&wi) <= 0.0 || normal.dot(&wo) <= 0.0 {
+            return 0.0;
         }
+        rgb_reflectance(self.albedo, wavelength_nm).unwrap_or(0.0) / PI
     }
 
+    /// 按余弦半球分布给 RGB 路径生成下一方向，使漫反射采样权重简化为反射率。
+    ///
+    /// 输入：wo、表面法线和 RNG；输出：方向 wi、W=albedo、p=cosθ/π 和漫反射事件，非法/背面 wo 返回 None。
+    ///
+    /// 公式：u,v∈[0,1)，局部方向 (√u·cos(2πv),√u·sin(2πv),√(1-u))，再变换到法线坐标系。
     fn sample(
         &self,
         wo: Vector3<f64>,
@@ -105,6 +139,9 @@ impl Material for Lambertian {
         })
     }
 
+    /// 查询漫反射方向的采样密度，供环境 MIS 使用。
+    ///
+    /// 输入：wi/wo 和 normal；输出：p=max(n·wi,0)/π（sr⁻¹），背面 wo 或非法方向返回 0。
     fn pdf(&self, wi: Vector3<f64>, wo: Vector3<f64>, normal: Vector3<f64>) -> f64 {
         let (Some(wi), Some(wo), Some(normal)) =
             (unit_vector(wi), unit_vector(wo), unit_vector(normal))
@@ -121,7 +158,8 @@ impl Material for Lambertian {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{SeedableRng, rngs::StdRng};
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     fn rgb_bsdf(
         material: &dyn Material,
@@ -129,10 +167,7 @@ mod tests {
         wo: Vector3<f64>,
         normal: Vector3<f64>,
     ) -> Vector3<f64> {
-        let BsdfValue::Rgb(value) = material.evaluate(wi, wo, normal, EvaluateMode::Rgb) else {
-            panic!("RGB 模式必须返回 RGB BSDF");
-        };
-        value
+        material.evaluate_rgb(wi, wo, normal)
     }
 
     fn spectral_bsdf(
@@ -142,12 +177,7 @@ mod tests {
         normal: Vector3<f64>,
         wavelength_nm: f64,
     ) -> f64 {
-        let BsdfValue::Spectral(value) =
-            material.evaluate(wi, wo, normal, EvaluateMode::Spectral { wavelength_nm })
-        else {
-            panic!("光谱模式必须返回标量 BSDF");
-        };
-        value
+        material.evaluate_spectral(wi, wo, normal, wavelength_nm)
     }
 
     #[test]

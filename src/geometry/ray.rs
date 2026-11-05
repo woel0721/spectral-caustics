@@ -7,22 +7,17 @@ pub(crate) const PARALLEL_EPSILON: f64 = 1e-12;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Ray {
-    /// 光线的起点。
     pub origin: Vector3<f64>,
-    /// 光线的单位方向；改变方向时应重新构造 Ray，以同步私有倒数缓存。
     pub direction: Vector3<f64>,
-    /// 单位方向各分量的倒数；零分量的倒数为带符号的无穷大。
-    /// 此缓存供后续包围盒求交使用，不能要求所有分量都有限。
-    pub direction_inv: Vector3<f64>,
-    /// 预留的查询距离下限（米）；当前几何 intersect 不读取此字段。
-    pub t_min: f64,
-    /// 预留的查询距离上限（米）；当前几何 intersect 不读取此字段。
-    pub t_max: f64,
 }
 
 impl Ray {
-    /// 由起点和方向创建光线，自动归一化方向；非法输入返回 None。
-    /// 预留查询范围初始值为 (0, f64::MAX)，当前几何求交不使用。
+    /// 把世界空间起点和方向打包成光线，供所有几何求交使用。
+    ///
+    /// 输入：起点 origin（米）和非零方向 direction；方向不必预先归一化。
+    ///
+    /// 输出：保存 d=direction/‖direction‖ 及逐分量倒数 1/d 的 Ray；非法值或长度溢出返回 None。
+    /// 预留距离范围为 (0,f64::MAX)，当前几何求交不读取它；零方向分量的倒数允许为无穷大。
     pub fn new(origin: Vector3<f64>, direction: Vector3<f64>) -> Option<Self> {
         // 起点和方向都必须是有限值。
         if !origin.iter().all(|v| v.is_finite()) || !direction.iter().all(|v| v.is_finite()) {
@@ -39,19 +34,15 @@ impl Ray {
         let direction = direction / length;
         // IEEE 754 浮点除法：1 / (+0) = +inf，1 / (-0) = -inf。
         // 必须先归一化，再计算倒数，保证缓存与实际保存的方向一致。
-        let direction_inv = direction.map(|component| 1.0 / component);
 
-        Some(Self {
-            origin,
-            direction,
-            direction_inv,
-            t_min: 0.0,
-            t_max: f64::MAX,
-        })
+        Some(Self { origin, direction })
     }
 
-    /// 计算 origin + distance * direction；单位方向使 distance 表示距离（米）。
-    /// 调用者应提供有限且不会使计算溢出的 distance。
+    /// 求光线前进指定距离后的位置。
+    ///
+    /// 输入：距离 t（米）；调用方负责保证 t 有限且运算不溢出。
+    ///
+    /// 输出：世界坐标 P(t)=origin+t·direction；负 t 表示起点后方。
     pub fn at(&self, distance: f64) -> Vector3<f64> {
         self.origin + self.direction * distance
     }
@@ -68,37 +59,6 @@ mod tests {
 
         assert!((ray.direction - expected).norm() < 1e-12);
         assert!((ray.direction.norm() - 1.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn constructor_initializes_distance_limits() {
-        let ray = Ray::new(Vector3::zeros(), Vector3::new(1.0, 0.0, 0.0)).unwrap();
-
-        assert_eq!(ray.t_min, 0.0);
-        assert_eq!(ray.t_max, f64::MAX);
-    }
-
-    #[test]
-    fn inverse_direction_matches_normalized_direction() {
-        let ray = Ray::new(Vector3::zeros(), Vector3::new(2.0, -3.0, 6.0)).unwrap();
-
-        for axis in 0..3 {
-            assert!((ray.direction[axis] * ray.direction_inv[axis] - 1.0).abs() < 1e-12);
-        }
-    }
-
-    #[test]
-    fn zero_direction_components_have_signed_infinite_inverses() {
-        let ray = Ray::new(Vector3::zeros(), Vector3::new(0.0, -0.0, -5.0)).unwrap();
-
-        assert_eq!(ray.direction_inv.x, f64::INFINITY);
-        assert_eq!(ray.direction_inv.y, f64::NEG_INFINITY);
-        assert_eq!(ray.direction_inv.z, -1.0);
-        assert!(
-            ray.direction_inv
-                .iter()
-                .all(|component| !component.is_nan())
-        );
     }
 
     #[test]

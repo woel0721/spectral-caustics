@@ -1,12 +1,12 @@
 //! 生成用于玻璃色散测试的线性 equirectangular HDRI；不做曝光、色调映射或 sRGB 编码。
 
-use image::{Rgb, codecs::hdr::HdrEncoder};
-use std::{
-    error::Error,
-    fs,
-    io::{BufWriter, Write},
-    path::Path,
-};
+use image::Rgb;
+use image::codecs::hdr::HdrEncoder;
+use std::error::Error;
+use std::fs;
+use std::io::BufWriter;
+use std::io::Write;
+use std::path::Path;
 
 const WIDTH: usize = 2048;
 const HEIGHT: usize = 1024;
@@ -42,7 +42,7 @@ fn pixel_value(u: f64, v: f64, pattern: Pattern) -> f32 {
     if is_white { WHITE } else { BLACK }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut args = std::env::args().skip(1);
     let (pattern, output) = match args.next().as_deref() {
         None | Some("stripes") => (Pattern::Stripes, "assets/HDRI/dispersion_stripes.hdr"),

@@ -1,6 +1,8 @@
 use super::*;
-use crate::material::{dielectric::fresnel_dielectric, to_world};
-use rand::{SeedableRng, rngs::StdRng};
+use crate::material::to_world;
+use crate::optics::interface::fresnel_dielectric;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use std::f64::consts::PI;
 
 fn metal(roughness: f64) -> GgxMetal {
@@ -12,10 +14,7 @@ fn metal(roughness: f64) -> GgxMetal {
     .unwrap()
 }
 fn rgb(m: &GgxMetal, wi: Vector3<f64>, wo: Vector3<f64>, n: Vector3<f64>) -> Vector3<f64> {
-    let BsdfValue::Rgb(value) = m.evaluate(wi, wo, n, EvaluateMode::Rgb) else {
-        panic!("RGB expected");
-    };
-    value
+    m.evaluate_rgb(wi, wo, n)
 }
 #[test]
 fn ggx_samples_match_full_solid_angle_pdf_weight_and_replay() {
@@ -147,15 +146,8 @@ fn ggx_rejects_invalid_parameters_and_geometric_queries_and_has_no_fake_spectrum
     }
     assert_eq!(rng.random::<u64>(), unchanged.random::<u64>());
     assert_eq!(
-        m.evaluate(
-            Vector3::z(),
-            Vector3::z(),
-            Vector3::z(),
-            EvaluateMode::Spectral {
-                wavelength_nm: 550.0
-            }
-        ),
-        BsdfValue::Spectral(0.0)
+        m.evaluate_spectral(Vector3::z(), Vector3::z(), Vector3::z(), 550.0),
+        (0.0)
     );
 }
 

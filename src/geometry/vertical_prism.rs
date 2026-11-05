@@ -1,7 +1,11 @@
 //! XY 三角形沿世界 Z 轴挤出的无倒角封闭三棱柱。
 
-use super::{hit::Hit, object::Hittable, prism::Prism, ray::Ray};
-use nalgebra::{Vector2, Vector3};
+use super::hit::GeometryHit as Hit;
+use super::object::Hittable;
+use super::prism::Prism;
+use super::ray::Ray;
+use nalgebra::Vector2;
+use nalgebra::Vector3;
 
 #[derive(Debug)]
 pub struct VerticalPrism {
@@ -10,8 +14,12 @@ pub struct VerticalPrism {
 }
 
 impl VerticalPrism {
-    /// section 为世界 XY 坐标，支持两种绕序；上下端面分别位于 z_min/z_max。
-    /// 只复用任意六顶点凸三棱柱的三角面求交，不使用旧 Prism::new() 的横向顶点。
+    /// 将 XY 三角截面沿 Z 轴拉伸成封闭三棱柱，用于竖直棱镜场景。
+    ///
+    /// 输入：三个 XY 顶点 section（米）及上下高度 z_min<z_max（米），接受顺/逆时针。
+    ///
+    /// 输出：端面朝外的 VerticalPrism；截面退化、高度无效或构建失败返回 None。
+    /// 内部调整绕序后调用 Prism::from_vertices，共用三角面求交。
     pub fn new(mut section: [Vector2<f64>; 3], z_min: f64, z_max: f64) -> Option<Self> {
         let height = z_max - z_min;
         if section.iter().flatten().any(|v| !v.is_finite())
@@ -38,13 +46,15 @@ impl VerticalPrism {
         Some(Self { mesh, vertices })
     }
 
-    /// 前三点在下端面，后三点是相同 XY 坐标的上端面；下端面从 +Z 看为顺时针。
+    /// 读取构建后的六个世界坐标顶点（米），返回只读引用。
+    /// 前三点位于下端面，后三点位于相同 XY 的上端面；下端面从 +Z 看为顺时针。
     pub fn vertices(&self) -> &[Vector3<f64>; 6] {
         &self.vertices
     }
 }
 
 impl Hittable for VerticalPrism {
+    /// 把输入 Ray 交给内部封闭三棱柱求交，返回最近正向 Hit；未命中返回 None。
     fn intersect(&self, ray: &Ray) -> Option<Hit> {
         self.mesh.intersect(ray)
     }

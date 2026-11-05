@@ -1,10 +1,10 @@
 //! 单个三角形与双面的 Möller–Trumbore 求交。
 
-use super::{
-    hit::Hit,
-    object::Hittable,
-    ray::{INTERSECTION_EPSILON, PARALLEL_EPSILON, Ray},
-};
+use super::hit::GeometryHit as Hit;
+use super::object::Hittable;
+use super::ray::INTERSECTION_EPSILON;
+use super::ray::PARALLEL_EPSILON;
+use super::ray::Ray;
 use nalgebra::Vector3;
 
 #[derive(Debug, Clone, Copy)]
@@ -19,7 +19,13 @@ pub struct Triangle {
 }
 
 impl Triangle {
-    /// 非有限顶点、退化三角形或计算溢出时返回 None。
+    /// 用三个世界坐标顶点创建三角形，并缓存边与单位法线，减少重复求交的计算。
+    ///
+    /// 输入：按绕序给出的 v0、v1、v2（米）。
+    ///
+    /// 输出：Triangle；顶点非有限、三点共线或计算溢出时返回 None。
+    ///
+    /// 公式：e1=v1-v0，e2=v2-v0，n=(e1×e2)/‖e1×e2‖；顶点绕序决定法线方向。
     pub fn new(v0: Vector3<f64>, v1: Vector3<f64>, v2: Vector3<f64>) -> Option<Self> {
         let vertices = [v0, v1, v2];
         if !vertices.iter().all(|v| v.iter().all(|c| c.is_finite())) {
@@ -44,6 +50,12 @@ impl Triangle {
 }
 
 impl Hittable for Triangle {
+    /// 求光线与三角形的最近正向交点，两面都能命中，供封闭玻璃寻找入射面和出射面。
+    ///
+    /// 输入：世界空间 Ray；输出：坐标、距离和原始几何法线组成的 Hit，未命中或数值无效返回 None。
+    ///
+    /// 公式：解 o+t·d=v0+u·e1+v·e2；仅接受 u≥0、v≥0、u+v≤1 和 t>ε。
+    /// 使用 Möller–Trumbore 的叉积与点积求 t/u/v；法线不随光线方向翻转。
     fn intersect(&self, ray: &Ray) -> Option<Hit> {
         if !ray.origin.iter().all(|c| c.is_finite()) || !ray.direction.iter().all(|c| c.is_finite())
         {
@@ -86,12 +98,11 @@ impl Hittable for Triangle {
         }
 
         // Hit 只记录结果；几何计算与合法性检查都在求交算法中完成。
-        // 纹理、发光和场景编号暂未设置，沿用各字段默认值。
+        // 物体/材质编号由场景查询补充，这里只填写几何结果。
         Some(Hit {
             coords,
             normal: self.normal,
             distance,
-            ..Hit::default()
         })
     }
 }
@@ -211,24 +222,6 @@ mod tests {
                 .intersect(&downward_ray(0.25, 0.25, 2.0 * INTERSECTION_EPSILON))
                 .is_some()
         );
-    }
-
-    #[test]
-    fn reserved_distance_limits_do_not_affect_geometric_hit() {
-        let triangle = unit_triangle();
-        let mut ray = downward_ray(0.25, 0.25, 2.0);
-        for (min, max) in [
-            (0.0, 1.0),
-            (3.0, 4.0),
-            (3.0, 1.0),
-            (f64::NAN, f64::NEG_INFINITY),
-        ] {
-            ray.t_min = min;
-            ray.t_max = max;
-            let hit = triangle.intersect(&ray).unwrap();
-            assert!((hit.distance - 2.0).abs() < 1e-12);
-            assert!((hit.coords - Vector3::new(0.25, 0.25, 0.0)).norm() < 1e-12);
-        }
     }
 
     #[test]

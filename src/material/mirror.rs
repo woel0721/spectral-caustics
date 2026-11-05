@@ -1,5 +1,8 @@
 //! 单面理想镜面，反射率为线性 RGB；无普通立体角密度。
-use super::{BsdfSample, BsdfValue, EvaluateMode, Material, ScatterType, unit_vector};
+use super::BsdfSample;
+use super::Material;
+use super::ScatterType;
+use super::unit_vector;
 use nalgebra::Vector3;
 use rand::RngCore;
 
@@ -8,6 +11,7 @@ pub struct Mirror {
     reflectance: Vector3<f64>,
 }
 impl Mirror {
+    /// 创建理想镜面。输入：各分量在 `[0,1]` 的有限线性 RGB 反射率；输出：Mirror，参数无效时 Err。
     pub fn new(reflectance: Vector3<f64>) -> Result<Self, String> {
         if reflectance
             .iter()
@@ -19,36 +23,41 @@ impl Mirror {
     }
 }
 impl Material for Mirror {
+    /// 返回 true：镜面反射率可近似重建为单波长 ρ(λ)。
     fn supports_spectral(&self) -> bool {
         true
     }
 
+    /// 为光谱路径生成确定的镜面反射。
+    ///
+    /// 输入：wo、法线、波长（nm）和接口要求的 RNG/IOR 模式；不消耗 RNG。
+    ///
+    /// 输出：镜面方向、W=ρ(λ)、pdf=None；反射率重建失败或方向无效返回 None。
     fn sample_spectral(
         &self,
         wo: Vector3<f64>,
         normal: Vector3<f64>,
         wavelength_nm: f64,
-        _: crate::optics::iormode::IorMode,
+        _: crate::optics::dispersion::IorMode,
         rng: &mut dyn RngCore,
-    ) -> Option<super::SpectralBsdfSample> {
-        let weight = crate::optics::spectrum::rgb_reflectance(self.reflectance, wavelength_nm)?;
+    ) -> Option<super::BsdfSample<f64>> {
+        let weight = crate::spectrum::rgb_reflectance(self.reflectance, wavelength_nm)?;
         let sample = self.sample(wo, normal, rng)?;
-        Some(super::SpectralBsdfSample {
+        Some(super::BsdfSample {
             wi: sample.wi,
             weight,
             pdf: None,
             event: sample.event,
         })
     }
-    fn evaluate(
-        &self,
-        _: Vector3<f64>,
-        _: Vector3<f64>,
-        _: Vector3<f64>,
-        mode: EvaluateMode,
-    ) -> BsdfValue {
-        BsdfValue::zero(mode)
+    /// 按输入 mode 返回零 BSDF：理想镜面贡献属于离散方向，只能通过 sample 的反射记录计算。
+    fn evaluate_rgb(&self, _: Vector3<f64>, _: Vector3<f64>, _: Vector3<f64>) -> Vector3<f64> {
+        Vector3::zeros()
     }
+    /// 为 RGB 路径生成唯一的镜面反射方向，不抽取随机数。
+    ///
+    /// 输入：wo 和表面法线 n，RNG 参数仅为统一接口；输出：wi=normalize(2(n·wo)n-wo)、W=reflectance、pdf=None。
+    /// 方向非法或 wo 位于背面时返回 None。
     fn sample(
         &self,
         wo: Vector3<f64>,
@@ -67,9 +76,11 @@ impl Material for Mirror {
             event: ScatterType::SpecularReflection,
         })
     }
+    /// 返回 false：理想镜面没有连续散射分量。
     fn has_non_delta(&self) -> bool {
         false
     }
+    /// 返回 true：镜面反射使用离散事件和对应的路径预算。
     fn has_delta(&self) -> bool {
         true
     }
@@ -78,7 +89,9 @@ impl Material for Mirror {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::Rng;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
     #[test]
     fn mirror_reflects_in_world_space_with_rgb_weight_and_no_rng_or_regular_pdf() {
         let color = Vector3::new(0.2, 0.6, 0.9);
@@ -93,10 +106,7 @@ mod tests {
             assert_eq!(sample.pdf, None);
             assert_eq!(sample.event, ScatterType::SpecularReflection);
             assert_eq!(m.pdf(sample.wi, wo, n), 0.0);
-            assert_eq!(
-                m.evaluate(sample.wi, wo, n, EvaluateMode::Rgb),
-                BsdfValue::Rgb(Vector3::zeros())
-            );
+            assert_eq!(m.evaluate_rgb(sample.wi, wo, n), (Vector3::zeros()));
         }
         assert_eq!(rng.random::<u64>(), untouched.random::<u64>());
     }
