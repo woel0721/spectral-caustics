@@ -33,18 +33,6 @@ fn offset_ray_origin(
 }
 
 #[cfg(test)]
-pub(crate) mod diffuse_tests;
-#[cfg(test)]
-mod environment_tests;
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-mod bounce_tests;
-#[cfg(test)]
-mod path_tests;
-
-#[cfg(test)]
-pub(crate) mod test_support;
+pub(crate) mod tests;
 
 pub use types::CameraPathState;

@@ -1,17 +1,17 @@
 //! Bounded diffuse depth, Russian Roulette and current transport invariants.
-use super::diffuse_tests::SequenceRng;
-use super::diffuse_tests::bits;
-use super::diffuse_tests::close;
-use super::diffuse_tests::first_hit;
-use super::diffuse_tests::sun;
-use super::diffuse_tests::two_planes;
-use super::diffuse_tests::uniform_hdri;
-use super::ground::GroundLighting;
-use super::path::russian_roulette;
-use super::test_support::evaluate_path;
-use super::types::CameraPathComponents;
-use super::types::CameraPathRngs;
-use super::types::CameraPathState;
+use super::super::ground::GroundLighting;
+use super::super::path::russian_roulette;
+use super::super::types::CameraPathComponents;
+use super::super::types::CameraPathRngs;
+use super::super::types::CameraPathState;
+use super::support::SequenceRng;
+use super::support::bits;
+use super::support::close;
+use super::support::evaluate_path;
+use super::support::first_hit;
+use super::support::sun;
+use super::support::two_planes;
+use super::support::uniform_hdri;
 use crate::color::linear_srgb_to_xyz;
 use crate::config::Config;
 use crate::config::RenderJob;
@@ -105,7 +105,7 @@ fn fixed_depth_reaches_2_3_5_vertices_and_rgb_products_are_correct() {
         let material = scene.scene.material(hit.material_id);
         let mut state =
             CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), depth);
-        super::test_support::trace_continuation(
+        super::support::trace_continuation(
             &scene,
             &hit,
             material,
@@ -362,7 +362,7 @@ fn invalid_and_empty_continuation_samples_at_later_vertices_are_handled() {
         let hit = first_hit(&scene);
         let mut state =
             CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 5);
-        let result = super::test_support::trace_continuation(
+        let result = super::support::trace_continuation(
             &scene,
             &hit,
             scene.scene.material(hit.material_id),
@@ -508,7 +508,7 @@ fn deep_escape_does_not_add_hdri_again_or_consume_new_environment_samples() {
         let mut one = CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 1);
         let mut deep = CameraPathState::new(one.ray, 5);
         let material = scene.scene.material(hit.material_id);
-        super::test_support::trace_continuation(
+        super::support::trace_continuation(
             &scene,
             &hit,
             material,
@@ -518,7 +518,7 @@ fn deep_escape_does_not_add_hdri_again_or_consume_new_environment_samples() {
             &mut one,
         )
         .unwrap();
-        super::test_support::trace_continuation(
+        super::support::trace_continuation(
             &scene,
             &hit,
             material,
@@ -558,7 +558,7 @@ fn deep_ground_hits_never_read_caustics() {
     {
         let mut state =
             CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 3);
-        super::test_support::trace_continuation(
+        super::support::trace_continuation(
             &scene,
             &hit,
             material,
@@ -696,7 +696,7 @@ fn terminal_vertex_rejects_invalid_direct_bsdf_without_another_bsdf_sample() {
     let hit = first_hit(&scene);
     let mut state = CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 2);
     let mut rng = SequenceRng::new(&[0.25, 0.0, 0.5, 0.25]);
-    let result = super::test_support::trace_continuation(
+    let result = super::support::trace_continuation(
         &scene,
         &hit,
         scene.scene.material(hit.material_id),

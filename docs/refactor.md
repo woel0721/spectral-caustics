@@ -69,30 +69,30 @@
 | `src/render/framebuffer.rs` | src/film.rs |
 | `src/render/integrator.rs` | src/integrator/camera/mod.rs |
 | `src/render/integrator/area.rs` | src/integrator/camera/lighting/area.rs |
-| `src/render/integrator/bounce_tests.rs` | src/integrator/camera/bounce_tests.rs |
+| `src/render/integrator/bounce_tests.rs` | src/integrator/camera/tests/bounce.rs |
 | `src/render/integrator/camera.rs` | src/integrator/camera/rgb.rs；删除单图/分量包装层 |
 | `src/render/integrator/debug.rs` | src/diagnostics/mod.rs（feature） |
 | `src/render/integrator/debug/tests.rs` | src/diagnostics/tests.rs（feature） |
 | `src/render/integrator/diffuse.rs` | camera/path.rs；删除重复后续顶点着色/续追 |
-| `src/render/integrator/diffuse_tests.rs` | src/integrator/camera/diffuse_tests.rs |
+| `src/render/integrator/diffuse_tests.rs` | src/integrator/camera/tests/diffuse.rs |
 | `src/render/integrator/direct.rs` | camera/lighting/mod.rs + 共享 camera/path.rs；删除旧首顶点着色 |
 | `src/render/integrator/environment.rs` | src/integrator/camera/lighting/environment.rs |
-| `src/render/integrator/environment_tests.rs` | src/integrator/camera/environment_tests.rs |
-| `src/render/integrator/environment_tests/power.rs` | src/integrator/camera/environment_tests/power.rs |
-| `src/render/integrator/environment_tests/stratified.rs` | src/integrator/camera/environment_tests/stratified.rs |
+| `src/render/integrator/environment_tests.rs` | src/integrator/camera/tests/environment.rs |
+| `src/render/integrator/environment_tests/power.rs` | src/integrator/camera/tests/environment.rs（power 子模块） |
+| `src/render/integrator/environment_tests/stratified.rs` | src/integrator/camera/tests/environment.rs（stratified 子模块） |
 | `src/render/integrator/ground.rs` | src/integrator/camera/ground.rs；只保留图查询/绑定 |
 | `src/render/integrator/path.rs` | src/integrator/camera/path.rs |
-| `src/render/integrator/path_tests.rs` | src/integrator/camera/path_tests.rs |
-| `src/render/integrator/path_tests/environment_escape.rs` | src/integrator/camera/path_tests/environment_escape.rs |
-| `src/render/integrator/path_tests/materials.rs` | src/integrator/camera/path_tests/materials.rs |
+| `src/render/integrator/path_tests.rs` | src/integrator/camera/tests/path.rs |
+| `src/render/integrator/path_tests/environment_escape.rs` | src/integrator/camera/tests/path.rs（environment_escape 子模块） |
+| `src/render/integrator/path_tests/materials.rs` | src/integrator/camera/tests/path.rs（materials 子模块） |
 | `src/render/integrator/rng.rs` | src/sampling/rng.rs |
 | `src/render/integrator/spectral.rs` | src/integrator/camera/spectral.rs |
 | `src/render/integrator/spectral/diagnostic.rs` | src/diagnostics/wavelength.rs（feature） |
 | `src/render/integrator/spectral/lighting.rs` | 合入共享 camera/lighting/，删除独立估计器 |
 | `src/render/integrator/spectral/path.rs` | 合入 src/integrator/camera/path.rs，删除独立循环与 RR |
 | `src/render/integrator/spectral/state.rs` | 合入 src/integrator/camera/types.rs |
-| `src/render/integrator/test_support.rs` | src/integrator/camera/test_support.rs |
-| `src/render/integrator/tests.rs` | src/integrator/camera/tests.rs |
+| `src/render/integrator/test_support.rs` | src/integrator/camera/tests/support.rs |
+| `src/render/integrator/tests.rs` | src/integrator/camera/tests/mod.rs |
 | `src/render/integrator/types.rs` | src/integrator/camera/types.rs |
 | `src/render/mod.rs` | src/renderer.rs；输出编码迁入 src/output.rs |
 | `src/render/utils.rs` | src/color.rs + src/output.rs；空间插值迁入 src/caustics/map.rs |

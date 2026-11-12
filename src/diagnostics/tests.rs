@@ -4,10 +4,10 @@ use crate::geometry::ground::Ground;
 use crate::geometry::prism::Prism;
 use crate::geometry::ray::Ray;
 use crate::geometry::sphere::Sphere;
-use crate::integrator::camera::diffuse_tests::SequenceRng;
-use crate::integrator::camera::diffuse_tests::sun;
-use crate::integrator::camera::diffuse_tests::two_planes;
 use crate::integrator::camera::path::MAX_DELTA_EVENTS;
+use crate::integrator::camera::tests::support::SequenceRng;
+use crate::integrator::camera::tests::support::sun;
+use crate::integrator::camera::tests::support::two_planes;
 use crate::integrator::camera::{
     path::trace_camera_path,
     transport::Caustics,

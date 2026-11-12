@@ -1,8 +1,14 @@
-use crate::geometry::hit::GeometryHit;
-// 相机积分器的原有单元测试。
+//! 相机采样、分量计光、漫反射续追、环境 MIS 与混合材质路径测试。
+
+mod bounce;
+mod diffuse;
+mod environment;
+mod path;
+pub(crate) mod support;
+
+use self::support::evaluate_path;
 use super::lighting::camera_lighting_setup;
 use super::lighting::environment::environment_lighting;
-use super::test_support::evaluate_path;
 use super::types::CameraPathRngs;
 use super::*;
 use crate::camera::Camera;
@@ -19,6 +25,7 @@ use crate::config::scene::ObjectConfig;
 use crate::config::scene::SceneConfig;
 use crate::film::Framebuffer;
 use crate::geometry::ground::Ground;
+use crate::geometry::hit::GeometryHit;
 use crate::geometry::hit::Hit;
 use crate::geometry::object::Hittable;
 use crate::geometry::prism::Prism;
