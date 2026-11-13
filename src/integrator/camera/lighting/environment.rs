@@ -1,7 +1,7 @@
 //! 环境方向积分、固定配额 Balance/Power MIS 与方向贡献。
 
 use super::super::transport::CameraTransport;
-use super::visible_to_light;
+use super::transmittance_to_light;
 use crate::config::RenderJob;
 use crate::config::scene::EnvironmentMisHeuristic;
 use crate::geometry::hit::Hit;
@@ -190,11 +190,7 @@ fn environment_direction_contribution<T: CameraTransport>(
     if !transport.finite(contribution) {
         return Err("环境采样贡献计算溢出".into());
     }
-    if visible_to_light(scene, hit.coords, normal, wi)? {
-        Ok(contribution)
-    } else {
-        Ok(T::Value::default())
-    }
+    Ok(contribution * transmittance_to_light(scene, hit.coords, normal, wi)?)
 }
 
 /// 计算 Power MIS 的策略权重及其除采样密度后的值，供 RGB/光谱环境共用。

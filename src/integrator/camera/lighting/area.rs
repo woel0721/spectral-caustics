@@ -1,5 +1,6 @@
 //! Disk NEE owns its RNG cursor; changing its quota cannot consume path or environment draws.
 use super::super::{offset_ray_origin, transport::CameraTransport};
+use super::shadow_transmittance;
 use crate::{
     config::RenderJob,
     geometry::{hit::Hit, ray::Ray},
@@ -37,17 +38,19 @@ impl AreaLightSampler {
                 continue;
             };
             let cosine = normal.dot(&sample.wi).max(0.0);
-            if cosine == 0.0
-                || sample.incident_weight == 0.0
-                || !visible_to_point(job, hit.coords, normal, sample.position)?
-            {
+            if cosine == 0.0 || sample.incident_weight == 0.0 {
+                continue;
+            }
+            let tr = transmittance_to_point(job, hit.coords, normal, sample.position)?;
+            if tr == 0.0 {
                 continue;
             }
             let f = transport.evaluate(m, sample.wi, wo, normal);
             if !transport.valid_weight(f) {
                 return Err("invalid area BSDF".into());
             }
-            let factor = sample.incident_weight * cosine / job.camera_options.light_samples as f64;
+            let factor =
+                (sample.incident_weight * cosine / job.camera_options.light_samples as f64) * tr;
             result += transport.multiply(f, transport.disk_emission()) * factor;
         }
         if !transport.finite(result) {
@@ -56,18 +59,15 @@ impl AreaLightSampler {
         Ok(result)
     }
 }
-pub fn visible_to_point(
+fn transmittance_to_point(
     job: &RenderJob,
     position: Vector3<f64>,
     normal: Vector3<f64>,
     target: Vector3<f64>,
-) -> Result<bool, Box<dyn Error + Send + Sync>> {
+) -> Result<f64, Box<dyn Error + Send + Sync>> {
     let origin = offset_ray_origin(position, normal, 1.0);
     let delta = target - origin;
     let distance = delta.norm();
     let ray = Ray::new(origin, delta).ok_or("invalid shadow segment")?;
-    Ok(job
-        .scene
-        .intersect(&ray)
-        .is_none_or(|h| h.distance >= distance))
+    Ok(shadow_transmittance(job, &ray, distance))
 }

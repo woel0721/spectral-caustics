@@ -195,6 +195,7 @@ pub(super) fn trace_continuation(
             camera: &mut unused_camera,
             environment: &mut unused_environment,
             diffuse: rng,
+            medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
         },
         light.0,
         light.1,

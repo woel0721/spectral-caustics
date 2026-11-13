@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
-`Renderer::render(&RenderJob)` 是唯一的高层渲染入口。Renderer 只持有设置和可选 Rayon 线程池，负责选择 Pipeline 和执行调度。它不实现散射、Fresnel、路径循环或图像编码。`Scene` 只保存物体、材质、光源、环境、背景并求最近交点。`RenderJob` 将 Scene、Camera、相机采样选项、光子接收区及物体编号组合起来。
+`Renderer::render(&RenderJob)` 是唯一的高层渲染入口。Renderer 只持有设置和可选 Rayon 线程池，负责选择 Pipeline 和执行调度。它不实现散射、Fresnel、路径循环或图像编码。`Scene` 只保存物体、材质、光源、环境、背景、可选均匀介质并求最近交点。`RenderJob` 将 Scene、Camera、相机采样选项、光子接收区及物体编号组合起来。
 
 目录按职责组织：
 
@@ -49,11 +49,12 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 | `scene/`、`geometry/` | 场景、几何求交；GeometryHit 由 Scene 绑定成带有效编号的 Hit |
 | `light/`、`environment/` | 平行光 / 圆盘的发射分布、环境辐亮度与方向分布 |
 | `material/` | RGB / 标量光谱 BSDF、采样事件及方向 PDF |
+| `medium/` | 有界均匀介质、自由程、Beer–Lambert、HG 相函数 |
 | `optics/interface.rs` | Snell、Fresnel、介质界面事件及两种传输权重 |
 | `optics/dispersion.rs` | Constant / Cauchy 折射率；波长 nm、Cauchy 内部 μm |
 | `integrator/camera/path.rs` | RGB / Hero 共用的路径主循环、预算、RR、分量归属 |
 | `integrator/camera/{rgb,spectral,transport,types}.rs` | 像素 / 波长采样，数值表示与状态 |
-| `integrator/camera/lighting/` | 圆盘 NEE、环境 NEE / MIS、二值 Shadow Visibility |
+| `integrator/camera/lighting/` | 表面 / 体散射 NEE、环境 MIS、几何遮挡与介质透射率 |
 | `integrator/photon/{generation,path}.rs` | 共享发射 / 沉积内核、光谱积分及单光子 Forward 循环 |
 | `caustics/` | 接收区、只读 XYZ / Eλ 数据、空间 / 波长插值 |
 | `sampling/` | 确定性随机流派生 |
@@ -140,5 +141,48 @@ git diff --check
 固定配置 / seed 在当前实现的 Rayon 1/2/4 线程下逐位可复现。改变采样块数量会改变浮点加法分组，测试使用数值容差；不冻结旧算法的 RNG 消耗或旧版本逐位结果。
 
 当前不支持内部光子发射、嵌套介质、透明 Shadow Ray、环境焦散、通用 Photon Mapping、BVH / KD-Tree、GUI / GPU 或光谱 GGX。RGB 到光谱是近似模型，CIE / D65 及 PBRT 基谱来源、许可证与校验和见 [颜色数据说明](assets/color/README.md)。
+
+## 均匀介质与单次体散射
+
+`configs/homogeneous_fog.json` 提供球体、棋盘地面和逆光雾。`scene.medium` 省略或设为 `null` 时关闭介质；原有场景不改变随机数消耗和渲染结果。配置示例：
+
+```json
+"medium": {
+  "min_m": [-3.0, -2.5, 0.02],
+  "max_m": [3.0, 3.0, 3.5],
+  "sigma_a": 0.03,
+  "sigma_s": 0.22,
+  "g": 0.7
+}
+```
+
+边界是世界坐标轴对齐盒，距离单位为米，`sigma_a`、`sigma_s` 单位为 m⁻¹，`sigma_t = sigma_a + sigma_s`；`-1 < g < 1`。这些系数目前与波长无关；RGB 和 Spectral 在各自 Transport 中乘同一个标量权重，没有 RGB 插值介质光谱。盒边界没有可见表面、不折射；它是空间掩膜，也覆盖盒内玻璃的内部，暂不表达排除固体或内外介质切换。
+
+每条当前射线先求最近表面，再把盒交区间裁到该距离（miss 则裁到盒出口）。首次体散射前，用 `s = -ln(1-u)/sigma_t` 抽取区间入口后的自由程。如果 `s < L`，距离 PDF 是 `sigma_t exp(-sigma_t s)`，因此 `sigma_s Tr(s) / pdf = sigma_s/sigma_t`，把这项乘入 throughput；这是隐式吸收，散射分支按单次散射反照率缩权，吸收分支不继续追踪。若自由程越过区间，离散生存概率为 `Tr(L)`，其权重 `Tr(L)/Tr(L)=1`，不能再乘衰减。`sigma_s=0` 时直接乘解析 `exp(-sigma_a L)`，无需随机生存测试。
+
+介质点的 `wo=-ray.direction`、`wi` 都远离交点，HG 为
+`p(wo,wi)=(1-g²)/[4π(1+g²+2g wo·wi)^(3/2)]`。`g=0` 为 `1/(4π)`；正 g 的峰在 `wi=-wo`，表示前向散射。采样通过逆 CDF 绕 `-wo` 生成方向，返回 `p=pdf`，续追 throughput 乘 `p/pdf=1`，没有表面余弦。方向约定及公式参考 [PBRT Phase Functions](https://pbr-book.org/4ed/Volume_Scattering/Phase_Functions)。
+
+散射点直接照明复用太阳、圆盘和渐变/HDRI 环境：太阳乘 `p Li V Tr`，圆盘乘 `p Le cos_light V Tr/(r² pdf_area)` 并按样本数平均，环境将 HG 和环境方向采样用 Balance/Power MIS 组合。环境配额沿用 `environment_samples`，圆盘沿用 `light_samples`；HG/环境均覆盖整球，没有接收面余弦。所有阴影段保持几何二值遮挡（包括玻璃），并乘盒内实际长度的 `Tr`；圆盘阴影裁到采样光源位置。已有表面的太阳、环境、圆盘 NEE 同样受到介质衰减。
+
+HG 抽取的续追射线回到同一个 Camera Path 循环，可命中并着色表面、继续既有 BSDF 路径。路径一旦发生体散射，此后的所有射线段仅乘 `Tr`，不再产生第二次体散射。该事件有独立的单次预算，不占表面 `max_diffuse_bounces` 或 Delta 预算；Diagnostics 的表面事件计数也不统计体散射。体散射及其后续表面贡献归入 Direct，不读取 Caustics。散射后立即逃逸环境的路径由当地环境 NEE/MIS 负责；HG 续追 miss 不再加同一环境。经过后续表面 Delta 链逃逸时仍沿用既有规则。
+
+介质自由程、体照明和 HG 使用单独 `MEDIUM_STREAM`，不消费像素抖动、BSDF、首次环境或漫反射续追的随机数。Packet 的各波长 lane 从相同介质 RNG 状态的副本开始；seed 和 Rayon 1/2/4 线程保持确定性。低层调用 `trace_camera_path` 时须为 `CameraPathRngs.medium` 提供独立 RNG。
+
+```sh
+# 单个场景：直接编辑 scene.medium 的系数和 g
+cargo run --release --locked -- configs/homogeneous_fog.json
+# 四组对照：无介质 / 同等消光的纯吸收 / g=0 / g=0.7
+# 参数：SPP、宽度（高为 2/3）、输出目录、rgb|spectral、密度倍率
+cargo run --release --locked --example homogeneous_medium_compare -- 256 384 output/medium_compare rgb 1.0
+cargo run --release --locked --example homogeneous_medium_compare -- 256 384 output/medium_spectral spectral 1.0
+# 数学与端到端验证
+cargo test --locked --lib medium::tests
+cargo test --locked --test volume
+```
+
+每个对照子目录包含三个分量 PNG 和可独立重跑的 `config.json`。纯吸收组把相同总消光全部设为 `sigma_a`；两个散射组保持相同 `sigma_a/sigma_s`，只改变 g。密度倍率同时缩放两个系数，0 等价于无介质。
+
+这是零次与一次体散射项的近似，适合薄雾和低散射光学厚度；浓雾缺少多次散射，通常偏暗。尚无非均匀介质、Majorant/Null Tracking、多介质、MediumInterface、介质发光或波长相关系数。Photon/Caustics 核心完全沿用原实现：焦散光子不感知介质，既有焦散图仅受到相机侧的消光，不能用于验证有雾时光源到地面的完整能量；雾示例因此不启用光子焦散。平行光仍沿用无限解析太阳模型，发射窗口不裁剪相机端的光束。
 
 本次文件迁移、清理统计与验收明细见 [重构记录](docs/refactor.md)。

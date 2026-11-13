@@ -25,6 +25,7 @@ pub struct CameraPathRngs<'a> {
     pub camera: &'a mut dyn rand::RngCore,
     pub environment: &'a mut dyn rand::RngCore,
     pub diffuse: &'a mut dyn rand::RngCore,
+    pub medium: &'a mut dyn rand::RngCore,
 }
 pub struct ScatterRay<V = Vector3<f64>> {
     pub ray: Ray,
@@ -41,6 +42,8 @@ pub struct CameraPathState<T: CameraTransport = Rgb> {
     pub has_non_delta_vertex: bool,
     pub non_delta_bounces: usize,
     pub max_non_delta_bounces: usize,
+    /// Independent of surface bounce budgets: at most one volume scatter per path.
+    pub medium_scattered: bool,
     #[cfg(feature = "diagnostics")]
     pub debug_disable_ground_sun: bool,
 }
@@ -75,6 +78,7 @@ impl<T: CameraTransport> Clone for CameraPathState<T> {
             has_non_delta_vertex: self.has_non_delta_vertex,
             non_delta_bounces: self.non_delta_bounces,
             max_non_delta_bounces: self.max_non_delta_bounces,
+            medium_scattered: self.medium_scattered,
             #[cfg(feature = "diagnostics")]
             debug_disable_ground_sun: self.debug_disable_ground_sun,
         }
@@ -92,6 +96,7 @@ impl<T: CameraTransport> CameraPathState<T> {
             has_non_delta_vertex: false,
             non_delta_bounces: 0,
             max_non_delta_bounces,
+            medium_scattered: false,
             #[cfg(feature = "diagnostics")]
             debug_disable_ground_sun: false,
         }

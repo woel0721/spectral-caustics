@@ -991,6 +991,7 @@ fn trace_center_pixel(scene: &RenderJob, seed: u64) -> Vector3<f64> {
             camera: &mut StdRng::seed_from_u64(seed),
             environment: &mut StdRng::seed_from_u64(pixel_seed(seed, 0, ENVIRONMENT_STREAM)),
             diffuse: &mut StdRng::seed_from_u64(seed ^ DIFFUSE_STREAM),
+            medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
         },
         light_wi,
         light,

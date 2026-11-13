@@ -307,6 +307,7 @@ fn disk_shadow_uses_finite_segment_and_soft_shadow_converges_to_quadrature() {
                 camera: &mut Transmit { draws: 0 },
                 environment: &mut StdRng::seed_from_u64(43),
                 diffuse: &mut StdRng::seed_from_u64(44),
+                medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
             },
             (scene)
                 .scene
@@ -582,6 +583,7 @@ fn disk_nee_quota_and_wavelength_crn_do_not_consume_environment_or_continuation_
                     camera: &mut prefix,
                     environment: &mut environment,
                     diffuse: &mut continuation,
+                    medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
                 },
                 scene
                     .scene

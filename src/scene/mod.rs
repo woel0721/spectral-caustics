@@ -7,6 +7,7 @@ pub use objects::SceneObject;
 pub struct Scene {
     pub background_color: Vector3<f64>,
     pub environment: Option<Environment>,
+    pub medium: Option<crate::medium::HomogeneousMedium>,
     pub objects: Vec<SceneObject>,
     pub(crate) materials: Vec<Box<dyn Material>>,
     pub light: Light,

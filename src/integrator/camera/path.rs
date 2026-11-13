@@ -2,7 +2,7 @@
 use super::{
     lighting::area::AreaLightSampler,
     lighting::environment::environment_lighting,
-    lighting::visible_to_light,
+    lighting::{transmittance_to_light, volume::volume_lighting},
     offset_ray_origin,
     transport::{CameraTransport, Caustics},
     types::{CameraPathRngs, CameraPathState, ScatterRay},
@@ -124,7 +124,44 @@ pub fn trace_camera_path<T: CameraTransport>(
         if state.throughput == T::Value::default() {
             break StopReason::ZeroThroughput;
         }
-        let Some(hit) = job.scene.intersect(&state.ray) else {
+        let hit = job.scene.intersect(&state.ray);
+        if let Some(medium) = &job.scene.medium {
+            let sample = medium.sample_segment(
+                &state.ray,
+                hit.as_ref().map_or(f64::INFINITY, |h| h.distance),
+                state.medium_scattered,
+                rngs.medium,
+            );
+            state.throughput = state.throughput * sample.weight;
+            if let Some(position) = sample.position {
+                let wo = -state.ray.direction;
+                let phase = medium.phase();
+                let direct = volume_lighting(
+                    job,
+                    position,
+                    wo,
+                    phase,
+                    sun_wi,
+                    sun,
+                    transport,
+                    rngs.medium,
+                )?;
+                state.radiance.direct += transport.multiply(state.throughput, direct);
+                let sample = phase.sample(wo, rngs.medium);
+                state.throughput = state.throughput * (sample.p / sample.pdf);
+                state.medium_scattered = true;
+                // The local environment estimator owns phase-to-environment escape.
+                // A subsequent surface delta chain may still reach the environment.
+                state.has_non_delta_vertex = true;
+                state.last_scatter = None;
+                state.ray = Ray::new(position, sample.wi).ok_or("invalid phase ray")?;
+                continue;
+            }
+            if state.throughput == T::Value::default() {
+                break StopReason::ZeroThroughput;
+            }
+        }
+        let Some(hit) = hit else {
             // Local environment sampling already owns non-delta escape. Only a subsequent
             // delta chain sees the environment again; constant background is camera-only.
             let emitted = if !state.has_non_delta_vertex && state.non_delta_bounces == 0 {
@@ -188,13 +225,9 @@ pub fn trace_camera_path<T: CameraTransport>(
             #[cfg(not(feature = "diagnostics"))]
             let disable = false;
             let mut direct = T::Value::default();
-            if !disable
-                && cosine > 0.0
-                && f != T::Value::default()
-                && sun != T::Value::default()
-                && visible_to_light(job, hit.coords, normal, sun_wi)?
-            {
-                direct = transport.multiply(f, sun) * cosine;
+            if !disable && cosine > 0.0 && f != T::Value::default() && sun != T::Value::default() {
+                direct = transport.multiply(f, sun)
+                    * (cosine * transmittance_to_light(job, hit.coords, normal, sun_wi)?);
             }
             let env_rng = if state.has_non_delta_vertex || state.non_delta_bounces > 0 {
                 &mut *rngs.diffuse

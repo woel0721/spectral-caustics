@@ -14,6 +14,7 @@ use crate::film::Framebuffer;
 use crate::sampling::rng::CAMERA_STREAM;
 use crate::sampling::rng::DIFFUSE_STREAM;
 use crate::sampling::rng::ENVIRONMENT_STREAM;
+use crate::sampling::rng::MEDIUM_STREAM;
 use crate::sampling::rng::pixel_seed;
 use crate::spectrum::cie_xyz;
 use crate::spectrum::emission::WAVELENGTH_MAX_NM;
@@ -81,6 +82,7 @@ pub fn integrate_spectral(
         #[cfg(feature = "diagnostics")]
         let mut statistics = debug.then(crate::diagnostics::PathDebugPixel::default);
         let mut jitter = StdRng::seed_from_u64(pixel_seed(seed, index, CAMERA_STREAM));
+        let mut medium = StdRng::seed_from_u64(pixel_seed(seed, index, MEDIUM_STREAM));
         let mut scattering = StdRng::seed_from_u64(pixel_seed(seed, index, DIFFUSE_STREAM));
         let mut prefix = StdRng::seed_from_u64(pixel_seed(seed, index, PREFIX_STREAM));
         let mut environment = StdRng::seed_from_u64(pixel_seed(seed, index, ENVIRONMENT_STREAM));
@@ -104,17 +106,25 @@ pub fn integrate_spectral(
                     packet_rng(seed, index, i, 0, PREFIX_STREAM),
                     packet_rng(seed, index, i, 0, ENVIRONMENT_STREAM),
                     packet_rng(seed, index, i, 0, DIFFUSE_STREAM),
+                    packet_rng(seed, index, i, 0, MEDIUM_STREAM),
                 ]
             });
             for lane in 0..packet_size {
-                if let Some([common_prefix, common_environment, common_scattering]) =
-                    &common_path_rngs
+                if let Some(
+                    [
+                        common_prefix,
+                        common_environment,
+                        common_scattering,
+                        common_medium,
+                    ],
+                ) = &common_path_rngs
                 {
                     // 波长层内抖动独立；路径流共享随机值，不共享可变游标。
                     wavelength = packet_rng(seed, index, i, lane, WAVELENGTH_STREAM);
                     prefix.clone_from(common_prefix);
                     environment.clone_from(common_environment);
                     scattering.clone_from(common_scattering);
+                    medium.clone_from(common_medium);
                 }
                 let u = wavelength.random::<f64>();
                 let nm = if packet_size == 1 {
@@ -139,6 +149,7 @@ pub fn integrate_spectral(
                         camera: &mut prefix,
                         environment: &mut environment,
                         diffuse: &mut scattering,
+                        medium: &mut medium,
                     },
                     sun_wi,
                     sun_strength,
@@ -345,6 +356,7 @@ mod tests {
                             PREFIX_STREAM,
                             ENVIRONMENT_STREAM,
                             DIFFUSE_STREAM,
+                            MEDIUM_STREAM,
                         ] {
                             let mut a = packet_rng(seed, pixel, sample, lane, stream);
                             let mut b = packet_rng(seed, pixel, sample, lane, stream);

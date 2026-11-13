@@ -69,6 +69,7 @@ fn trace_chain(scene: &RenderJob, rng: &mut dyn RngCore) -> CameraPathComponents
             camera: &mut SequenceRng::new(&[]),
             environment: &mut SequenceRng::new(&[]),
             diffuse: rng,
+            medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
         },
         wi,
         light,

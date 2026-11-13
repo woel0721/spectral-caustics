@@ -45,6 +45,11 @@ impl RenderJob {
             camera: Camera::from_config(&config.camera)?,
             scene: Scene {
                 background_color: config.background_linear_rgb.into(),
+                medium: config
+                    .medium
+                    .as_ref()
+                    .map(crate::medium::HomogeneousMedium::try_from)
+                    .transpose()?,
                 environment: config
                     .environment
                     .as_ref()

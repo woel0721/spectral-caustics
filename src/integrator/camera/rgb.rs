@@ -83,6 +83,8 @@ pub fn integrate_rgb(
     let pixel = |index: usize| -> Result<Pixel, String> {
         let mut camera = StdRng::seed_from_u64(pixel_seed(seed, index, CAMERA_STREAM));
         let mut environment = StdRng::seed_from_u64(pixel_seed(seed, index, ENVIRONMENT_STREAM));
+        let mut medium =
+            StdRng::seed_from_u64(pixel_seed(seed, index, crate::sampling::rng::MEDIUM_STREAM));
         let mut continuation = StdRng::seed_from_u64(pixel_seed(seed, index, DIFFUSE_STREAM));
         let (mut d, mut c) = (Vector3::zeros(), Vector3::zeros());
         #[cfg(feature = "diagnostics")]
@@ -99,6 +101,7 @@ pub fn integrate_rgb(
                 camera: &mut camera,
                 environment: &mut environment,
                 diffuse: &mut continuation,
+                medium: &mut medium,
             };
             #[cfg(feature = "diagnostics")]
             let mut sample = PathDebugSample::default();

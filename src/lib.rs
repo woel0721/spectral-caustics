@@ -10,6 +10,7 @@ pub mod geometry;
 pub mod integrator;
 pub mod light;
 pub mod material;
+pub mod medium;
 pub mod optics;
 pub mod output;
 pub mod renderer;

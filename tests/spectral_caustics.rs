@@ -262,6 +262,7 @@ fn a_non_ground_first_diffuse_vertex_prevents_later_ground_lookup() {
             camera: &mut Zero,
             environment: &mut Zero,
             diffuse: &mut Zero,
+            medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
         },
         scene
             .scene
@@ -735,6 +736,7 @@ fn glass_prefix_receives_caustics_once_with_scalar_throughput_and_no_shadow_or_r
                 camera: &mut Transmit,
                 environment: &mut env,
                 diffuse: &mut cont,
+                medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
             },
             scene
                 .scene
@@ -763,6 +765,7 @@ fn glass_prefix_receives_caustics_once_with_scalar_throughput_and_no_shadow_or_r
                 camera: &mut Transmit,
                 environment: &mut env2,
                 diffuse: &mut cont2,
+                medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
             },
             scene
                 .scene
@@ -810,6 +813,7 @@ fn glass_prefix_receives_caustics_once_with_scalar_throughput_and_no_shadow_or_r
                 camera: &mut Transmit,
                 environment: &mut env2,
                 diffuse: &mut cont2,
+                medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
             },
             scene
                 .scene

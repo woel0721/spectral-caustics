@@ -4,7 +4,7 @@
 
 ## 架构
 
-- Scene 只管理几何、材质、光源、环境、背景和求交。相机及积分器选项由 RenderJob 组合。
+- Scene 只管理几何、材质、光源、环境、背景、可选有界均匀介质和求交。相机及积分器选项由 RenderJob 组合。
 - Renderer 只有 `render(&RenderJob)` 一个高层入口，负责 RGB / Spectral Pipeline 与 Rayon 调度。
 - Camera Integrator 的共享路径循环处理 RGB 和标量光谱数值；两种像素 / 波长采样器保留独立随机流。
 - Photon Integrator 只使用 Forward；XYZ / Eλ 共用发射、首交点、界面抽样和沉积。Constant 复用几何，Dispersion 独立追踪各波长。
@@ -21,6 +21,9 @@
 - 平行光总通量通过水平窗口归一化；圆盘均匀面积、余弦方向发射，有限距离阴影用于相机 NEE。
 - Hero 使用 380..780 nm 分层采样与 400/SPP 权重；Packet=4 保持每像素总路径配额和 CRN。源端积分使用独立 Δλ。
 - 固定 seed 的各分量在 1/2/4 线程逐位一致。Direct + Caustics 在线性空间等于 Combined。
+- Camera Path 支持一个轴对齐盒内的均匀无色介质：Beer–Lambert、指数自由程、隐式吸收、HG 与单次体散射 NEE；RGB/Hero/Packet 复用同一循环和独立介质 RNG。
+- 每条路径最多一次体散射，之后仅积累消光；体照明与其后续表面贡献归入 Direct。表面/介质阴影均含 Tr，几何仍为二值遮挡。
+- 光子焦散不感知雾，焦散图仅受相机侧消光；盒内固体也包含介质，没有内外介质切换。浓雾、多次散射、介质发光、波长相关介质系数仍未实现。
 
 ## 有意删除
 

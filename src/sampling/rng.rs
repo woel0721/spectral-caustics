@@ -7,6 +7,7 @@ pub(crate) const ENVIRONMENT_STREAM: u64 = 0xd1b5_4a32_d192_ed03;
 
 // 漫反射续追（含玻璃）、次表面环境采样和 RR 使用独立流。
 pub(crate) const DIFFUSE_STREAM: u64 = 0xa076_1d64_78bd_642f;
+pub(crate) const MEDIUM_STREAM: u64 = 0x6a09_e667_f3bc_c909;
 
 /// 为某个像素的某类采样派生固定种子，保证并行调度不改变结果。
 ///

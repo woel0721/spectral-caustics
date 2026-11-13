@@ -29,6 +29,9 @@ pub struct SceneConfig {
     /// 缺省/null 使用常量背景且关闭天空照明；显式配置时启用天空。
     #[serde(default)]
     pub environment: Option<EnvironmentConfig>,
+    /// 单个有界均匀介质；省略/null 为真空，系数单位 m⁻¹。
+    #[serde(default)]
+    pub medium: Option<crate::medium::HomogeneousMediumConfig>,
     /// 每条相机路径在漫反射终点采样的环境方向数，默认 1。
     #[serde(default = "default_environment_samples")]
     pub environment_samples: usize,
@@ -234,6 +237,7 @@ impl Default for SceneConfig {
             camera: CameraConfig::default(),
             background_linear_rgb: [0.08, 0.10, 0.14],
             environment: Some(EnvironmentConfig::default()),
+            medium: None,
             environment_samples: default_environment_samples(),
             light_samples: 1,
             environment_mis_heuristic: EnvironmentMisHeuristic::default(),
@@ -322,6 +326,9 @@ impl SceneConfig {
     /// 检查焦散目标唯一性；部分几何直接试构建，六顶点 Prism 的凸性/绕序由运行时构建继续检查。
     pub fn validate(&self) -> Result<(), String> {
         self.camera.validate()?;
+        if let Some(medium) = &self.medium {
+            crate::medium::HomogeneousMedium::try_from(medium)?;
+        }
         if let Some(environment) = &self.environment {
             environment.validate()?;
         }

@@ -134,6 +134,7 @@ fn probe(
             camera: &mut scattering,
             environment: &mut environment,
             diffuse: &mut FixedRng::new(0),
+            medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
         },
         (scene)
             .scene
@@ -183,6 +184,7 @@ fn ground_sun_debug_removes_only_ground_sun_at_every_vertex_and_preserves_rng() 
                 camera: &mut prefix,
                 environment: &mut environment,
                 diffuse: &mut continuation,
+                medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
             },
             (scene)
                 .scene
@@ -1095,6 +1097,7 @@ fn sphere_two_spectral_interfaces_cancel_eta_weights_and_keep_one_wavelength() {
                 camera: &mut FixedRng::new(u64::MAX),
                 environment: &mut FixedRng::new(0),
                 diffuse: &mut FixedRng::new(0),
+                medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
             },
             scene
                 .scene
@@ -1244,6 +1247,7 @@ fn environment_escape_uses_full_scalar_throughput_only_after_delta() {
                 camera: &mut FixedRng::new(0),
                 environment: &mut FixedRng::new(0),
                 diffuse: &mut FixedRng::new(0),
+                medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
             },
             scene
                 .scene
@@ -1312,6 +1316,7 @@ fn spectral_paths_keep_the_32_delta_budget_and_roulette_after_three_continuous_c
             camera: &mut FixedRng::new(0),
             environment: &mut FixedRng::new(0),
             diffuse: &mut FixedRng::new(0),
+            medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
         },
         chamber(false)
             .scene
@@ -1345,6 +1350,7 @@ fn spectral_paths_keep_the_32_delta_budget_and_roulette_after_three_continuous_c
                 camera: &mut FixedRng::new(0),
                 environment: &mut FixedRng::new(0),
                 diffuse: &mut rng,
+                medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
             },
             chamber(true)
                 .scene
@@ -1491,6 +1497,7 @@ fn spectral_hdri_balance_power_and_odd_quotas_converge_to_a_uniform_emitter() {
                         camera: &mut scattering,
                         environment: &mut environment,
                         diffuse: &mut FixedRng::new(0),
+                        medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
                     },
                     scene
                         .scene
@@ -1646,7 +1653,8 @@ fn spectral_invalid_workloads_and_path_states_fail_explicitly() {
             &mut CameraPathRngs {
                 camera: &mut FixedRng::new(0),
                 environment: &mut FixedRng::new(0),
-                diffuse: &mut FixedRng::new(0)
+                diffuse: &mut FixedRng::new(0),
+                medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
             },
             scene
                 .scene
@@ -1750,6 +1758,7 @@ fn colored_hdr_odd_mis_with_glass_occlusion_matches_independent_hemisphere_quadr
                         camera: &mut scattering,
                         environment: &mut environment,
                         diffuse: &mut FixedRng::new(0),
+                        medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
                     },
                     scene
                         .scene
@@ -1804,6 +1813,7 @@ fn deeper_continuation_does_not_consume_glass_prefix_or_first_environment_stream
                 camera: &mut prefix,
                 environment: &mut environment,
                 diffuse: &mut continuation,
+                medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
             },
             scene
                 .scene

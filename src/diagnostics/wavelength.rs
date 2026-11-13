@@ -13,6 +13,7 @@ use crate::optics::dispersion::IorMode;
 use crate::sampling::rng::CAMERA_STREAM;
 use crate::sampling::rng::DIFFUSE_STREAM;
 use crate::sampling::rng::ENVIRONMENT_STREAM;
+use crate::sampling::rng::MEDIUM_STREAM;
 use crate::spectrum::emission::WAVELENGTH_MAX_NM;
 use crate::spectrum::emission::WAVELENGTH_MIN_NM;
 use nalgebra::Vector2;
@@ -94,9 +95,11 @@ pub fn render_fixed_wavelength_camera(
                         packet_rng(seed, pixel_index, sample, 0, PREFIX_STREAM),
                         packet_rng(seed, pixel_index, sample, 0, ENVIRONMENT_STREAM),
                         packet_rng(seed, pixel_index, sample, 0, DIFFUSE_STREAM),
+                        packet_rng(seed, pixel_index, sample, 0, MEDIUM_STREAM),
                     ];
                     for (radiance, &nm) in pixel.iter_mut().zip(wavelengths_nm) {
-                        let [mut prefix, mut environment, mut continuation] = common.clone();
+                        let [mut prefix, mut environment, mut continuation, mut medium] =
+                            common.clone();
                         let mut state = CameraPathState::spectral(
                             ray,
                             nm,
@@ -109,6 +112,7 @@ pub fn render_fixed_wavelength_camera(
                                 camera: &mut prefix,
                                 environment: &mut environment,
                                 diffuse: &mut continuation,
+                                medium: &mut medium,
                             },
                             sun_wi,
                             sun_strength,

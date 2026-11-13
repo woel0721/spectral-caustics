@@ -3,7 +3,7 @@ use crate::geometry::hit::GeometryHit;
 
 use super::super::lighting::environment::environment_lighting;
 use super::super::lighting::environment::power_heuristic;
-use super::super::lighting::visible_to_light;
+use super::super::lighting::transmittance_to_light;
 use crate::config::RenderJob;
 use crate::config::scene::EnvironmentMisHeuristic;
 use crate::geometry::hit::Hit;
@@ -1185,7 +1185,7 @@ mod stratified {
             for col in 0..phi_steps {
                 let phi = 2.0 * PI * (col as f64 + 0.5) / phi_steps as f64;
                 let wi = Vector3::new(radius * phi.cos(), radius * phi.sin(), z);
-                if visible_to_light(scene, position, Vector3::z(), wi).unwrap() {
+                if transmittance_to_light(scene, position, Vector3::z(), wi).unwrap() > 0.0 {
                     integral += environment.radiance(wi).unwrap() * z;
                 }
             }
