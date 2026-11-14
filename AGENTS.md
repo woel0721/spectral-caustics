@@ -6,6 +6,7 @@
 
 - 开始前查看工作区状态及相关源码，保留用户未提交的修改。
 - 选择可运行、可测试、可解释的最小实现；只消除实际重复，不为减少行数或假想扩展增加间接层。
+- 对明确、低风险、范围有限的修改，阅读相关代码后直接实现。只有存在重要架构选择、需求歧义或较大破坏性影响时，才先讨论方案。不要强制要求每个任务都生成计划或反复确认。
 - 保持物理量、概率测度和计光归属明确。精简防御式代码不能删除有意义的数值检查与物理边界处理。
 - 保持固定设置和 seed 的可复现性、Rayon 线程间确定性，以及线性空间的分量相加关系。
 - 不把历史任务授权、旧 API 或旧图像当作永久约束；不顺带恢复兼容层或扩大渲染能力。
@@ -21,3 +22,5 @@
 | [testing.md](.agents/testing.md) | 修改任何文件、编写测试或进行验收；纯文档任务使用其中的文档检查 |
 
 这些参考文档按条件显式读取，不假设会自动注入。跨领域任务合并所需阅读；进入新区域时补读对应文档和实际实现。
+
+任务匹配描述时，优先选择并遵循最相关的仓库 Skill：普通渲染改动用 [rendering-change](.agents/skills/rendering-change/SKILL.md)，光谱算法改动用 [spectral-change](.agents/skills/spectral-change/SKILL.md)，结构重构用 [architecture-refactor](.agents/skills/architecture-refactor/SKILL.md)，只读审查用 [rendering-review](.agents/skills/rendering-review/SKILL.md)。按主要目标选择，不因涉及多个文件而自动叠加 Skill；参考文档仍按上表读取。
