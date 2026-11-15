@@ -1,0 +1,31 @@
+{
+  "description": "Advisory verification feedback; GitHub Actions remains authoritative.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "^(apply_patch|Bash)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B -c 'import io,json,pathlib,runpy,subprocess,sys; raw=sys.stdin.read(); event=json.loads(raw); root=subprocess.check_output([\"git\",\"--no-optional-locks\",\"-C\",event[\"cwd\"],\"rev-parse\",\"--show-toplevel\"],stderr=subprocess.DEVNULL,timeout=1).decode().rstrip(\"\\n\"); sys.stdin=io.StringIO(raw); runpy.run_path(str(pathlib.Path(root)/\".codex/hooks/quality.py\"),run_name=\"__main__\")' 2>/dev/null || printf '{}\\n'",
+            "timeout": 4,
+            "additionalContextLimit": 800,
+            "statusMessage": "Checking verification scope"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B -c 'import io,json,pathlib,runpy,subprocess,sys; raw=sys.stdin.read(); event=json.loads(raw); root=subprocess.check_output([\"git\",\"--no-optional-locks\",\"-C\",event[\"cwd\"],\"rev-parse\",\"--show-toplevel\"],stderr=subprocess.DEVNULL,timeout=1).decode().rstrip(\"\\n\"); sys.stdin=io.StringIO(raw); runpy.run_path(str(pathlib.Path(root)/\".codex/hooks/quality.py\"),run_name=\"__main__\")' 2>/dev/null || printf '{}\\n'",
+            "timeout": 4,
+            "statusMessage": "Checking tracked whitespace"
+          }
+        ]
+      }
+    ]
+  }
+}
