@@ -117,6 +117,10 @@ pub fn trace_camera_path<T: CameraTransport>(
     #[cfg(feature = "diagnostics")] mut observer: Option<&mut crate::diagnostics::PathDebugSample>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     state.validate()?;
+    crate::config::scene::validate_volume_scatters(job.camera_options.max_volume_scatters)?;
+    if state.volume_scatters > job.camera_options.max_volume_scatters {
+        return Err("initial volume scatters exceed camera budget".into());
+    }
     let transport = state.transport;
     let (sun_wi, sun) = transport.sunlight(light_wi, light, map)?;
     let mut area = AreaLightSampler::new(job, rngs.camera);
@@ -129,7 +133,7 @@ pub fn trace_camera_path<T: CameraTransport>(
             let sample = medium.sample_segment(
                 &state.ray,
                 hit.as_ref().map_or(f64::INFINITY, |h| h.distance),
-                state.medium_scattered,
+                state.volume_scatters < job.camera_options.max_volume_scatters,
                 rngs.medium,
             );
             state.throughput = state.throughput * sample.weight;
@@ -149,7 +153,7 @@ pub fn trace_camera_path<T: CameraTransport>(
                 state.radiance.direct += transport.multiply(state.throughput, direct);
                 let sample = phase.sample(wo, rngs.medium);
                 state.throughput = state.throughput * (sample.p / sample.pdf);
-                state.medium_scattered = true;
+                state.volume_scatters += 1;
                 // The local environment estimator owns phase-to-environment escape.
                 // A subsequent surface delta chain may still reach the environment.
                 state.has_non_delta_vertex = true;

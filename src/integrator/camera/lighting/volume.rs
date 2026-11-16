@@ -1,4 +1,4 @@
-//! Single-scatter NEE. There is no surface cosine at a medium vertex.
+//! NEE at each volume vertex. There is no surface cosine at a medium vertex.
 use super::{environment::power_heuristic, shadow_transmittance};
 use crate::{
     config::{RenderJob, scene::EnvironmentMisHeuristic},

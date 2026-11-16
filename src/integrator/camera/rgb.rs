@@ -57,7 +57,11 @@ pub fn integrate_rgb(
         .checked_mul(height)
         .and_then(|n| n.checked_mul(spp))
         .and_then(|n| n.checked_mul(job.camera_options.environment_samples))
-        .and_then(|n| n.checked_mul(job.camera_options.max_diffuse_bounces.saturating_add(1)))
+        .and_then(|n| {
+            n.checked_mul(
+                job.camera_options.max_diffuse_bounces + 1 + job.camera_options.max_volume_scatters,
+            )
+        })
         .ok_or("camera workload overflow")?;
     #[cfg(feature = "diagnostics")]
     if job

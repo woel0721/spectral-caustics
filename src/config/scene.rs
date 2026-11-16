@@ -10,6 +10,16 @@ use std::path::PathBuf;
 
 /// 防止误传 usize::MAX 等深度；不分配与深度成比例的路径存储。
 pub(crate) const MAX_DIFFUSE_BOUNCES: usize = 1024;
+pub(crate) const MAX_VOLUME_SCATTERS: usize = 1024;
+
+pub(crate) fn validate_volume_scatters(count: usize) -> Result<(), String> {
+    if count > MAX_VOLUME_SCATTERS {
+        return Err(format!(
+            "scene.max_volume_scatters 不能超过 {MAX_VOLUME_SCATTERS}"
+        ));
+    }
+    Ok(())
+}
 
 /// 检查连续散射的额外反弹预算 count 是否在 0..=1024；有效返回 Ok(())，超限返回 Err，供配置和直接 API 共用。
 pub(crate) fn validate_diffuse_bounces(count: usize) -> Result<(), String> {
@@ -44,6 +54,9 @@ pub struct SceneConfig {
     /// 相机额外 Lambertian 反弹数；缺省为 0，运行时上限见 MAX_DIFFUSE_BOUNCES。
     #[serde(default)]
     pub max_diffuse_bounces: usize,
+    /// 相机端体散射事件预算，独立于表面预算；0 仅计算消光，缺省为 1。
+    #[serde(default = "default_max_volume_scatters")]
+    pub max_volume_scatters: usize,
     /// 唯一接收地面的灰度反射率纹理；省略/null 保留纯色材质。
     #[serde(default)]
     pub ground_checkerboard: Option<CheckerboardConfig>,
@@ -242,6 +255,7 @@ impl Default for SceneConfig {
             light_samples: 1,
             environment_mis_heuristic: EnvironmentMisHeuristic::default(),
             max_diffuse_bounces: 0,
+            max_volume_scatters: default_max_volume_scatters(),
             ground_checkerboard: Some(CheckerboardConfig::default()),
             ground_margin_m: default_ground_margin_m(),
             objects: vec![
@@ -339,6 +353,7 @@ impl SceneConfig {
             return Err("scene.camera_options.light_samples 必须大于零".into());
         }
         validate_diffuse_bounces(self.max_diffuse_bounces)?;
+        validate_volume_scatters(self.max_volume_scatters)?;
         if let Some(checkerboard) = &self.ground_checkerboard {
             checkerboard.validate()?;
         }
@@ -477,6 +492,10 @@ impl SceneConfig {
 /// 为省略 ground_margin_m 的 JSON 返回 0.5 m，作为实体地面相对焦散接收区的外扩边距。
 fn default_ground_margin_m() -> f64 {
     0.5
+}
+
+fn default_max_volume_scatters() -> usize {
+    1
 }
 
 /// 为省略的环境/面积光采样配额返回 1，即每个着色顶点一个样本。

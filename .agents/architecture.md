@@ -32,8 +32,8 @@ Hero 与四波长 Packet 使用同一个标量路径循环。Packet 共享主射
 - 这是有限深度、二值几何阴影与地面焦散图结合的估计器，不应描述成通用无偏 Path Tracer。不要顺带加入透明阴影、环境焦散、新材质、通用 Photon Mapping、BVH/KD-Tree、GUI 或 GPU。
 - JSON 光子焦散目标限一个 Dielectric Sphere/Prism/VerticalPrism；其他物体阻断。XYZ 图绑定 RGB 相机时要求中性 Lambertian 地面；Eλ 图集支持 Lambertian 地面的波长反射率。图外通量丢弃，不把有限接收区当作整个实体地面。
 - [Dielectric](../src/material/dielectric.rs) 按几何法线和方向判断空气/玻璃两侧，外部 IOR 固定为 1；光子有显式 Air/Glass 状态。没有嵌套介质栈，也不支持从玻璃内部启动光子。
-- [HomogeneousMedium](../src/medium/mod.rs) 是单个轴对齐盒内的无色空间介质掩膜，覆盖盒内固体内部；盒边界不折射、不表示 MediumInterface。每条相机路径最多一次体散射，之后只计算消光。
-- 光子不感知雾；现有焦散图只受相机侧介质权重影响，不代表有雾时源端到地面的完整能量。多次/非均匀散射、波长相关介质、介质发光和内外介质切换未实现。
+- [HomogeneousMedium](../src/medium/mod.rs) 是单个轴对齐盒内的无色空间介质掩膜，覆盖盒内固体内部；盒边界不折射、不表示 MediumInterface。相机使用 `CameraOptions.max_volume_scatters` 限制多次体散射，独立于表面预算；达到上限后只计算解析消光。
+- 光子不感知雾；现有焦散图只受相机侧介质权重影响，不代表有雾时源端到地面的完整能量。非均匀散射、波长相关介质、介质发光和内外介质切换未实现。
 
 ## Diagnostics
 
