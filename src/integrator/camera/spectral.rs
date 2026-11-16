@@ -327,10 +327,10 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn packet_wavelengths_keep_fine_strata_and_open_right_edges_even_after_rounding() {
+    fn packet_wavelengths_follow_uniform_stratum_cdf_and_keep_open_right_edges() {
         for total in [4, 16, 512] {
             let spatial = total / 4;
-            for u in [0.0, 0.37, 1.0_f64.next_down()] {
+            for u in [0.0, 0.125, 0.37, 0.5, 0.875, 1.0_f64.next_down()] {
                 let mut visits = vec![0; total];
                 for i in 0..spatial {
                     for lane in 0..4 {
@@ -339,6 +339,14 @@ mod tests {
                         let lower = 380.0 + 400.0 * stratum as f64 / total as f64;
                         let upper = 380.0 + 400.0 * (stratum + 1) as f64 / total as f64;
                         assert!(nm >= lower && nm < upper, "{total}, {i}, {lane}, {u}: {nm}");
+                        // 用目标均匀分布的 CDF 反算分位点；只查区间检测不到 u² 等层内偏差。
+                        let cdf = (nm - lower) / (upper - lower);
+                        // 按层宽缩放波长舍入误差，也容纳右端点向下夹紧的误差。
+                        let tolerance = 8.0 * f64::EPSILON * upper / (upper - lower);
+                        assert!(
+                            (cdf - u).abs() <= tolerance,
+                            "uniform CDF: total={total}, sample={i}, lane={lane}, u={u}, cdf={cdf}"
+                        );
                         // 用层边界归类，避免逆变换的舍入把 next_down(upper) 推回整数。
                         let found = (0..total)
                             .find(|&s| {
