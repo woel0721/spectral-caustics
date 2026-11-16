@@ -116,15 +116,15 @@ impl HomogeneousMedium {
             .map_or(1.0, |(a, b)| self.transmittance(b - a))
     }
 
-    /// Before the first scatter, sample s=-ln(1-u)/σt. Implicit absorption gives
+    /// While scattering is allowed, sample s=-ln(1-u)/σt. Implicit absorption gives
     /// σs Tr(s)/(σt Tr(s))=σs/σt; survival gives Tr(L)/Tr(L)=1.
-    /// After scattering, exclude further volume events using deterministic Tr.
+    /// At the camera's volume budget, exclude further events using deterministic Tr.
     /// Pure absorption is evaluated analytically to avoid binary survival noise.
     pub fn sample_segment(
         &self,
         ray: &Ray,
         max_distance: f64,
-        already_scattered: bool,
+        allow_scattering: bool,
         rng: &mut dyn RngCore,
     ) -> MediumSample {
         let Some((enter, exit)) = self.interval(ray, max_distance) else {
@@ -133,7 +133,7 @@ impl HomogeneousMedium {
                 weight: 1.0,
             };
         };
-        if already_scattered || self.sigma_s == 0.0 {
+        if !allow_scattering || self.sigma_s == 0.0 {
             return MediumSample {
                 position: None,
                 weight: self.transmittance(exit - enter),

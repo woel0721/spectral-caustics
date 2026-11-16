@@ -91,7 +91,7 @@ fn free_flight_survival_density_and_implicit_absorption_conserve_probability() {
     let n = 150_000;
     let (mut escaped, mut scatter_weight, mut distance) = (0, 0.0, 0.0);
     for _ in 0..n {
-        let s = m.sample_segment(&r, 3.0, false, &mut rng);
+        let s = m.sample_segment(&r, 3.0, true, &mut rng);
         if let Some(p) = s.position {
             scatter_weight += s.weight;
             distance += 1.0 - p.z;
@@ -105,12 +105,17 @@ fn free_flight_survival_density_and_implicit_absorption_conserve_probability() {
     assert!((scatter_weight / n as f64 - 0.6 * (1.0 - tr)).abs() < 0.003);
     let conditional_mean = 1.0 / m.sigma_t() - 2.0 * tr / (1.0 - tr);
     assert!((distance / (n - escaped) as f64 - conditional_mean).abs() < 0.008);
-    let scatter = m.sample_segment(&r, 3.0, true, &mut rng);
-    assert!(scatter.position.is_none());
-    assert_eq!(scatter.weight, tr);
-    let absorption = medium(0.5, 0.0).sample_segment(&r, 3.0, false, &mut rng);
+    let mut untouched = rng.clone();
+    let capped = m.sample_segment(&r, 3.0, false, &mut rng);
+    assert!(capped.position.is_none());
+    assert_eq!(capped.weight, tr);
+    let absorption = medium(0.5, 0.0).sample_segment(&r, 3.0, true, &mut rng);
     assert!(absorption.position.is_none());
     assert_eq!(absorption.weight, tr);
+    let vacuum = medium(0.0, 0.0).sample_segment(&r, 3.0, true, &mut rng);
+    assert!(vacuum.position.is_none());
+    assert_eq!(vacuum.weight, 1.0);
+    assert_eq!(rng.next_u64(), untouched.next_u64());
 }
 
 #[test]

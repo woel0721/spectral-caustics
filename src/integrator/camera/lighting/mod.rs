@@ -43,6 +43,7 @@ pub(in crate::integrator::camera) fn camera_lighting_setup(
     height: usize,
 ) -> Result<(Vector3<f64>, f64), Box<dyn Error + Send + Sync>> {
     crate::config::scene::validate_diffuse_bounces(job.camera_options.max_diffuse_bounces)?;
+    crate::config::scene::validate_volume_scatters(job.camera_options.max_volume_scatters)?;
     if job.camera_options.light_samples == 0 || job.camera_options.environment_samples == 0 {
         return Err("light sample counts must be positive".into());
     }
@@ -52,7 +53,11 @@ pub(in crate::integrator::camera) fn camera_lighting_setup(
     width
         .checked_mul(height)
         .and_then(|n| n.checked_mul(job.camera_options.light_samples))
-        .and_then(|n| n.checked_mul(job.camera_options.max_diffuse_bounces + 1))
+        .and_then(|n| {
+            n.checked_mul(
+                job.camera_options.max_diffuse_bounces + 1 + job.camera_options.max_volume_scatters,
+            )
+        })
         .ok_or("camera workload overflow")?;
     Ok(job
         .scene

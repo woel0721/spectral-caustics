@@ -64,6 +64,7 @@ impl RenderJob {
                 light_samples: config.light_samples,
                 environment_mis_heuristic: config.environment_mis_heuristic,
                 max_diffuse_bounces: config.max_diffuse_bounces,
+                max_volume_scatters: config.max_volume_scatters,
             },
             photon: PhotonOptions {
                 receiver: GroundReceiver {
@@ -89,6 +90,7 @@ impl RenderJob {
     /// 要求一个接收地面；可显式选择一个理想介质 Sphere/Prism/VerticalPrism 作为光源焦散目标。
     pub fn from_config(config: &SceneConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
         crate::config::scene::validate_diffuse_bounces(config.max_diffuse_bounces)?;
+        crate::config::scene::validate_volume_scatters(config.max_volume_scatters)?;
         if config.environment_samples == 0 || config.light_samples == 0 {
             return Err("sampling counts must be positive".into());
         }

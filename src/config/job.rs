@@ -8,6 +8,8 @@ pub struct CameraOptions {
     pub light_samples: usize,
     pub environment_mis_heuristic: EnvironmentMisHeuristic,
     pub max_diffuse_bounces: usize,
+    /// Maximum camera volume events, independent of surface events; 0 uses only Tr.
+    pub max_volume_scatters: usize,
 }
 pub struct PhotonOptions {
     pub receiver: GroundReceiver,

@@ -255,14 +255,26 @@ pub(crate) fn validate_spectral_camera(
         .checked_mul(height)
         .and_then(|n| n.checked_mul(total_paths))
         .and_then(|n| n.checked_mul(scene.camera_options.light_samples))
-        .and_then(|n| n.checked_mul(scene.camera_options.max_diffuse_bounces + 1))
+        .and_then(|n| {
+            n.checked_mul(
+                scene.camera_options.max_diffuse_bounces
+                    + 1
+                    + scene.camera_options.max_volume_scatters,
+            )
+        })
         .ok_or("有限光源样本总数溢出")?;
     scene.scene.light.validate_emission()?;
     width
         .checked_mul(height)
         .and_then(|n| n.checked_mul(total_paths))
         .and_then(|n| n.checked_mul(scene.camera_options.environment_samples))
-        .and_then(|n| n.checked_mul(scene.camera_options.max_diffuse_bounces + 1))
+        .and_then(|n| {
+            n.checked_mul(
+                scene.camera_options.max_diffuse_bounces
+                    + 1
+                    + scene.camera_options.max_volume_scatters,
+            )
+        })
         .ok_or("光谱相机工作量溢出")?;
     for object in &scene.scene.objects {
         let material = scene.scene.material(object.material_id());
@@ -374,5 +386,99 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn packet_medium_crn_matches_independent_scalar_lanes_after_multiple_scatters() {
+        use crate::{
+            camera::Camera,
+            config::camera::CameraConfig,
+            medium::{HomogeneousMedium, HomogeneousMediumConfig},
+        };
+        let mut job = RenderJob::new();
+        job.scene.environment = None;
+        job.scene.background_color = Vector3::zeros();
+        job.camera = Camera::from_config(&CameraConfig {
+            position: [0.0; 3],
+            target: [0.0, 0.0, -1.0],
+            up: [0.0, 1.0, 0.0],
+            fov_y_degrees: 30.0,
+        })
+        .unwrap();
+        job.scene.medium = Some(
+            HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+                min_m: [-2.0; 3],
+                max_m: [2.0; 3],
+                sigma_a: 0.1,
+                sigma_s: 0.9,
+                g: 0.3,
+            })
+            .unwrap(),
+        );
+        job.camera_options.max_volume_scatters = 4;
+        let settings = RenderSetting {
+            width: 1,
+            height: 1,
+            camera_spp: 16,
+            spectral_packet_size: 4,
+            seed: 42,
+            ..Default::default()
+        };
+        let (sun_wi, sun) = job.scene.light.analytic_sun().unwrap().unwrap();
+        let mut expected = Vector3::zeros();
+        let mut seen_multiple = false;
+        for i in 0..4 {
+            let mut jitter = packet_rng(settings.seed, 0, i, 0, CAMERA_STREAM);
+            let ray = job
+                .camera
+                .ray_for_pixel_sample(0, 0, 1, 1, Vector2::new(jitter.random(), jitter.random()))
+                .unwrap();
+            let mut reference = None;
+            for lane in 0..4 {
+                let mut wavelength = packet_rng(settings.seed, 0, i, lane, WAVELENGTH_STREAM);
+                let nm = packet_wavelength_nm(i, 4, lane, wavelength.random());
+                let mut state = CameraPathState::spectral(ray, nm, 0).unwrap();
+                // Each scalar lane owns fresh streams. The real Packet must reset
+                // its medium cursor to the same state even after a long previous lane.
+                let mut medium = packet_rng(settings.seed, 0, i, 0, MEDIUM_STREAM);
+                trace_camera_path(
+                    &job,
+                    &mut state,
+                    &mut CameraPathRngs {
+                        camera: &mut packet_rng(settings.seed, 0, i, 0, PREFIX_STREAM),
+                        environment: &mut packet_rng(settings.seed, 0, i, 0, ENVIRONMENT_STREAM),
+                        diffuse: &mut packet_rng(settings.seed, 0, i, 0, DIFFUSE_STREAM),
+                        medium: &mut medium,
+                    },
+                    sun_wi,
+                    sun,
+                    Caustics::None,
+                    settings.mode,
+                    #[cfg(feature = "diagnostics")]
+                    None,
+                )
+                .unwrap();
+                let geometry = (
+                    state.volume_scatters,
+                    state.ray.origin,
+                    state.ray.direction,
+                    state.throughput,
+                    medium.next_u64(),
+                );
+                if let Some(r) = reference {
+                    assert_eq!(geometry, r);
+                } else {
+                    reference = Some(geometry);
+                }
+                seen_multiple |= state.volume_scatters > 1;
+                expected +=
+                    cie_xyz(nm).unwrap() * (state.radiance.direct / (WAVELENGTH_PDF * 16.0));
+            }
+        }
+        assert!(seen_multiple);
+        let actual = integrate_spectral(&job, &settings, None).unwrap();
+        assert_eq!(actual.direct.pixels(), &[expected]);
+        assert_eq!(actual.caustics.pixels(), &[Vector3::zeros()]);
+        assert_eq!(actual.combined.pixels(), &[expected]);
     }
 }

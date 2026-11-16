@@ -75,11 +75,9 @@ impl Config {
             .and_then(|pixels| pixels.checked_mul(self.render.camera_spp))
             .and_then(|paths| paths.checked_mul(self.scene.environment_samples))
             .and_then(|samples| {
-                samples.checked_mul(if self.scene.max_diffuse_bounces > 1 {
-                    self.scene.max_diffuse_bounces + 1
-                } else {
-                    1
-                })
+                samples.checked_mul(
+                    self.scene.max_diffuse_bounces + 1 + self.scene.max_volume_scatters,
+                )
             })
             .ok_or("环境方向样本总数溢出")?;
         self.render
@@ -87,7 +85,9 @@ impl Config {
             .checked_mul(self.render.height)
             .and_then(|n| n.checked_mul(self.render.camera_spp))
             .and_then(|n| n.checked_mul(self.scene.light_samples))
-            .and_then(|n| n.checked_mul(self.scene.max_diffuse_bounces + 1))
+            .and_then(|n| {
+                n.checked_mul(self.scene.max_diffuse_bounces + 1 + self.scene.max_volume_scatters)
+            })
             .ok_or("有限光源样本总数溢出")?;
         Ok(())
     }
