@@ -4,7 +4,7 @@
 
 ## 架构
 
-- Scene 只管理几何、材质、光源、环境、背景、可选有界均匀介质和求交。相机及积分器选项由 RenderJob 组合。
+- Scene 只管理几何、材质、光源、环境、背景、可选有界介质（Box<dyn Medium>，内置 Homogeneous/Grid 实现）和求交。Medium 与 Material 同为 Send + Sync trait；可序列化的 MediumConfig 仍用枚举选择内置类型。相机及积分器选项由 RenderJob 组合。
 - Renderer 只有 `render(&RenderJob)` 一个高层入口，负责 RGB / Spectral Pipeline 与 Rayon 调度。
 - Camera Integrator 的共享路径循环处理 RGB 和标量光谱数值；两种像素 / 波长采样器保留独立随机流。
 - Photon Integrator 只使用 Forward；XYZ / Eλ 共用发射、首交点、界面抽样和沉积。Constant 复用几何，Dispersion 独立追踪各波长。
@@ -23,7 +23,8 @@
 - 固定 seed 的各分量在 1/2/4 线程逐位一致。Direct + Caustics 在线性空间等于 Combined。
 - Camera Path 支持一个轴对齐盒内的均匀无色介质：Beer–Lambert、指数自由程、隐式吸收、HG 与多次体散射 NEE；RGB/Hero/Packet 复用同一循环和独立介质 RNG。
 - 相机体散射预算 `max_volume_scatters=0..1024`，缺省 1，雾示例 8；达到预算或纯吸收时仅积累解析 Tr。预算独立于表面事件，体散射不新增 RR；体照明与其后续表面贡献归入 Direct。表面/介质阴影均含 Tr，几何仍为二值遮挡。
-- 光子焦散不感知雾，焦散图仅受相机侧介质权重影响；盒内固体也包含介质，没有内外介质切换。有限预算丢弃更高阶体散射，介质发光、非均匀或波长相关介质系数仍未实现。
+- Phase 3.1 提供世界 AABB 内的分块常数 GridMedium：非负有限密度、局部系数查询、保守全局 Majorant，以及 DDA 逐体素精确 Beer–Lambert。相机和阴影段均可计算网格消光；有效 sigma_s>0 的网格要求 max_volume_scatters=0，直到实现正确的非均匀碰撞采样器。纯吸收/零密度网格不消费介质 RNG。
+- 光子焦散不感知雾，焦散图仅受相机侧介质权重影响；盒内固体也包含介质，没有内外介质切换。有限预算丢弃更高阶体散射；Delta/Ratio Tracking、Null Collision、非均匀散射、介质发光和波长相关介质系数仍未实现。
 
 ## 有意删除
 

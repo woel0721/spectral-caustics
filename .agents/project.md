@@ -28,7 +28,7 @@
 | [Config::build / RenderJob::from_config](../src/config/build.rs) | 实际构造相机、几何、材质、光源、环境、介质，验证参数及对象绑定；HDRI 缺失返回错误 |
 | [Renderer::new](../src/renderer.rs) | 验证 RenderSetting 并创建可选线程池 |
 | [光子计划与追踪器](../src/integrator/photon/generation.rs)、[PhotonTracer](../src/integrator/photon/path.rs) | 发射布局、接收区、目标、IOR、事件预算及归一化 |
-| [Camera Path 入口](../src/integrator/camera/path.rs) | 验证可由低层调用方提供的路径初态，并检查自定义材质的事件/PDF/权重契约 |
+| [Camera Path 入口](../src/integrator/camera/path.rs) | 验证可由低层调用方提供的路径初态，检查自定义材质的事件/PDF/权重，以及介质采样结果的有限位置、非负有限权重与体散射预算 |
 
 `Config::validate` 用于显式配置检查和保存，包含部分几何试构建；正常渲染不先完整 validate 再重复 build。不要为了“统一验证”增加第二套完整场景构造。
 

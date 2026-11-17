@@ -15,20 +15,28 @@ use spectral_caustics::{
     },
     light::{DiskAreaLight, Light},
     material::lambertian::Lambertian,
-    medium::{HomogeneousMedium, HomogeneousMediumConfig},
+    medium::{HomogeneousMedium, HomogeneousMediumConfig, Medium, MediumConfig},
     optics::dispersion::IorMode,
     renderer::Renderer,
 };
 
-fn slab(a: f64, s: f64, g: f64) -> HomogeneousMedium {
-    HomogeneousMedium::try_from(&HomogeneousMediumConfig {
-        min_m: [-100.0, -100.0, 1.0],
-        max_m: [100.0, 100.0, 2.0],
-        sigma_a: a,
-        sigma_s: s,
-        g,
-    })
-    .unwrap()
+fn slab(a: f64, s: f64, g: f64) -> Box<dyn Medium> {
+    Box::new(
+        HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+            min_m: [-100.0, -100.0, 1.0],
+            max_m: [100.0, 100.0, 2.0],
+            sigma_a: a,
+            sigma_s: s,
+            g,
+        })
+        .unwrap(),
+    )
+}
+fn homogeneous_config(c: &mut Config) -> &mut HomogeneousMediumConfig {
+    let Some(MediumConfig::Homogeneous(m)) = &mut c.scene.medium else {
+        panic!("expected homogeneous configuration");
+    };
+    m
 }
 fn empty() -> RenderJob {
     let mut j = RenderJob::new();
@@ -109,7 +117,13 @@ fn volume_sun_matches_the_independent_single_scattering_slab_integral() {
         j.scene.medium = Some(slab(0.2, 0.5, g));
         for sign in [-1.0, 1.0] {
             let sun = (Vector3::z() * sign, 1.0);
-            let phase = j.scene.medium.unwrap().phase().eval(Vector3::z(), sun.0);
+            let phase = j
+                .scene
+                .medium
+                .as_ref()
+                .unwrap()
+                .phase()
+                .eval(Vector3::z(), sun.0);
             let expected = if sign > 0.0 {
                 phase * 0.5 / 1.4 * (1.0 - (-1.4_f64).exp())
             } else {
@@ -175,7 +189,7 @@ fn uniform_environment_multiple_scattering_recovers_energy_without_counting_phas
     );
     // A conservative cube in uniform unit radiance has the exact full solution L=1.
     // Finite budgets omit positive higher orders; a single-scatter estimator is darker.
-    j.scene.medium = Some(
+    j.scene.medium = Some(Box::new(
         HomogeneousMedium::try_from(&HomogeneousMediumConfig {
             min_m: [-1.0; 3],
             max_m: [1.0; 3],
@@ -184,7 +198,7 @@ fn uniform_environment_multiple_scattering_recovers_energy_without_counting_phas
             g: 0.0,
         })
         .unwrap(),
-    );
+    ));
     for mis in [
         EnvironmentMisHeuristic::Balance,
         EnvironmentMisHeuristic::Power,
@@ -250,7 +264,7 @@ fn zero_volume_budget_and_pure_absorption_use_exact_tr_without_medium_rng() {
 fn repeated_volume_events_keep_albedo_weights_rgb_spectral_geometry_and_surface_budgets() {
     let mut j = empty();
     j.scene.medium = Some(slab(0.8, 3.2, 0.4));
-    let medium = j.scene.medium.unwrap();
+    let medium = j.scene.medium.as_ref().unwrap();
     for budget in [1, 2, 4, 8] {
         j.camera_options.max_volume_scatters = budget;
         let mut reached_budget = false;
@@ -377,7 +391,7 @@ fn volume_light_visibility_includes_geometry_and_finite_disk_distance() {
     let attenuated = rgb(&j, ray(0.5), (Vector3::z(), 0.0), 0);
     assert!((attenuated.x / no_medium.x - (-0.6_f64).exp()).abs() < 1e-8);
     // A box beyond the sampled emitter does not attenuate this finite shadow segment.
-    j.scene.medium = Some(
+    j.scene.medium = Some(Box::new(
         HomogeneousMedium::try_from(&HomogeneousMediumConfig {
             min_m: [-1.0, -1.0, 4.0],
             max_m: [1.0, 1.0, 5.0],
@@ -386,7 +400,7 @@ fn volume_light_visibility_includes_geometry_and_finite_disk_distance() {
             g: 0.0,
         })
         .unwrap(),
-    );
+    ));
     assert_eq!(rgb(&j, ray(0.5), (Vector3::z(), 0.0), 0), no_medium);
 }
 
@@ -422,7 +436,7 @@ fn configured_fog_repeats_across_rgb_hero_packet_mis_threads_and_zero_density() 
     c.render.height = 8;
     c.render.camera_spp = 16;
     c.render.samples_per_pixel_axis = 1;
-    c.scene.medium.as_mut().unwrap().sigma_s = 0.8;
+    homogeneous_config(&mut c).sigma_s = 0.8;
     for budget in [0, 1, 8] {
         c.scene.max_volume_scatters = budget;
         for (mode, packet) in [
@@ -469,7 +483,7 @@ fn configured_fog_repeats_across_rgb_hero_packet_mis_threads_and_zero_density() 
                 let mut vacuum = c.clone();
                 vacuum.scene.medium = None;
                 let mut zero = c.clone();
-                let m = zero.scene.medium.as_mut().unwrap();
+                let m = homogeneous_config(&mut zero);
                 m.sigma_a = 0.0;
                 m.sigma_s = 0.0;
                 let render = |config: &Config| {
@@ -491,7 +505,7 @@ fn configured_fog_repeats_across_rgb_hero_packet_mis_threads_and_zero_density() 
 fn medium_json_defaults_roundtrip_and_invalid_values_fail_building() {
     let mut c = Config::load("configs/homogeneous_fog.json").unwrap();
     assert_eq!(Config::from_json(&c.to_json().unwrap()).unwrap(), c);
-    c.scene.medium.as_mut().unwrap().g = 1.0;
+    homogeneous_config(&mut c).g = 1.0;
     assert!(c.validate().is_err());
     assert!(c.build().is_err());
     let old = Config::load("configs/default.json").unwrap();

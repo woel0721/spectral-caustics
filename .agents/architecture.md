@@ -11,7 +11,7 @@ main: Config::load → Config::build → Renderer::new → Renderer::render
   output::save_components → 显示变换与 PNG
 ```
 
-- [Scene](../src/scene/mod.rs) 只保存物体、材质、光源、环境、背景、可选均匀介质并求交；[Scene::add/intersect](../src/scene/objects.rs) 将 GeometryHit 绑定为含 object_id/material_id 的 Hit。相机配置、路径循环和光子算法不放回 Scene。
+- [Scene](../src/scene/mod.rs) 只保存物体、材质、光源、环境、背景、可选介质并求交；[Scene::add/intersect](../src/scene/objects.rs) 将 GeometryHit 绑定为含 object_id/material_id 的 Hit。相机配置、路径循环和光子算法不放回 Scene。
 - [RenderJob](../src/config/job.rs) 组合 Scene、Camera、相机采样选项、光子接收区/目标绑定和棋盘格；[config/build](../src/config/build.rs) 负责从配置构造这些运行时对象。
 - [Renderer](../src/renderer.rs) 持有 RenderSetting 和可选 Rayon 线程池，提供唯一高层 `render(&RenderJob)`，选择 Pipeline 并调度；不实现 BSDF、Fresnel、路径循环或编码。
 - [Camera Path](../src/integrator/camera/path.rs) 共享求交、即时着色、续追、预算、RR 和分量归属。[CameraTransport](../src/integrator/camera/transport.rs) 提供 RGB/标量运算及材质/光照适配；[rgb](../src/integrator/camera/rgb.rs) 和 [spectral](../src/integrator/camera/spectral.rs) 保留各自像素/波长采样。
@@ -32,7 +32,7 @@ Hero 与四波长 Packet 使用同一个标量路径循环。Packet 共享主射
 - 这是有限深度、二值几何阴影与地面焦散图结合的估计器，不应描述成通用无偏 Path Tracer。不要顺带加入透明阴影、环境焦散、新材质、通用 Photon Mapping、BVH/KD-Tree、GUI 或 GPU。
 - JSON 光子焦散目标限一个 Dielectric Sphere/Prism/VerticalPrism；其他物体阻断。XYZ 图绑定 RGB 相机时要求中性 Lambertian 地面；Eλ 图集支持 Lambertian 地面的波长反射率。图外通量丢弃，不把有限接收区当作整个实体地面。
 - [Dielectric](../src/material/dielectric.rs) 按几何法线和方向判断空气/玻璃两侧，外部 IOR 固定为 1；光子有显式 Air/Glass 状态。没有嵌套介质栈，也不支持从玻璃内部启动光子。
-- [HomogeneousMedium](../src/medium/mod.rs) 是单个轴对齐盒内的无色空间介质掩膜，覆盖盒内固体内部；盒边界不折射、不表示 MediumInterface。相机使用 `CameraOptions.max_volume_scatters` 限制多次体散射，独立于表面预算；达到上限后只计算解析消光。
+- [medium/mod.rs](../src/medium/mod.rs) 只定义 `Medium: Send + Sync` trait 并声明、导出模块；[HomogeneousMedium](../src/medium/homogeneous.rs) 与 [GridMedium](../src/medium/grid.rs) 分别实现局部系数、全局 Majorant、透射率与分段采样。配置及构造在 [config](../src/medium/config.rs)，采样数据在 [types](../src/medium/types.rs)，共享盒边界计算在 [bounds](../src/medium/bounds.rs)，模块单元测试集中在 [tests.rs](../src/medium/tests.rs)。Scene 持有 `Option<Box<dyn Medium>>`，与 Material 的方式一致。单个轴对齐盒内的无色空间介质掩膜覆盖盒内固体内部；盒边界不折射、不表示 MediumInterface。均匀介质使用 `CameraOptions.max_volume_scatters` 限制多次体散射，独立于表面预算；达到上限后只计算解析消光。网格目前仅支持精确消光，有效散射系数非零时拒绝非零体预算，详见 [README](../README.md#非均匀密度网格phase-31)。
 - 光子不感知雾；现有焦散图只受相机侧介质权重影响，不代表有雾时源端到地面的完整能量。非均匀散射、波长相关介质、介质发光和内外介质切换未实现。
 
 ## Diagnostics

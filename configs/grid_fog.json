@@ -1,0 +1,190 @@
+{
+  "render": {
+    "width": 192,
+    "height": 128,
+    "samples_per_pixel_axis": 4,
+    "camera_spp": 32,
+    "mode": "dispersion",
+    "wavelength_min_nm": 380.0,
+    "wavelength_max_nm": 780.0,
+    "wavelength_step_nm": 10.0,
+    "exposure": 1.5,
+    "seed": 42,
+    "thread_count": null,
+    "max_spectral_blocks": 16,
+    "output_path": "output/grid_fog/camera_combined.png",
+    "camera_mode": "rgb",
+    "spectral_packet_size": 1
+  },
+  "scene": {
+    "camera": {
+      "position": [
+        0,
+        -6,
+        2.7
+      ],
+      "target": [
+        0,
+        0,
+        1.1
+      ],
+      "up": [
+        0,
+        0,
+        1
+      ],
+      "fov_y_degrees": 42
+    },
+    "background_linear_rgb": [
+      0.01,
+      0.01,
+      0.01
+    ],
+    "environment": {
+      "horizon_linear_rgb": [
+        0.025,
+        0.025,
+        0.025
+      ],
+      "zenith_linear_rgb": [
+        0.06,
+        0.06,
+        0.06
+      ],
+      "intensity": 1
+    },
+    "environment_samples": 4,
+    "environment_mis_heuristic": "power",
+    "max_diffuse_bounces": 1,
+    "max_volume_scatters": 0,
+    "ground_checkerboard": {
+      "cell_size_m": 0.5,
+      "even_scale": 1.0,
+      "odd_scale": 0.25
+    },
+    "ground_margin_m": 2,
+    "objects": [
+      {
+        "type": "sphere",
+        "center_m": [
+          -0.9,
+          0,
+          0.72
+        ],
+        "radius_m": 0.7,
+        "material": {
+          "type": "lambertian",
+          "albedo": [
+            0.55,
+            0.22,
+            0.12
+          ]
+        }
+      },
+      {
+        "type": "sphere",
+        "center_m": [
+          0.9,
+          0.3,
+          1
+        ],
+        "radius_m": 0.95,
+        "material": {
+          "type": "lambertian",
+          "albedo": [
+            0.18,
+            0.4,
+            0.6
+          ]
+        }
+      },
+      {
+        "type": "ground",
+        "height_m": 0,
+        "material": {
+          "type": "lambertian",
+          "albedo": [
+            0.6,
+            0.6,
+            0.6
+          ]
+        }
+      }
+    ],
+    "light": {
+      "height_m": 3.0,
+      "direction": [
+        0,
+        -0.8,
+        -0.6
+      ],
+      "aperture_min_m": [
+        -2.0,
+        -2.0
+      ],
+      "aperture_max_m": [
+        2.0,
+        2.0
+      ],
+      "total_flux": 16,
+      "type": "parallel"
+    },
+    "receiver": {
+      "min_m": [
+        -2.0,
+        -2.0
+      ],
+      "max_m": [
+        2.0,
+        2.0
+      ]
+    },
+    "light_samples": 4,
+    "medium": {
+      "min_m": [
+        -3,
+        -2.5,
+        0.02
+      ],
+      "max_m": [
+        3,
+        3,
+        3.5
+      ],
+      "resolution": [
+        4,
+        2,
+        3
+      ],
+      "densities": [
+        0.15,
+        0.7,
+        1.5,
+        2.8,
+        0.1,
+        0.5,
+        1.2,
+        2.4,
+        0.1,
+        0.4,
+        0.9,
+        1.8,
+        0.05,
+        0.3,
+        0.7,
+        1.5,
+        0.0,
+        0.1,
+        0.2,
+        0.4,
+        0.0,
+        0.05,
+        0.1,
+        0.3
+      ],
+      "sigma_a_base": 0.03,
+      "sigma_s_base": 0.22,
+      "g": 0.7
+    }
+  }
+}

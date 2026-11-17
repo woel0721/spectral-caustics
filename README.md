@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
-`Renderer::render(&RenderJob)` 是唯一的高层渲染入口。Renderer 只持有设置和可选 Rayon 线程池，负责选择 Pipeline 和执行调度。它不实现散射、Fresnel、路径循环或图像编码。`Scene` 只保存物体、材质、光源、环境、背景、可选均匀介质并求最近交点。`RenderJob` 将 Scene、Camera、相机采样选项、光子接收区及物体编号组合起来。
+`Renderer::render(&RenderJob)` 是唯一的高层渲染入口。Renderer 只持有设置和可选 Rayon 线程池，负责选择 Pipeline 和执行调度。它不实现散射、Fresnel、路径循环或图像编码。`Scene` 只保存物体、材质、光源、环境、背景、可选介质并求最近交点。`RenderJob` 将 Scene、Camera、相机采样选项、光子接收区及物体编号组合起来。
 
 目录按职责组织：
 
@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 | `scene/`、`geometry/` | 场景、几何求交；GeometryHit 由 Scene 绑定成带有效编号的 Hit |
 | `light/`、`environment/` | 平行光 / 圆盘的发射分布、环境辐亮度与方向分布 |
 | `material/` | RGB / 标量光谱 BSDF、采样事件及方向 PDF |
-| `medium/` | 有界均匀介质、自由程、Beer–Lambert、HG 相函数 |
+| `medium/` | 均匀/密度网格介质、均匀自由程、精确 Beer–Lambert、HG 相函数 |
 | `optics/interface.rs` | Snell、Fresnel、介质界面事件及两种传输权重 |
 | `optics/dispersion.rs` | Constant / Cauchy 折射率；波长 nm、Cauchy 内部 μm |
 | `integrator/camera/path.rs` | RGB / Hero 共用的路径主循环、预算、RR、分量归属 |
@@ -184,6 +184,43 @@ cargo test --locked --test volume
 
 每个对照子目录包含三个分量 PNG 和可独立重跑的 `config.json`。纯吸收组把相同总消光全部设为 `sigma_a`；两个散射组保持相同 `sigma_a/sigma_s`，只改变 g。密度倍率同时缩放两个系数，0 等价于无介质。
 
-这是体散射阶数有界的估计：预算截断后丢弃更高阶散射，不对丢失能量补偿，浓雾可能需要更大的预算。尚无非均匀介质、Delta/Ratio Tracking、多介质、MediumInterface、介质发光或波长相关系数。Photon/Caustics 核心完全沿用原实现：焦散光子不感知介质，既有焦散图仅受到相机侧的介质权重，不能用于验证有雾时光源到地面的完整能量；雾示例因此不启用光子焦散。平行光仍沿用无限解析太阳模型，发射窗口不裁剪相机端的光束。
+这是体散射阶数有界的估计：预算截断后丢弃更高阶散射，不对丢失能量补偿，浓雾可能需要更大的预算。尚无非均匀介质碰撞采样、Delta/Ratio Tracking、多介质、MediumInterface、介质发光或波长相关系数。Photon/Caustics 核心完全沿用原实现：焦散光子不感知介质，既有焦散图仅受到相机侧的介质权重，不能用于验证有雾时光源到地面的完整能量；雾示例因此不启用光子焦散。平行光仍沿用无限解析太阳模型，发射窗口不裁剪相机端的光束。
+
+## 非均匀密度网格（Phase 3.1）
+
+运行时接口为 `Medium: Send + Sync` trait，`HomogeneousMedium` 与 `GridMedium` 各自实现它，`Scene.medium` 保存 `Option<Box<dyn Medium>>`。这与 `Material` 的接口和所有权方式一致，自定义介质可以直接 `Some(Box::new(medium))` 放入 Scene，无需修改内置类型列表。公共方法包括 `density_at(position)`、`coefficients_at(position)`、`sigma_t_majorant()`、`phase()`、`transmittance_ray(ray, max_distance)`、`sample_segment(...)` 及采样能力检查；直接在具体类型上调用这些方法时需导入 `medium::Medium` trait。局部系数由 `MediumCoefficients` 返回，其 `sigma_t()` 为吸收与散射系数之和。`sample_segment` 统一返回 `Result<MediumSample, String>`，权重、均匀自由程、HG 和多次散射算法保持原样。
+
+JSON 的 `scene.medium` 根据互斥字段结构区分 `MediumConfig` 两个配置变体，再由 `medium::from_config` 构造 `Box<dyn Medium>`：已有均匀配置保留 `sigma_a/sigma_s`，网格使用 `resolution/densities/sigma_a_base/sigma_s_base`；不需要 `type` 字段。最小双层网格配置：
+
+```json
+"max_volume_scatters": 0,
+"medium": {
+  "min_m": [-2, -2, 0],
+  "max_m": [2, 2, 2],
+  "resolution": [1, 1, 2],
+  "densities": [1.0, 3.0],
+  "sigma_a_base": 0.03,
+  "sigma_s_base": 0.22,
+  "g": 0.7
+}
+```
+
+`resolution=[nx,ny,nz]` 表示世界 AABB 内各轴等分的体素数，全部为正，数组长度必须是 `nx*ny*nz`。密度无量纲，非负且有限，按 **x 最快、其次 y、最后 z** 排列：`index=x+nx*(y+ny*z)`。第 i 个轴向分界面是 `min+(max-min)*i/n`；位置映射相当于 `floor((p-min)/(max-min)*n)`，并对分界面的浮点舍入与遍历保持一致。内部面归较大下标，外部 max 面归最后一格，闭合外边界与原均匀盒一致；盒外为真空。构造时拒绝尺寸溢出、无效系数、密度缩放溢出及世界坐标精度下塌缩的体素。
+
+每格满足 `sigma_a=density*sigma_a_base`、`sigma_s=density*sigma_s_base`。全局 Majorant 缓存为最大密度处的 `sigma_a+sigma_s`；用与查询相同的乘加顺序计算，非负乘加的单调性保证它覆盖所有体素返回的消光系数。运行时网格数据不可公开修改，Majorant 不会失效。
+
+透射率先将射线裁到 `[0,max_distance]` 与 AABB 的交集，再用 3D DDA 遍历体素，计算 `tau=Σ(sigma_a,i+sigma_s,i)*length_i`、`Tr=exp(-tau)`。这是分块常数模型的精确积分（受浮点舍入限制），不使用固定步长。每次跨面至少推进一个体素下标，边/角处同时推进所有相交轴；零方向轴不跨面，面上反向起步通过零长度跨面处理，不用 epsilon 丢弃薄层。相机路径和太阳/圆盘/环境阴影共用此透射率。
+
+**本阶段只渲染网格消光。** 网格有效 `sigma_s>0` 时必须显式设置 `max_volume_scatters=0`；配置验证、实际构建和直接相机入口均拒绝尚未实现的网格散射请求。纯吸收网格及全零密度网格可使用非零预算，但不会产生体事件或消费介质 RNG。含 `sigma_s`、预算为 0 的示例仅展示总消光，不包含雾内散射光。
+
+```sh
+cargo run --release --locked -- configs/grid_fog.json
+cargo test --locked --lib medium::
+cargo test --locked --test grid_medium
+```
+
+`configs/grid_fog.json` 是 4×2×3 密度变化的雾场，默认 192×128、32 SPP、seed=42；输出在 `output/grid_fog/`。没有外部体积格式、Null Collision、局部 Majorant Iterator 或新体积分器。
+
+下一阶段接入 Delta Tracking 的最小修改点是 `GridMedium` 的 `impl Medium` 中的 `sample_segment`：用现有 `GridMedium::interval`、全局 Majorant 和局部系数查询实现正确的碰撞采样与权重，然后解除该实现的 `validate_volume_sampling` 限制。返回仍使用 `MediumSample`，继续复用现有 Camera Path 的 HG、体照明、独立介质 RNG、事件预算与分量归属；精确 DDA 阴影透射率可以保留，无需同步引入 Ratio Tracking。
 
 本次文件迁移、清理统计与验收明细见 [重构记录](docs/refactor.md)。

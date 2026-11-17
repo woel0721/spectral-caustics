@@ -39,9 +39,9 @@ pub struct SceneConfig {
     /// 缺省/null 使用常量背景且关闭天空照明；显式配置时启用天空。
     #[serde(default)]
     pub environment: Option<EnvironmentConfig>,
-    /// 单个有界均匀介质；省略/null 为真空，系数单位 m⁻¹。
+    /// 单个有界均匀/网格介质；省略/null 为真空，系数单位 m⁻¹。
     #[serde(default)]
-    pub medium: Option<crate::medium::HomogeneousMediumConfig>,
+    pub medium: Option<crate::medium::MediumConfig>,
     /// 每条相机路径在漫反射终点采样的环境方向数，默认 1。
     #[serde(default = "default_environment_samples")]
     pub environment_samples: usize,
@@ -341,7 +341,8 @@ impl SceneConfig {
     pub fn validate(&self) -> Result<(), String> {
         self.camera.validate()?;
         if let Some(medium) = &self.medium {
-            crate::medium::HomogeneousMedium::try_from(medium)?;
+            crate::medium::from_config(medium)?
+                .validate_volume_sampling(self.max_volume_scatters)?;
         }
         if let Some(environment) = &self.environment {
             environment.validate()?;
