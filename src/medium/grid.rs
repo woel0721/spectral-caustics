@@ -8,6 +8,71 @@ use crate::geometry::ray::Ray;
 use nalgebra::Vector3;
 use rand::{Rng, RngCore, distr::Open01};
 
+mod dda;
+#[cfg(test)]
+mod tests;
+use dda::{MajorantDda, VoxelDda};
+
+// Internal tuning only; no transport/configuration API depends on this layout.
+const MAJORANT_BLOCK_EDGE: usize = 8;
+
+#[derive(Debug, Clone)]
+struct MajorantGrid {
+    stride: usize,
+    resolution: [usize; 3],
+    values: Vec<f64>,
+}
+
+impl MajorantGrid {
+    fn new(
+        fine: [usize; 3],
+        densities: &[f64],
+        base: MediumCoefficients,
+        stride: usize,
+    ) -> Result<Self, String> {
+        let resolution = fine.map(|n| n.div_ceil(stride));
+        // Each coarse axis is <= its already validated fine axis.
+        let count = resolution.iter().product();
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(count)
+            .map_err(|_| "cannot allocate local majorants")?;
+        values.resize(count, 0.0_f64);
+        for (i, &density) in densities.iter().enumerate() {
+            let cell = [
+                i % fine[0],
+                (i / fine[0]) % fine[1],
+                i / (fine[0] * fine[1]),
+            ]
+            .map(|v| v / stride);
+            let index = cell[0] + resolution[0] * (cell[1] + resolution[1] * cell[2]);
+            // Match coefficients_at().sigma_t() arithmetic, as for the global bound.
+            let sigma_t = density * base.sigma_a + density * base.sigma_s;
+            values[index] = values[index].max(sigma_t);
+        }
+        // Identical bounds cannot reduce null events. Traverse one segment instead
+        // of paying for coarse DDA boundaries in uniform or uniformly bounded fields.
+        if values.iter().all(|&m| m == values[0]) {
+            values.truncate(1);
+            values.shrink_to_fit();
+            return Ok(Self {
+                stride: *fine.iter().max().unwrap(),
+                resolution: [1; 3],
+                values,
+            });
+        }
+        Ok(Self {
+            stride,
+            resolution,
+            values,
+        })
+    }
+
+    fn at(&self, cell: [usize; 3]) -> f64 {
+        self.values[cell[0] + self.resolution[0] * (cell[1] + self.resolution[1] * cell[2])]
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GridMedium {
     min: Vector3<f64>,
@@ -17,6 +82,7 @@ pub struct GridMedium {
     base: MediumCoefficients,
     max_density: f64,
     sigma_t_majorant: f64,
+    majorants: MajorantGrid,
     phase: HenyeyGreenstein,
 }
 
@@ -71,6 +137,15 @@ impl TryFrom<&GridMediumConfig> for GridMedium {
             },
             max_density,
             sigma_t_majorant,
+            majorants: MajorantGrid::new(
+                c.resolution,
+                &c.densities,
+                MediumCoefficients {
+                    sigma_a: c.sigma_a_base,
+                    sigma_s: c.sigma_s_base,
+                },
+                MAJORANT_BLOCK_EDGE,
+            )?,
             phase: HenyeyGreenstein::new(c.g)?,
         };
         // Reject cells collapsed by world-coordinate rounding. DDA must always
@@ -146,7 +221,7 @@ impl Medium for GridMedium {
     fn phase(&self) -> HenyeyGreenstein {
         self.phase
     }
-    /// Delta tracking samples the first real extinction with density σt(x) Tr(x).
+    /// Piecewise-majorant tracking samples real extinction with density σt(x) Tr(x).
     /// Null collisions only advance this internal walk. Implicit absorption gives
     /// σs(x)/σt(x) at a real event; surviving the segment has compensated weight 1.
     fn sample_segment(
@@ -162,95 +237,83 @@ impl Medium for GridMedium {
                 weight: self.transmittance_ray(ray, max_distance),
             });
         }
-        let Some((mut t, exit)) = self.interval(ray, max_distance) else {
+        let Some((enter, exit)) = self.interval(ray, max_distance) else {
             return Ok(MediumSample {
                 position: None,
                 weight: 1.0,
             });
         };
-        if !t.is_finite() || !exit.is_finite() {
+        if !enter.is_finite() || !exit.is_finite() {
             return Err("grid collision interval exceeds finite ray distances".into());
         }
-        loop {
-            // Open01 excludes a zero exponential step. Do not impose a candidate
-            // count cap: dropping paths after many null events would bias sampling.
-            let u: f64 = rng.sample(Open01);
-            let next = t - (-u).ln_1p() / self.sigma_t_majorant;
-            if next >= exit {
-                return Ok(MediumSample {
-                    position: None,
-                    weight: 1.0,
+        // Carry unit-exponential optical depth, not metres, across rate changes.
+        // Draw lazily: even a nonempty ray may only cross zero-majorant blocks.
+        let mut remaining = None;
+        for segment in MajorantDda::new(self, ray, enter, exit, self.majorants.stride) {
+            let majorant = self.majorants.at(segment.cell);
+            if majorant == 0.0 {
+                continue;
+            }
+            let mut t = segment.start;
+            loop {
+                let tau = remaining.get_or_insert_with(|| {
+                    let u: f64 = rng.sample(Open01);
+                    -(-u).ln_1p()
                 });
-            }
-            if next <= t {
-                return Err("grid collision distance cannot advance at f64 precision".into());
-            }
-            t = next;
-            let position = ray.at(t);
-            if position.iter().any(|v| !v.is_finite()) {
-                return Err("grid collision position overflows".into());
-            }
-            let coefficients = self.coefficients_at(position);
-            let sigma_t = coefficients.sigma_t();
-            if rng.random::<f64>() < sigma_t / self.sigma_t_majorant {
-                return Ok(MediumSample {
-                    position: Some(position),
-                    weight: coefficients.sigma_s / sigma_t,
-                });
+                let depth = majorant * (segment.end - t);
+                if *tau >= depth {
+                    *tau -= depth;
+                    break;
+                }
+                let next = t + *tau / majorant;
+                if next <= t || next >= segment.end {
+                    return Err(
+                        "grid collision distance cannot advance inside segment at f64 precision"
+                            .into(),
+                    );
+                }
+                t = next;
+                let position = ray.at(t);
+                if position.iter().any(|v| !v.is_finite()) {
+                    return Err("grid collision position overflows".into());
+                }
+                let coefficients = self.coefficients_at(position);
+                let sigma_t = coefficients.sigma_t();
+                if sigma_t > majorant {
+                    return Err("rounded grid collision lies outside its local majorant".into());
+                }
+                if rng.random::<f64>() < sigma_t / majorant {
+                    return Ok(MediumSample {
+                        position: Some(position),
+                        weight: coefficients.sigma_s / sigma_t,
+                    });
+                }
+                // Null events stay inside this method, without a candidate cap.
+                remaining = None;
             }
         }
+        Ok(MediumSample {
+            position: None,
+            weight: 1.0,
+        })
     }
     /// Exact Beer–Lambert for piecewise constant cells, up to floating-point
     /// rounding: tau = sum_i (sigma_a_i + sigma_s_i) * length_i, Tr = exp(-tau).
     /// DDA visits only crossed voxels; no fixed step, RNG, or collision sampling.
     fn transmittance_ray(&self, ray: &Ray, max_distance: f64) -> f64 {
-        let Some((mut t, exit)) = self.interval(ray, max_distance) else {
+        let Some((enter, exit)) = self.interval(ray, max_distance) else {
             return 1.0;
         };
-        let mut cell = self.cell_at(ray.at(t));
-        let crossing = |axis: usize, cell: [usize; 3]| {
-            let d = ray.direction[axis];
-            if d == 0.0 {
-                f64::INFINITY
-            } else {
-                let face = cell[axis] + usize::from(d > 0.0);
-                (self.face(axis, face) - ray.origin[axis]) / d
-            }
-        };
-        let mut next: [f64; 3] = std::array::from_fn(|axis| crossing(axis, cell));
         let mut tau = 0.0;
-        loop {
-            let end = next.iter().copied().fold(exit, f64::min).max(t);
+        for segment in VoxelDda::new(self, ray, enter, exit, 1) {
             let sigma_t = self
-                .scaled_coefficients(self.densities[self.index(cell)])
+                .scaled_coefficients(self.densities[self.index(segment.cell)])
                 .sigma_t();
             // A vacuum cell contributes zero even if a very distant box exit
             // overflows the representable ray distance (avoid 0 * infinity).
             if sigma_t > 0.0 {
-                tau += sigma_t * (end - t);
+                tau += sigma_t * (segment.end - segment.start);
             }
-            if end >= exit {
-                break;
-            }
-            // Advance every tied axis at edges/corners. Zero-length crossings
-            // handle rays starting on a face in the negative direction, without epsilon.
-            for axis in 0..3 {
-                if next[axis] <= end {
-                    if ray.direction[axis] > 0.0 {
-                        cell[axis] += 1;
-                        if cell[axis] == self.resolution[axis] {
-                            return (-tau).exp();
-                        }
-                    } else {
-                        let Some(previous) = cell[axis].checked_sub(1) else {
-                            return (-tau).exp();
-                        };
-                        cell[axis] = previous;
-                    }
-                    next[axis] = crossing(axis, cell);
-                }
-            }
-            t = end;
         }
         (-tau).exp()
     }

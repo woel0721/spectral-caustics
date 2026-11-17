@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 | `scene/`、`geometry/` | 场景、几何求交；GeometryHit 由 Scene 绑定成带有效编号的 Hit |
 | `light/`、`environment/` | 平行光 / 圆盘的发射分布、环境辐亮度与方向分布 |
 | `material/` | RGB / 标量光谱 BSDF、采样事件及方向 PDF |
-| `medium/` | 均匀/密度网格介质、自由程/Delta Tracking、精确 Beer–Lambert、HG 相函数 |
+| `medium/` | 均匀/密度网格介质、局部 Majorant/Delta Tracking、私有 DDA、精确 Beer–Lambert、HG 相函数 |
 | `optics/interface.rs` | Snell、Fresnel、介质界面事件及两种传输权重 |
 | `optics/dispersion.rs` | Constant / Cauchy 折射率；波长 nm、Cauchy 内部 μm |
 | `integrator/camera/path.rs` | RGB / Hero 共用的路径主循环、预算、RR、分量归属 |
@@ -209,19 +209,20 @@ JSON 的 `scene.medium` 根据互斥字段结构区分 `MediumConfig` 两个配�
 
 `resolution=[nx,ny,nz]` 表示世界 AABB 内各轴等分的体素数，全部为正，数组长度必须是 `nx*ny*nz`。密度无量纲，非负且有限，按 **x 最快、其次 y、最后 z** 排列：`index=x+nx*(y+ny*z)`。第 i 个轴向分界面是 `min+(max-min)*i/n`；位置映射相当于 `floor((p-min)/(max-min)*n)`，并对分界面的浮点舍入与遍历保持一致。内部面归较大下标，外部 max 面归最后一格，闭合外边界与原均匀盒一致；盒外为真空。构造时拒绝尺寸溢出、无效系数、密度缩放溢出及世界坐标精度下塌缩的体素。
 
-每格满足 `sigma_a=density*sigma_a_base`、`sigma_s=density*sigma_s_base`。全局 Majorant 缓存为最大密度处的 `sigma_a+sigma_s`；用与查询相同的乘加顺序计算，非负乘加的单调性保证它覆盖所有体素返回的消光系数。运行时网格数据不可公开修改，Majorant 不会失效。
+每格满足 `sigma_a=density*sigma_a_base`、`sigma_s=density*sigma_s_base`。`sigma_t_majorant()` 仍返回全局最大消光，供数据检查；采样使用 Phase 3.3 的私有粗块 Majorant 缓存。每块覆盖 **8×8×8 个细体素**（不足八格的尾块按实际范围覆盖），保存块内最大的 `sigma_a+sigma_s`。用与系数查询相同的乘加顺序计算，不能用平均密度代替上界。块边界直接使用原细网格的分界面，尾块不会重新等分或拉伸。数据构造后只读，缓存不会失效。若所有块的上界相同，内部合并成一个段，避免无收益的粗块遍历。
 
 透射率先将射线裁到 `[0,max_distance]` 与 AABB 的交集，再用 3D DDA 遍历体素，计算 `tau=Σ(sigma_a,i+sigma_s,i)*length_i`、`Tr=exp(-tau)`。这是分块常数模型的精确积分（受浮点舍入限制），不使用固定步长。每次跨面至少推进一个体素下标，边/角处同时推进所有相交轴；零方向轴不跨面，面上反向起步通过零长度跨面处理，不用 epsilon 丢弃薄层。相机路径的确定性消光分支和太阳/圆盘/环境阴影共用此透射率。
 
-Phase 3.2 在 `GridMedium::sample_segment` 内使用全局 Majorant `M >= sigma_t(x)` 进行 [Delta Tracking](https://pbr-book.org/4ed/Volume_Scattering/Transmittance)：
+`GridMedium::sample_segment` 内使用分段局部 Majorant `M_b >= sigma_t(x)` 进行 [Delta Tracking](https://pbr-book.org/4ed/Volume_Scattering/Transmittance)。粗块 DDA 按前后顺序给出射线段与其局部上界，迭代器只在介质模块内部使用，不暴露给 Camera Integrator：
 
-1. 在裁剪后的区间内反复抽取指数步长 `s=-ln(1-u)/M`，`u` 取开区间 `(0,1)`。
-2. 候选点 x 以 `sigma_t(x)/M` 接受为真实消光碰撞，否则为空碰撞，内部继续前进。
-3. 真实碰撞的边缘距离密度为 `sigma_t(x) Tr(x)`；使用隐式吸收，返回真实散射点及权重 `sigma_s(x)/sigma_t(x)`。采样存活至段尾的概率已是 `Tr`，因此返回无碰撞、权重 1，不能再乘一次 `Tr`。
+1. 延迟抽取单位指数光学深度 `tau=-ln(1-u)`，`u` 取开区间 `(0,1)`。`M_b=0` 的块直接跳过，不消费 RNG。
+2. 当前段剩余长度为 L。若 `tau >= M_b*L`，扣除 `M_b*L`，携带剩余光学深度进入下一块；否则候选点在当前起点后 `tau/M_b` 米处。跨块携带的是光学深度，不能直接复用米制自由程。
+3. 候选点 x 以 `sigma_t(x)/M_b` 接受为真实消光碰撞；空碰撞后重新抽取光学深度，继续内部循环。跨块不额外乘 Tr，也不产生物理路径顶点。
+4. 真实碰撞的边缘距离密度仍为 `sigma_t(x) Tr(x)`，隐式吸收权重为 `sigma_s(x)/sigma_t(x)`。存活至段尾的概率已是 Tr，因此返回无碰撞、权重 1。
 
-空碰撞不返回给相机、不调用 HG/NEE，也不占 `max_volume_scatters`；没有任意候选次数截断。真实散射继续复用现有多次体散射循环，支持 RGB/Hero/Packet。纯吸收、全零有效散射或预算耗尽时返回精确 DDA 消光；不相交或空区间返回权重 1，这些分支不消费介质 RNG。随机采样仅使用介质流，Packet 各 lane 持有各自的 CRN 副本。
+空碰撞不返回给相机、不调用 HG/NEE，也不占 `max_volume_scatters`；没有任意候选次数截断。真实散射继续复用现有多次体散射循环，支持 RGB/Hero/Packet。纯吸收、全零有效散射或预算耗尽时返回精确细体素 DDA 消光；不相交或空区间返回权重 1，这些分支不消费介质 RNG。即使全局上界非零，仅穿过零上界块的射线也不消费 RNG。随机采样仅使用介质流，Packet 各 lane 持有各自的 CRN 副本。
 
-构造保证 Majorant 覆盖局部消光；碰撞距离无法以 f64 前进、区间距离或碰撞位置溢出时返回错误，不推进 epsilon 或静默截断。全局 Majorant 在密度差异很大的稀疏网格中可能产生大量空碰撞；局部 Majorant 加速尚未实现。阴影与预算耗尽后的 Tr 继续使用精确 DDA，未引入 Ratio Tracking。
+构造保证每块 Majorant 覆盖其局部消光；碰撞距离无法以 f64 表达在段内、区间/位置溢出或舍入后查询到的消光超出当前局部上界时返回错误，不推进 epsilon、夹紧接受概率或静默截断。细体素与粗块复用私有 DDA 步进，阴影与确定性分支仍使用精确 Tr，未引入 Ratio Tracking。改变分块布局会改变随机数消耗，版本间比较统计分布；同一设置/seed 在 1/2/4 线程下仍逐位一致。
 
 ```sh
 cargo run --release --locked -- configs/grid_fog.json
@@ -238,5 +239,18 @@ cargo run --release --locked --example grid_medium_compare -- 256 384 output/gri
 `configs/grid_fog.json` 是 4×2×3 密度变化的雾场，默认 192×128、32 SPP、seed=42、体预算 8；输出在 `output/grid_fog/`。设预算为 0 可观察相同总消光下不含散射光的图像。
 
 `grid_medium_compare` 输出 `homogeneous`、`uniform_grid`、`layered_single`、`layered_multiple`、`clumped_extinction`、`clumped_single`、`clumped_multiple` 七组，每组包含三个分量 PNG 和可重跑的 `config.json`。均匀/分层/团块密度均归一到体积平均密度 1，系数、相机、光源、曝光与 seed 相同；散射预算分别为 0/1/8。分层与团块网格为 12×10×8 的分块常数场。均匀网格与均匀介质的随机数消耗不同，比较统计分布与能量，不要求低 SPP 图像逐位相同。`hero` 使用单波长，`packet` 使用四波长 CRN，SPP 须能被 4 整除。
+
+局部上界性能入口（计时不作为 CI 断言）：
+
+```sh
+# 参数：射线数、每轴体素数、重复次数、输出目录、整图 SPP（0 跳过）、整图宽度
+cargo run --release --locked --example grid_majorant_benchmark -- 100000 64 5 output/grid_bench64 16 96
+cargo run --release --locked --example grid_majorant_benchmark -- 100000 128 5 output/grid_bench128 0 96
+
+# 在介质内部比较 2³/4³/8³ 块，使用上一步保存的配置作为密度输入
+GRID_BENCHMARK_CONFIG=output/grid_bench64/sparse_clumps/config.json cargo test --release --locked --lib medium::grid::tests::benchmark_block_sizes -- --ignored --nocapture
+```
+
+基准覆盖均匀、稀疏团块、单体素尖峰，输出 `benchmark.json`；整图开启时另存三个分量和可重跑配置。候选数通过该采样器每个候选的两次 u64 RNG 调用统计，不向相机或 `MediumSample` 添加统计字段。8³ 的选择、缓存成本、测量条件和局限见 [Phase 3.3 基准记录](docs/medium_majorant_benchmark.md)。
 
 Phase 3.1 及此前的文件迁移、清理统计与验收明细见 [重构记录](docs/refactor.md)。

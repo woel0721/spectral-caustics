@@ -430,8 +430,13 @@ mod tests {
                 GridMedium::try_from(&GridMediumConfig {
                     min_m: [-2.0; 3],
                     max_m: [2.0; 3],
-                    resolution: [2; 3],
-                    densities: vec![0.0, 0.2, 1.3, 2.0, 0.7, 1.8, 0.3, 1.1],
+                    resolution: [16; 3],
+                    densities: (0..4096)
+                        .map(|i| {
+                            [0.0, 0.2, 1.3, 2.0, 0.7, 1.8, 0.3, 1.1]
+                                [(i % 16) / 8 + 2 * ((i / 16) % 16 / 8) + 4 * (i / 256 / 8)]
+                        })
+                        .collect(),
                     sigma_a_base: 0.1,
                     sigma_s_base: 0.9,
                     g: 0.3,
