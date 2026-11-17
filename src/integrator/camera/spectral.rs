@@ -401,7 +401,9 @@ mod tests {
         use crate::{
             camera::Camera,
             config::camera::CameraConfig,
-            medium::{HomogeneousMedium, HomogeneousMediumConfig},
+            medium::{
+                GridMedium, GridMediumConfig, HomogeneousMedium, HomogeneousMediumConfig, Medium,
+            },
         };
         let mut job = RenderJob::new();
         job.scene.environment = None;
@@ -413,80 +415,108 @@ mod tests {
             fov_y_degrees: 30.0,
         })
         .unwrap();
-        job.scene.medium = Some(Box::new(
-            HomogeneousMedium::try_from(&HomogeneousMediumConfig {
-                min_m: [-2.0; 3],
-                max_m: [2.0; 3],
-                sigma_a: 0.1,
-                sigma_s: 0.9,
-                g: 0.3,
-            })
-            .unwrap(),
-        ));
-        job.camera_options.max_volume_scatters = 4;
-        let settings = RenderSetting {
-            width: 1,
-            height: 1,
-            camera_spp: 16,
-            spectral_packet_size: 4,
-            seed: 42,
-            ..Default::default()
-        };
-        let (sun_wi, sun) = job.scene.light.analytic_sun().unwrap().unwrap();
-        let mut expected = Vector3::zeros();
-        let mut seen_multiple = false;
-        for i in 0..4 {
-            let mut jitter = packet_rng(settings.seed, 0, i, 0, CAMERA_STREAM);
-            let ray = job
-                .camera
-                .ray_for_pixel_sample(0, 0, 1, 1, Vector2::new(jitter.random(), jitter.random()))
-                .unwrap();
-            let mut reference = None;
-            for lane in 0..4 {
-                let mut wavelength = packet_rng(settings.seed, 0, i, lane, WAVELENGTH_STREAM);
-                let nm = packet_wavelength_nm(i, 4, lane, wavelength.random());
-                let mut state = CameraPathState::spectral(ray, nm, 0).unwrap();
-                // Each scalar lane owns fresh streams. The real Packet must reset
-                // its medium cursor to the same state even after a long previous lane.
-                let mut medium = packet_rng(settings.seed, 0, i, 0, MEDIUM_STREAM);
-                trace_camera_path(
-                    &job,
-                    &mut state,
-                    &mut CameraPathRngs {
-                        camera: &mut packet_rng(settings.seed, 0, i, 0, PREFIX_STREAM),
-                        environment: &mut packet_rng(settings.seed, 0, i, 0, ENVIRONMENT_STREAM),
-                        diffuse: &mut packet_rng(settings.seed, 0, i, 0, DIFFUSE_STREAM),
-                        medium: &mut medium,
-                    },
-                    sun_wi,
-                    sun,
-                    Caustics::None,
-                    settings.mode,
-                    #[cfg(feature = "diagnostics")]
-                    None,
-                )
-                .unwrap();
-                let geometry = (
-                    state.volume_scatters,
-                    state.ray.origin,
-                    state.ray.direction,
-                    state.throughput,
-                    medium.next_u64(),
-                );
-                if let Some(r) = reference {
-                    assert_eq!(geometry, r);
-                } else {
-                    reference = Some(geometry);
+        for medium in [
+            Box::new(
+                HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+                    min_m: [-2.0; 3],
+                    max_m: [2.0; 3],
+                    sigma_a: 0.1,
+                    sigma_s: 0.9,
+                    g: 0.3,
+                })
+                .unwrap(),
+            ) as Box<dyn Medium>,
+            Box::new(
+                GridMedium::try_from(&GridMediumConfig {
+                    min_m: [-2.0; 3],
+                    max_m: [2.0; 3],
+                    resolution: [2; 3],
+                    densities: vec![0.0, 0.2, 1.3, 2.0, 0.7, 1.8, 0.3, 1.1],
+                    sigma_a_base: 0.1,
+                    sigma_s_base: 0.9,
+                    g: 0.3,
+                })
+                .unwrap(),
+            ),
+        ] {
+            job.scene.medium = Some(medium);
+            job.camera_options.max_volume_scatters = 4;
+            let settings = RenderSetting {
+                width: 1,
+                height: 1,
+                camera_spp: 16,
+                spectral_packet_size: 4,
+                seed: 42,
+                ..Default::default()
+            };
+            let (sun_wi, sun) = job.scene.light.analytic_sun().unwrap().unwrap();
+            let mut expected = Vector3::zeros();
+            let mut seen_multiple = false;
+            for i in 0..4 {
+                let mut jitter = packet_rng(settings.seed, 0, i, 0, CAMERA_STREAM);
+                let ray = job
+                    .camera
+                    .ray_for_pixel_sample(
+                        0,
+                        0,
+                        1,
+                        1,
+                        Vector2::new(jitter.random(), jitter.random()),
+                    )
+                    .unwrap();
+                let mut reference = None;
+                for lane in 0..4 {
+                    let mut wavelength = packet_rng(settings.seed, 0, i, lane, WAVELENGTH_STREAM);
+                    let nm = packet_wavelength_nm(i, 4, lane, wavelength.random());
+                    let mut state = CameraPathState::spectral(ray, nm, 0).unwrap();
+                    // Each scalar lane owns fresh streams. The real Packet must reset
+                    // its medium cursor to the same state even after a long previous lane.
+                    let mut medium = packet_rng(settings.seed, 0, i, 0, MEDIUM_STREAM);
+                    trace_camera_path(
+                        &job,
+                        &mut state,
+                        &mut CameraPathRngs {
+                            camera: &mut packet_rng(settings.seed, 0, i, 0, PREFIX_STREAM),
+                            environment: &mut packet_rng(
+                                settings.seed,
+                                0,
+                                i,
+                                0,
+                                ENVIRONMENT_STREAM,
+                            ),
+                            diffuse: &mut packet_rng(settings.seed, 0, i, 0, DIFFUSE_STREAM),
+                            medium: &mut medium,
+                        },
+                        sun_wi,
+                        sun,
+                        Caustics::None,
+                        settings.mode,
+                        #[cfg(feature = "diagnostics")]
+                        None,
+                    )
+                    .unwrap();
+                    let geometry = (
+                        state.volume_scatters,
+                        state.ray.origin,
+                        state.ray.direction,
+                        state.throughput,
+                        medium.next_u64(),
+                    );
+                    if let Some(r) = reference {
+                        assert_eq!(geometry, r);
+                    } else {
+                        reference = Some(geometry);
+                    }
+                    seen_multiple |= state.volume_scatters > 1;
+                    expected +=
+                        cie_xyz(nm).unwrap() * (state.radiance.direct / (WAVELENGTH_PDF * 16.0));
                 }
-                seen_multiple |= state.volume_scatters > 1;
-                expected +=
-                    cie_xyz(nm).unwrap() * (state.radiance.direct / (WAVELENGTH_PDF * 16.0));
             }
+            assert!(seen_multiple);
+            let actual = integrate_spectral(&job, &settings, None).unwrap();
+            assert_eq!(actual.direct.pixels(), &[expected]);
+            assert_eq!(actual.caustics.pixels(), &[Vector3::zeros()]);
+            assert_eq!(actual.combined.pixels(), &[expected]);
         }
-        assert!(seen_multiple);
-        let actual = integrate_spectral(&job, &settings, None).unwrap();
-        assert_eq!(actual.direct.pixels(), &[expected]);
-        assert_eq!(actual.caustics.pixels(), &[Vector3::zeros()]);
-        assert_eq!(actual.combined.pixels(), &[expected]);
     }
 }

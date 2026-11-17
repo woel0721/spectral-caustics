@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 | `scene/`、`geometry/` | 场景、几何求交；GeometryHit 由 Scene 绑定成带有效编号的 Hit |
 | `light/`、`environment/` | 平行光 / 圆盘的发射分布、环境辐亮度与方向分布 |
 | `material/` | RGB / 标量光谱 BSDF、采样事件及方向 PDF |
-| `medium/` | 均匀/密度网格介质、均匀自由程、精确 Beer–Lambert、HG 相函数 |
+| `medium/` | 均匀/密度网格介质、自由程/Delta Tracking、精确 Beer–Lambert、HG 相函数 |
 | `optics/interface.rs` | Snell、Fresnel、介质界面事件及两种传输权重 |
 | `optics/dispersion.rs` | Constant / Cauchy 折射率；波长 nm、Cauchy 内部 μm |
 | `integrator/camera/path.rs` | RGB / Hero 共用的路径主循环、预算、RR、分量归属 |
@@ -184,16 +184,18 @@ cargo test --locked --test volume
 
 每个对照子目录包含三个分量 PNG 和可独立重跑的 `config.json`。纯吸收组把相同总消光全部设为 `sigma_a`；两个散射组保持相同 `sigma_a/sigma_s`，只改变 g。密度倍率同时缩放两个系数，0 等价于无介质。
 
-这是体散射阶数有界的估计：预算截断后丢弃更高阶散射，不对丢失能量补偿，浓雾可能需要更大的预算。尚无非均匀介质碰撞采样、Delta/Ratio Tracking、多介质、MediumInterface、介质发光或波长相关系数。Photon/Caustics 核心完全沿用原实现：焦散光子不感知介质，既有焦散图仅受到相机侧的介质权重，不能用于验证有雾时光源到地面的完整能量；雾示例因此不启用光子焦散。平行光仍沿用无限解析太阳模型，发射窗口不裁剪相机端的光束。
+这是体散射阶数有界的估计：预算截断后丢弃更高阶散射，不对丢失能量补偿，浓雾可能需要更大的预算。尚无 Ratio Tracking、多介质、MediumInterface、介质发光或波长相关系数。Photon/Caustics 核心完全沿用原实现：焦散光子不感知介质，既有焦散图仅受到相机侧的介质权重，不能用于验证有雾时光源到地面的完整能量；雾示例因此不启用光子焦散。平行光仍沿用无限解析太阳模型，发射窗口不裁剪相机端的光束。
 
-## 非均匀密度网格（Phase 3.1）
+## 非均匀密度网格
 
-运行时接口为 `Medium: Send + Sync` trait，`HomogeneousMedium` 与 `GridMedium` 各自实现它，`Scene.medium` 保存 `Option<Box<dyn Medium>>`。这与 `Material` 的接口和所有权方式一致，自定义介质可以直接 `Some(Box::new(medium))` 放入 Scene，无需修改内置类型列表。公共方法包括 `density_at(position)`、`coefficients_at(position)`、`sigma_t_majorant()`、`phase()`、`transmittance_ray(ray, max_distance)`、`sample_segment(...)` 及采样能力检查；直接在具体类型上调用这些方法时需导入 `medium::Medium` trait。局部系数由 `MediumCoefficients` 返回，其 `sigma_t()` 为吸收与散射系数之和。`sample_segment` 统一返回 `Result<MediumSample, String>`，权重、均匀自由程、HG 和多次散射算法保持原样。
+运行时接口为 `Medium: Send + Sync` trait，`HomogeneousMedium` 与 `GridMedium` 各自实现它，`Scene.medium` 保存 `Option<Box<dyn Medium>>`。这与 `Material` 的接口和所有权方式一致，自定义介质可以直接 `Some(Box::new(medium))` 放入 Scene，无需修改内置类型列表。
+
+相机传输只使用三个关键接口：`sample_segment(...)` 返回 `Result<MediumSample, String>`，包含真实散射点（可缺省）和已补偿权重；`transmittance_ray(ray, max_distance)` 返回段透射率；`phase()` 返回相函数。内部算法的封装原则见 [架构职责边界](.agents/architecture.md#当前物理范围)。另有只读的 `density_at(position)`、`coefficients_at(position)`、`sigma_t_majorant()` 供检查介质数据；直接在具体类型上调用 trait 方法需导入 `medium::Medium`。局部系数由 `MediumCoefficients` 返回，其 `sigma_t()` 为吸收与散射系数之和。
 
 JSON 的 `scene.medium` 根据互斥字段结构区分 `MediumConfig` 两个配置变体，再由 `medium::from_config` 构造 `Box<dyn Medium>`：已有均匀配置保留 `sigma_a/sigma_s`，网格使用 `resolution/densities/sigma_a_base/sigma_s_base`；不需要 `type` 字段。最小双层网格配置：
 
 ```json
-"max_volume_scatters": 0,
+"max_volume_scatters": 8,
 "medium": {
   "min_m": [-2, -2, 0],
   "max_m": [2, 2, 2],
@@ -209,18 +211,32 @@ JSON 的 `scene.medium` 根据互斥字段结构区分 `MediumConfig` 两个配�
 
 每格满足 `sigma_a=density*sigma_a_base`、`sigma_s=density*sigma_s_base`。全局 Majorant 缓存为最大密度处的 `sigma_a+sigma_s`；用与查询相同的乘加顺序计算，非负乘加的单调性保证它覆盖所有体素返回的消光系数。运行时网格数据不可公开修改，Majorant 不会失效。
 
-透射率先将射线裁到 `[0,max_distance]` 与 AABB 的交集，再用 3D DDA 遍历体素，计算 `tau=Σ(sigma_a,i+sigma_s,i)*length_i`、`Tr=exp(-tau)`。这是分块常数模型的精确积分（受浮点舍入限制），不使用固定步长。每次跨面至少推进一个体素下标，边/角处同时推进所有相交轴；零方向轴不跨面，面上反向起步通过零长度跨面处理，不用 epsilon 丢弃薄层。相机路径和太阳/圆盘/环境阴影共用此透射率。
+透射率先将射线裁到 `[0,max_distance]` 与 AABB 的交集，再用 3D DDA 遍历体素，计算 `tau=Σ(sigma_a,i+sigma_s,i)*length_i`、`Tr=exp(-tau)`。这是分块常数模型的精确积分（受浮点舍入限制），不使用固定步长。每次跨面至少推进一个体素下标，边/角处同时推进所有相交轴；零方向轴不跨面，面上反向起步通过零长度跨面处理，不用 epsilon 丢弃薄层。相机路径的确定性消光分支和太阳/圆盘/环境阴影共用此透射率。
 
-**本阶段只渲染网格消光。** 网格有效 `sigma_s>0` 时必须显式设置 `max_volume_scatters=0`；配置验证、实际构建和直接相机入口均拒绝尚未实现的网格散射请求。纯吸收网格及全零密度网格可使用非零预算，但不会产生体事件或消费介质 RNG。含 `sigma_s`、预算为 0 的示例仅展示总消光，不包含雾内散射光。
+Phase 3.2 在 `GridMedium::sample_segment` 内使用全局 Majorant `M >= sigma_t(x)` 进行 [Delta Tracking](https://pbr-book.org/4ed/Volume_Scattering/Transmittance)：
+
+1. 在裁剪后的区间内反复抽取指数步长 `s=-ln(1-u)/M`，`u` 取开区间 `(0,1)`。
+2. 候选点 x 以 `sigma_t(x)/M` 接受为真实消光碰撞，否则为空碰撞，内部继续前进。
+3. 真实碰撞的边缘距离密度为 `sigma_t(x) Tr(x)`；使用隐式吸收，返回真实散射点及权重 `sigma_s(x)/sigma_t(x)`。采样存活至段尾的概率已是 `Tr`，因此返回无碰撞、权重 1，不能再乘一次 `Tr`。
+
+空碰撞不返回给相机、不调用 HG/NEE，也不占 `max_volume_scatters`；没有任意候选次数截断。真实散射继续复用现有多次体散射循环，支持 RGB/Hero/Packet。纯吸收、全零有效散射或预算耗尽时返回精确 DDA 消光；不相交或空区间返回权重 1，这些分支不消费介质 RNG。随机采样仅使用介质流，Packet 各 lane 持有各自的 CRN 副本。
+
+构造保证 Majorant 覆盖局部消光；碰撞距离无法以 f64 前进、区间距离或碰撞位置溢出时返回错误，不推进 epsilon 或静默截断。全局 Majorant 在密度差异很大的稀疏网格中可能产生大量空碰撞；局部 Majorant 加速尚未实现。阴影与预算耗尽后的 Tr 继续使用精确 DDA，未引入 Ratio Tracking。
 
 ```sh
 cargo run --release --locked -- configs/grid_fog.json
 cargo test --locked --lib medium::
 cargo test --locked --test grid_medium
+cargo test --locked --test grid_scattering
+
+# 七组对照，固定 seed=42；参数为 SPP、宽度、输出目录、模式
+cargo run --release --locked --example grid_medium_compare -- 256 384 output/grid_compare rgb
+cargo run --release --locked --example grid_medium_compare -- 256 384 output/grid_hero hero
+cargo run --release --locked --example grid_medium_compare -- 256 384 output/grid_packet packet
 ```
 
-`configs/grid_fog.json` 是 4×2×3 密度变化的雾场，默认 192×128、32 SPP、seed=42；输出在 `output/grid_fog/`。没有外部体积格式、Null Collision、局部 Majorant Iterator 或新体积分器。
+`configs/grid_fog.json` 是 4×2×3 密度变化的雾场，默认 192×128、32 SPP、seed=42、体预算 8；输出在 `output/grid_fog/`。设预算为 0 可观察相同总消光下不含散射光的图像。
 
-下一阶段接入 Delta Tracking 的最小修改点是 `GridMedium` 的 `impl Medium` 中的 `sample_segment`：用现有 `GridMedium::interval`、全局 Majorant 和局部系数查询实现正确的碰撞采样与权重，然后解除该实现的 `validate_volume_sampling` 限制。返回仍使用 `MediumSample`，继续复用现有 Camera Path 的 HG、体照明、独立介质 RNG、事件预算与分量归属；精确 DDA 阴影透射率可以保留，无需同步引入 Ratio Tracking。
+`grid_medium_compare` 输出 `homogeneous`、`uniform_grid`、`layered_single`、`layered_multiple`、`clumped_extinction`、`clumped_single`、`clumped_multiple` 七组，每组包含三个分量 PNG 和可重跑的 `config.json`。均匀/分层/团块密度均归一到体积平均密度 1，系数、相机、光源、曝光与 seed 相同；散射预算分别为 0/1/8。分层与团块网格为 12×10×8 的分块常数场。均匀网格与均匀介质的随机数消耗不同，比较统计分布与能量，不要求低 SPP 图像逐位相同。`hero` 使用单波长，`packet` 使用四波长 CRN，SPP 须能被 4 整除。
 
-本次文件迁移、清理统计与验收明细见 [重构记录](docs/refactor.md)。
+Phase 3.1 及此前的文件迁移、清理统计与验收明细见 [重构记录](docs/refactor.md)。

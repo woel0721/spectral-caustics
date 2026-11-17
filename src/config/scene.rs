@@ -341,8 +341,7 @@ impl SceneConfig {
     pub fn validate(&self) -> Result<(), String> {
         self.camera.validate()?;
         if let Some(medium) = &self.medium {
-            crate::medium::from_config(medium)?
-                .validate_volume_sampling(self.max_volume_scatters)?;
+            crate::medium::from_config(medium)?;
         }
         if let Some(environment) = &self.environment {
             environment.validate()?;

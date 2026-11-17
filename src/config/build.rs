@@ -46,9 +46,6 @@ impl RenderJob {
             .as_ref()
             .map(crate::medium::from_config)
             .transpose()?;
-        if let Some(medium) = &medium {
-            medium.validate_volume_sampling(config.max_volume_scatters)?;
-        }
         Ok(Self {
             camera: Camera::from_config(&config.camera)?,
             scene: Scene {

@@ -21,6 +21,8 @@ use rand::RngCore;
 /// Achromatic camera medium, shared by RGB and spectral paths and Rayon workers.
 /// Implementations return nonnegative finite local coefficients and a global
 /// extinction bound covering all positions. Ray distances are in metres.
+/// Camera transport uses only sample_segment, transmittance_ray and phase:
+/// density traversal, majorants and null-collision loops stay inside the medium.
 pub trait Medium: Send + Sync {
     fn density_at(&self, position: Vector3<f64>) -> f64;
     fn coefficients_at(&self, position: Vector3<f64>) -> MediumCoefficients;
@@ -28,15 +30,10 @@ pub trait Medium: Send + Sync {
     fn phase(&self) -> HenyeyGreenstein;
     fn transmittance_ray(&self, ray: &Ray, max_distance: f64) -> f64;
 
-    /// Reject budgets requiring an unsupported collision sampler. The default
-    /// permits all budgets; implementations with restricted sampling override it.
-    fn validate_volume_sampling(&self, _max_volume_scatters: usize) -> Result<(), String> {
-        Ok(())
-    }
-
     /// Return a position on the input ray within the clipped segment and a finite,
     /// nonnegative compensated weight, or a segment weight without a collision.
-    /// Respect allow_scattering and reject unsupported sampling;
+    /// Return only real scattering events; null events do not escape this method.
+    /// Respect allow_scattering;
     /// deterministic extinction must not consume RNG or use an incorrect distance PDF.
     fn sample_segment(
         &self,

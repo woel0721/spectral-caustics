@@ -6,7 +6,7 @@ use super::{
 };
 use crate::geometry::ray::Ray;
 use nalgebra::Vector3;
-use rand::RngCore;
+use rand::{Rng, RngCore, distr::Open01};
 
 #[derive(Debug, Clone)]
 pub struct GridMedium {
@@ -146,24 +146,59 @@ impl Medium for GridMedium {
     fn phase(&self) -> HenyeyGreenstein {
         self.phase
     }
-    fn validate_volume_sampling(&self, max_volume_scatters: usize) -> Result<(), String> {
-        if max_volume_scatters > 0 && self.max_density * self.base.sigma_s > 0.0 {
-            return Err("GridMedium scattering sampling is not implemented; set max_volume_scatters=0 for extinction only".into());
-        }
-        Ok(())
-    }
+    /// Delta tracking samples the first real extinction with density σt(x) Tr(x).
+    /// Null collisions only advance this internal walk. Implicit absorption gives
+    /// σs(x)/σt(x) at a real event; surviving the segment has compensated weight 1.
     fn sample_segment(
         &self,
         ray: &Ray,
         max_distance: f64,
         allow_scattering: bool,
-        _rng: &mut dyn RngCore,
+        rng: &mut dyn RngCore,
     ) -> Result<MediumSample, String> {
-        self.validate_volume_sampling(usize::from(allow_scattering))?;
-        Ok(MediumSample {
-            position: None,
-            weight: self.transmittance_ray(ray, max_distance),
-        })
+        if !allow_scattering || self.max_density * self.base.sigma_s == 0.0 {
+            return Ok(MediumSample {
+                position: None,
+                weight: self.transmittance_ray(ray, max_distance),
+            });
+        }
+        let Some((mut t, exit)) = self.interval(ray, max_distance) else {
+            return Ok(MediumSample {
+                position: None,
+                weight: 1.0,
+            });
+        };
+        if !t.is_finite() || !exit.is_finite() {
+            return Err("grid collision interval exceeds finite ray distances".into());
+        }
+        loop {
+            // Open01 excludes a zero exponential step. Do not impose a candidate
+            // count cap: dropping paths after many null events would bias sampling.
+            let u: f64 = rng.sample(Open01);
+            let next = t - (-u).ln_1p() / self.sigma_t_majorant;
+            if next >= exit {
+                return Ok(MediumSample {
+                    position: None,
+                    weight: 1.0,
+                });
+            }
+            if next <= t {
+                return Err("grid collision distance cannot advance at f64 precision".into());
+            }
+            t = next;
+            let position = ray.at(t);
+            if position.iter().any(|v| !v.is_finite()) {
+                return Err("grid collision position overflows".into());
+            }
+            let coefficients = self.coefficients_at(position);
+            let sigma_t = coefficients.sigma_t();
+            if rng.random::<f64>() < sigma_t / self.sigma_t_majorant {
+                return Ok(MediumSample {
+                    position: Some(position),
+                    weight: coefficients.sigma_s / sigma_t,
+                });
+            }
+        }
     }
     /// Exact Beer–Lambert for piecewise constant cells, up to floating-point
     /// rounding: tau = sum_i (sigma_a_i + sigma_s_i) * length_i, Tr = exp(-tau).

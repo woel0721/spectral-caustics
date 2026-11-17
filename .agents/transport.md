@@ -73,7 +73,7 @@
 
 [HG](../src/medium/phase.rs) 的 wo/wi 都向外，正 g 的前向峰在 `wi=-wo`；采样返回 `p=pdf`，续追乘 `p/pdf=1`，没有表面余弦。每次体散射调用当地 NEE 后重新进入共享路径循环；`volume_scatters` 只计体事件，`max_volume_scatters=0..1024` 是独立相机积分预算，缺省 1，不占连续表面/Delta 预算，不新增体散射 RR。0 或预算耗尽保留总消光，不补偿被截断的更高阶能量；当地体照明及后续表面贡献归 Direct。每次 HG 后的环境 miss 均由当地环境 NEE 负责，后续表面 Delta 链逃逸仍可计光。阴影 Tr 使用实际盒内段长，不能以整段距离或光子侧消光替代。
 
-[GridMedium](../src/medium/grid.rs) 使用 `σa(x)=density(x)·σa_base`、`σs(x)=density(x)·σs_base`，密度在每格内为常数。透射率为 DDA 裁剪遍历后的 `exp(-Σσt,i·Li)`，全局 Majorant 覆盖所有格子的局部消光。不得将均匀自由程公式直接用于网格；Phase 3.1 拒绝有效散射系数非零且体预算非零的网格。纯吸收或预算为 0 时使用精确 Tr，不消费 RNG；布局、边界映射与后续采样接入点见 [README](../README.md#非均匀密度网格phase-31)。
+[GridMedium](../src/medium/grid.rs) 使用 `σa(x)=density(x)·σa_base`、`σs(x)=density(x)·σs_base`，密度在每格内为常数。透射率为 DDA 裁剪遍历后的 `exp(-Σσt,i·Li)`，全局 Majorant 覆盖所有格子的局部消光。Phase 3.2 使用全局 Majorant M 的指数候选步长与 `σt(x)/M` 接受概率进行 Delta Tracking，不能把均匀自由程当作真实网格距离分布。空碰撞在介质内部继续推进，不产生路径顶点、HG/NEE 或预算计数；真实碰撞的边缘密度为 `σt(x) Tr(x)`，返回隐式吸收权重 `σs(x)/σt(x)`。段尾生存概率已为 Tr，返回权重 1，不重复乘 Tr。候选无任意次数截断；距离无法前进或散射区间/位置溢出时返回数值错误。纯吸收、零有效散射或预算耗尽时使用精确 DDA Tr，不消费 RNG；不相交/空区间也不消费 RNG。布局与边界映射见 [README](../README.md#非均匀密度网格)。
 
 ## 随机流与数值处理
 
