@@ -41,15 +41,19 @@ impl RenderJob {
     ///
     /// 输入：由调用方负责校验的 SceneConfig；输出：尚无物体/材质的 Scene，相机/光源构建或 HDR 加载失败返回 Err。
     fn empty_from_config(config: &SceneConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let medium = config
+            .medium
+            .as_ref()
+            .map(crate::medium::from_config)
+            .transpose()?;
+        if let Some(medium) = &medium {
+            medium.validate_volume_sampling(config.max_volume_scatters)?;
+        }
         Ok(Self {
             camera: Camera::from_config(&config.camera)?,
             scene: Scene {
                 background_color: config.background_linear_rgb.into(),
-                medium: config
-                    .medium
-                    .as_ref()
-                    .map(crate::medium::HomogeneousMedium::try_from)
-                    .transpose()?,
+                medium,
                 environment: config
                     .environment
                     .as_ref()

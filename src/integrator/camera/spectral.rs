@@ -413,7 +413,7 @@ mod tests {
             fov_y_degrees: 30.0,
         })
         .unwrap();
-        job.scene.medium = Some(
+        job.scene.medium = Some(Box::new(
             HomogeneousMedium::try_from(&HomogeneousMediumConfig {
                 min_m: [-2.0; 3],
                 max_m: [2.0; 3],
@@ -422,7 +422,7 @@ mod tests {
                 g: 0.3,
             })
             .unwrap(),
-        );
+        ));
         job.camera_options.max_volume_scatters = 4;
         let settings = RenderSetting {
             width: 1,
