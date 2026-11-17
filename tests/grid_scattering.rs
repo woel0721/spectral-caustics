@@ -25,6 +25,13 @@ fn empty(c: &GridMediumConfig) -> RenderJob {
     job
 }
 
+// Preserve the same eight physical octants while crossing 8³ majorant blocks.
+fn octants(values: [f64; 8]) -> Vec<f64> {
+    (0..4096)
+        .map(|i| values[(i % 16) / 8 + 2 * ((i / 16) % 16 / 8) + 4 * (i / 256 / 8)])
+        .collect()
+}
+
 fn trace<T: CameraTransport>(
     job: &RenderJob,
     state: &mut CameraPathState<T>,
@@ -66,8 +73,8 @@ fn layered_grid_single_scattering_matches_independent_slab_integrals() {
     let mut job = empty(&GridMediumConfig {
         min_m: [-100.0, -100.0, 1.0],
         max_m: [100.0, 100.0, 3.0],
-        resolution: [1, 1, 2],
-        densities: vec![1.0, 3.0],
+        resolution: [1, 1, 16],
+        densities: (0..16).map(|i| if i < 8 { 1.0 } else { 3.0 }).collect(),
         sigma_a_base: 0.2,
         sigma_s_base: 0.3,
         g: 0.0,
@@ -80,8 +87,8 @@ fn layered_grid_single_scattering_matches_independent_slab_integrals() {
             GridMedium::try_from(&GridMediumConfig {
                 min_m: [-100.0, -100.0, 1.0],
                 max_m: [100.0, 100.0, 3.0],
-                resolution: [1, 1, 2],
-                densities: vec![1.0, 3.0],
+                resolution: [1, 1, 16],
+                densities: (0..16).map(|i| if i < 8 { 1.0 } else { 3.0 }).collect(),
                 sigma_a_base: 0.2,
                 sigma_s_base: 0.3,
                 g,
@@ -128,8 +135,8 @@ fn heterogeneous_multiple_scattering_preserves_albedo_geometry_budgets_and_scala
     let mut job = empty(&GridMediumConfig {
         min_m: [-1.0; 3],
         max_m: [1.0; 3],
-        resolution: [2; 3],
-        densities: vec![0.2, 2.0, 1.0, 3.0, 2.0, 0.5, 4.0, 1.5],
+        resolution: [16; 3],
+        densities: octants([0.2, 2.0, 1.0, 3.0, 2.0, 0.5, 4.0, 1.5]),
         sigma_a_base: 0.8,
         sigma_s_base: 3.2,
         g: 0.4,
@@ -177,8 +184,8 @@ fn conservative_heterogeneous_fog_recovers_unit_environment_with_multiple_scatte
     let mut job = empty(&GridMediumConfig {
         min_m: [-1.0; 3],
         max_m: [1.0; 3],
-        resolution: [2; 3],
-        densities: vec![0.0, 0.2, 1.3, 2.0, 0.7, 1.8, 0.3, 1.1],
+        resolution: [16; 3],
+        densities: octants([0.0, 0.2, 1.3, 2.0, 0.7, 1.8, 0.3, 1.1]),
         sigma_a_base: 0.0,
         sigma_s_base: 0.7,
         g: 0.4,

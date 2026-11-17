@@ -258,6 +258,13 @@ fn configured_grid_repeats_across_rgb_hero_packet_threads_and_zero_density_is_va
     c.render.width = 12;
     c.render.height = 8;
     c.render.camera_spp = 16;
+    let Some(MediumConfig::Grid(m)) = &mut c.scene.medium else {
+        panic!("expected grid")
+    };
+    m.resolution = [17, 15, 9];
+    m.densities = (0..2295)
+        .map(|i| (i % 17 + 2 * ((i / 17) % 15) + 3 * (i / 255)) as f64 / 20.0)
+        .collect();
     for (mode, packet) in [
         (CameraMode::Rgb, 1),
         (CameraMode::Spectral, 1),
