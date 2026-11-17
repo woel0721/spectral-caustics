@@ -32,8 +32,8 @@ Hero 与四波长 Packet 使用同一个标量路径循环。Packet 共享主射
 - 这是有限深度、二值几何阴影与地面焦散图结合的估计器，不应描述成通用无偏 Path Tracer。不要顺带加入透明阴影、环境焦散、新材质、通用 Photon Mapping、BVH/KD-Tree、GUI 或 GPU。
 - JSON 光子焦散目标限一个 Dielectric Sphere/Prism/VerticalPrism；其他物体阻断。XYZ 图绑定 RGB 相机时要求中性 Lambertian 地面；Eλ 图集支持 Lambertian 地面的波长反射率。图外通量丢弃，不把有限接收区当作整个实体地面。
 - [Dielectric](../src/material/dielectric.rs) 按几何法线和方向判断空气/玻璃两侧，外部 IOR 固定为 1；光子有显式 Air/Glass 状态。没有嵌套介质栈，也不支持从玻璃内部启动光子。
-- [medium/mod.rs](../src/medium/mod.rs) 只定义 `Medium: Send + Sync` trait 并声明、导出模块；[HomogeneousMedium](../src/medium/homogeneous.rs) 与 [GridMedium](../src/medium/grid.rs) 分别实现局部系数、全局 Majorant、透射率与分段采样。配置及构造在 [config](../src/medium/config.rs)，采样数据在 [types](../src/medium/types.rs)，共享盒边界计算在 [bounds](../src/medium/bounds.rs)，模块单元测试集中在 [tests.rs](../src/medium/tests.rs)。Scene 持有 `Option<Box<dyn Medium>>`，与 Material 的方式一致。单个轴对齐盒内的无色空间介质掩膜覆盖盒内固体内部；盒边界不折射、不表示 MediumInterface。均匀介质使用 `CameraOptions.max_volume_scatters` 限制多次体散射，独立于表面预算；达到上限后只计算解析消光。网格目前仅支持精确消光，有效散射系数非零时拒绝非零体预算，详见 [README](../README.md#非均匀密度网格phase-31)。
-- 光子不感知雾；现有焦散图只受相机侧介质权重影响，不代表有雾时源端到地面的完整能量。非均匀散射、波长相关介质、介质发光和内外介质切换未实现。
+- [medium/mod.rs](../src/medium/mod.rs) 只定义 `Medium: Send + Sync` trait 并声明、导出模块；[HomogeneousMedium](../src/medium/homogeneous.rs) 与 [GridMedium](../src/medium/grid.rs) 分别实现局部系数、全局 Majorant、透射率与分段采样。配置及构造在 [config](../src/medium/config.rs)，采样数据在 [types](../src/medium/types.rs)，共享盒边界计算在 [bounds](../src/medium/bounds.rs)，模块单元测试集中在 [tests.rs](../src/medium/tests.rs)。Camera Integrator 只使用路径段采样、透射率和相函数接口：密度遍历、Majorant、碰撞接受/拒绝与补偿均属于介质内部，不向相机暴露空碰撞或要求类型/算法分支。只读密度/系数/Majorant 查询供检查数据，不参与相机控制流。Scene 持有 `Option<Box<dyn Medium>>`，与 Material 的方式一致。单个轴对齐盒内的无色空间介质掩膜覆盖盒内固体内部；盒边界不折射、不表示 MediumInterface。均匀介质使用指数自由程，网格使用全局 Majorant Delta Tracking；两者返回相同的真实散射样本/补偿权重，并共用 `CameraOptions.max_volume_scatters` 限制多次体散射，独立于表面预算。空碰撞不占预算；达到上限后只计算精确消光，网格使用 DDA，详见 [README](../README.md#非均匀密度网格)。
+- 光子不感知雾；现有焦散图只受相机侧介质权重影响，不代表有雾时源端到地面的完整能量。局部 Majorant 加速、Ratio Tracking、波长相关介质、介质发光和内外介质切换未实现。
 
 ## Diagnostics
 

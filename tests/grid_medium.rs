@@ -225,50 +225,31 @@ fn grid_json_roundtrips_builds_and_validates_shape_density_and_sampling_support(
     }
     json["scene"]["medium"]["unknown_field"] = serde_json::json!(0);
     assert!(Config::from_json(&json.to_string()).is_err());
-    let mut unsupported = c.clone();
-    unsupported.scene.max_volume_scatters = 1;
-    assert!(
-        unsupported
-            .validate()
-            .unwrap_err()
-            .contains("max_volume_scatters=0")
-    );
-    assert!(
-        unsupported
-            .build()
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("not implemented")
-    );
-    // Data model accepts nonzero sigma_s; only collision sampling is unavailable.
-    unsupported.scene.max_volume_scatters = 0;
-    unsupported.build().unwrap();
+    for budget in [0, 1, 8] {
+        let mut supported = c.clone();
+        supported.scene.max_volume_scatters = budget;
+        supported.validate().unwrap();
+        supported.build().unwrap();
+    }
 }
 
 #[test]
-fn unsupported_grid_scattering_is_rejected_at_direct_camera_and_path_entries_without_rng() {
+fn grid_scattering_is_supported_at_direct_rgb_and_spectral_camera_entries() {
     let mut c = Config::load("configs/grid_fog.json").unwrap();
     c.render.width = 1;
     c.render.height = 1;
     c.render.camera_spp = 4;
     let mut job = c.build().unwrap();
-    job.camera_options.max_volume_scatters = 1;
-    assert!(integrate_rgb(&job, &c.render, None).is_err());
-    assert!(integrate_spectral(&job, &c.render, None).is_err());
+    job.camera_options.max_volume_scatters = 8;
+    integrate_rgb(&job, &c.render, None).unwrap();
+    integrate_spectral(&job, &c.render, None).unwrap();
     let mut state = CameraPathState::new(
         Ray::new(Vector3::new(0.0, -4.0, 2.0), Vector3::y()).unwrap(),
         0,
     );
     let mut rng = StdRng::seed_from_u64(42);
-    let mut untouched = rng.clone();
-    assert!(
-        trace(&job, &mut state, 0.0, &mut rng)
-            .unwrap_err()
-            .to_string()
-            .contains("not implemented")
-    );
-    assert_eq!(rng.next_u64(), untouched.next_u64());
+    trace(&job, &mut state, 1.0, &mut rng).unwrap();
+    assert!(state.radiance.direct.iter().all(|v| v.is_finite()));
 }
 
 #[test]
@@ -339,6 +320,7 @@ fn uniform_grid_and_homogeneous_render_the_same_extinction_in_rgb_hero_and_packe
     c.render.width = 12;
     c.render.height = 8;
     c.render.camera_spp = 16;
+    c.scene.max_volume_scatters = 0;
     let Some(MediumConfig::Grid(m)) = &mut c.scene.medium else {
         panic!("expected grid")
     };

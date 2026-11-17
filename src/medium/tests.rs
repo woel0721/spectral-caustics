@@ -527,7 +527,7 @@ fn dda_matches_independent_sum_of_individual_voxel_slab_integrals() {
 }
 
 #[test]
-fn absorption_vacuum_and_budget_zero_use_exact_tr_without_rng_and_reject_grid_scattering() {
+fn absorption_vacuum_and_budget_zero_use_exact_tr_without_rng() {
     let mut c = config([2, 1, 1], vec![1.0, 3.0]);
     c.sigma_a_base = 0.5;
     c.sigma_s_base = 0.0;
@@ -552,12 +552,6 @@ fn absorption_vacuum_and_budget_zero_use_exact_tr_without_rng_and_reject_grid_sc
             .weight,
         (-2.0_f64).exp(),
     );
-    assert!(
-        scattering
-            .sample_segment(&r, 10.0, true, &mut rng)
-            .unwrap_err()
-            .contains("not implemented")
-    );
     c.densities.fill(0.0);
     let vacuum: Box<dyn Medium> = Box::new(GridMedium::try_from(&c).unwrap());
     assert_eq!(vacuum.sigma_t_majorant(), 0.0);
@@ -578,6 +572,156 @@ fn absorption_vacuum_and_budget_zero_use_exact_tr_without_rng_and_reject_grid_sc
         1.0
     );
     assert_eq!(rng.next_u64(), untouched.next_u64());
+}
+
+#[test]
+fn delta_tracking_collision_cdf_and_weights_match_piecewise_optical_depth() {
+    let mut c = config([3, 1, 1], vec![0.0, 1.0, 3.0]);
+    c.max_m[0] = 3.0;
+    c.sigma_a_base = 0.25;
+    c.sigma_s_base = 0.75;
+    let grid = GridMedium::try_from(&c).unwrap();
+    // Independent integrated optical depths at distances from each ray's entry.
+    // Include vacuum, reverse traversal, a start inside a cell and a surface clip.
+    let cases = [
+        (
+            ray([-1.0, 1.0, 1.0], [1.0, 0.0, 0.0]),
+            10.0,
+            vec![
+                (1.0, 0.0_f64),
+                (1.5, 0.5),
+                (2.0, 1.0),
+                (2.5, 2.5),
+                (3.0, 4.0),
+            ],
+        ),
+        (
+            ray([4.0, 1.0, 1.0], [-1.0, 0.0, 0.0]),
+            10.0,
+            vec![(0.5, 1.5), (1.0, 3.0), (1.5, 3.5), (3.0, 4.0)],
+        ),
+        (
+            ray([1.5, 1.0, 1.0], [1.0, 0.0, 0.0]),
+            10.0,
+            vec![(0.25, 0.25), (0.5, 0.5), (1.0, 2.0), (1.5, 3.5)],
+        ),
+        (
+            ray([-1.0, 1.0, 1.0], [1.0, 0.0, 0.0]),
+            3.5,
+            vec![(1.5, 0.5), (2.0, 1.0), (2.5, 2.5)],
+        ),
+    ];
+    let n = 100_000;
+    let mut rng = StdRng::seed_from_u64(391);
+    for (r, limit, references) in cases {
+        let (enter, exit) = grid.interval(&r, limit).unwrap();
+        let mut counts = vec![0; references.len()];
+        let mut escaped = 0;
+        let mut weights = 0.0;
+        for _ in 0..n {
+            let s = grid.sample_segment(&r, limit, true, &mut rng).unwrap();
+            if let Some(p) = s.position {
+                let t = (p - r.origin).dot(&r.direction);
+                assert!(t >= enter && t < exit);
+                assert!(grid.density_at(p) > 0.0);
+                assert_eq!(s.weight, 0.75);
+                weights += s.weight;
+                for (count, &(distance, _)) in counts.iter_mut().zip(&references) {
+                    *count += usize::from(t - enter < distance);
+                }
+            } else {
+                escaped += 1;
+                assert_eq!(s.weight, 1.0); // Survival PDF already includes Tr.
+            }
+        }
+        for (count, &(_, tau)) in counts.iter().zip(&references) {
+            let expected = 1.0 - (-tau).exp();
+            let observed = *count as f64 / n as f64;
+            let tolerance = 6.0 * (expected * (1.0 - expected) / n as f64).sqrt() + 1e-4;
+            assert!(
+                (observed - expected).abs() < tolerance,
+                "{observed} vs {expected}"
+            );
+        }
+        let tr = (-references.last().unwrap().1).exp();
+        assert!((escaped as f64 / n as f64 - tr).abs() < 0.005);
+        assert!((weights / n as f64 - 0.75 * (1.0 - tr)).abs() < 0.004);
+    }
+}
+
+#[test]
+fn delta_tracking_uniform_grid_and_homogeneous_have_the_same_distance_statistics() {
+    let mut c = config([3, 4, 5], vec![1.7; 60]);
+    c.min_m = [-1.0; 3];
+    c.max_m = [1.0; 3];
+    let grid = GridMedium::try_from(&c).unwrap();
+    let homogeneous = HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+        min_m: c.min_m,
+        max_m: c.max_m,
+        sigma_a: 1.7 * c.sigma_a_base,
+        sigma_s: 1.7 * c.sigma_s_base,
+        g: c.g,
+    })
+    .unwrap();
+    let r = ray([-2.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+    let n = 100_000;
+    let tr = (-1.7_f64).exp();
+    let expected_distance = 1.0 / 0.85 - 2.0 * tr / (1.0 - tr);
+    for m in [&grid as &dyn Medium, &homogeneous as &dyn Medium] {
+        let mut rng = StdRng::seed_from_u64(77);
+        let (mut events, mut distance) = (0, 0.0);
+        for _ in 0..n {
+            let s = m.sample_segment(&r, 10.0, true, &mut rng).unwrap();
+            if let Some(p) = s.position {
+                events += 1;
+                distance += p.x + 1.0;
+                close(s.weight, 0.6);
+            }
+        }
+        assert!((events as f64 / n as f64 - (1.0 - tr)).abs() < 0.005);
+        assert!((distance / events as f64 - expected_distance).abs() < 0.008);
+    }
+}
+
+#[test]
+fn delta_tracking_missed_and_empty_segments_do_not_consume_rng() {
+    let grid = GridMedium::try_from(&config([2, 1, 1], vec![0.0, 3.0])).unwrap();
+    let mut rng = StdRng::seed_from_u64(9);
+    let mut untouched = rng.clone();
+    for (r, limit) in [
+        (ray([-1.0, 3.0, 1.0], [1.0, 0.0, 0.0]), 10.0),
+        (ray([-1.0, 1.0, 1.0], [1.0, 0.0, 0.0]), 1.0),
+        (ray([1.0; 3], [1.0, 0.0, 0.0]), 0.0),
+        (ray([2.0, 1.0, 1.0], [1.0, 0.0, 0.0]), 10.0),
+    ] {
+        let s = grid.sample_segment(&r, limit, true, &mut rng).unwrap();
+        assert!(s.position.is_none());
+        assert_eq!(s.weight, 1.0);
+    }
+    assert_eq!(rng.next_u64(), untouched.next_u64());
+}
+
+#[test]
+fn delta_tracking_reports_unrepresentable_distance_instead_of_stalling() {
+    let mut c = config([1; 3], vec![1.0]);
+    c.sigma_a_base = 0.0;
+    c.sigma_s_base = 1e300;
+    let grid = GridMedium::try_from(&c).unwrap();
+    let r = ray([-1.0, 1.0, 1.0], [1.0, 0.0, 0.0]);
+    assert!(
+        grid.sample_segment(&r, 10.0, true, &mut StdRng::seed_from_u64(1))
+            .unwrap_err()
+            .contains("cannot advance")
+    );
+    c.max_m[0] = f64::MAX;
+    c.sigma_s_base = 1.0 / f64::MAX;
+    let grid = GridMedium::try_from(&c).unwrap();
+    let r = ray([-f64::MAX / 2.0, 1.0, 1.0], [1.0, 0.0, 0.0]);
+    assert!(
+        grid.sample_segment(&r, f64::INFINITY, true, &mut StdRng::seed_from_u64(1))
+            .unwrap_err()
+            .contains("finite ray distances")
+    );
 }
 
 #[test]

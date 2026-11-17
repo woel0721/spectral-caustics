@@ -21,10 +21,10 @@
 - 平行光总通量通过水平窗口归一化；圆盘均匀面积、余弦方向发射，有限距离阴影用于相机 NEE。
 - Hero 使用 380..780 nm 分层采样与 400/SPP 权重；Packet=4 保持每像素总路径配额和 CRN。源端积分使用独立 Δλ。
 - 固定 seed 的各分量在 1/2/4 线程逐位一致。Direct + Caustics 在线性空间等于 Combined。
-- Camera Path 支持一个轴对齐盒内的均匀无色介质：Beer–Lambert、指数自由程、隐式吸收、HG 与多次体散射 NEE；RGB/Hero/Packet 复用同一循环和独立介质 RNG。
+- Camera Path 通过 Medium 的路径段采样、透射率与相函数接口使用无色介质；边界裁剪、体素遍历、Majorant 和空碰撞循环封装在介质内部。RGB/Hero/Packet 复用同一相机路径循环和独立介质 RNG，新增介质算法不增加相机算法分支。
 - 相机体散射预算 `max_volume_scatters=0..1024`，缺省 1，雾示例 8；达到预算或纯吸收时仅积累解析 Tr。预算独立于表面事件，体散射不新增 RR；体照明与其后续表面贡献归入 Direct。表面/介质阴影均含 Tr，几何仍为二值遮挡。
-- Phase 3.1 提供世界 AABB 内的分块常数 GridMedium：非负有限密度、局部系数查询、保守全局 Majorant，以及 DDA 逐体素精确 Beer–Lambert。相机和阴影段均可计算网格消光；有效 sigma_s>0 的网格要求 max_volume_scatters=0，直到实现正确的非均匀碰撞采样器。纯吸收/零密度网格不消费介质 RNG。
-- 光子焦散不感知雾，焦散图仅受相机侧介质权重影响；盒内固体也包含介质，没有内外介质切换。有限预算丢弃更高阶体散射；Delta/Ratio Tracking、Null Collision、非均匀散射、介质发光和波长相关介质系数仍未实现。
+- 均匀介质使用指数自由程，Phase 3.2 的分块常数 GridMedium 使用全局 Majorant Delta Tracking 采样非均匀消光碰撞，以局部 sigma_s/sigma_t 做隐式吸收，支持 HG 与多次体散射 NEE。空碰撞只在介质内部推进，不占真实体预算。网格相机/阴影段的确定性消光仍使用 DDA 精确 Beer–Lambert；纯吸收、零有效散射和预算耗尽不消费介质 RNG。提供均匀/分层/团块及 0/1/8 体预算对照。
+- 光子焦散不感知雾，焦散图仅受相机侧介质权重影响；盒内固体也包含介质，没有内外介质切换。有限预算丢弃更高阶体散射；Ratio Tracking、局部 Majorant 加速、介质发光和波长相关介质系数仍未实现。全局 Majorant 在稀疏网格中可能有大量空碰撞。
 
 ## 有意删除
 
