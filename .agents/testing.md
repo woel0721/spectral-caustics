@@ -1,6 +1,6 @@
 # 验证范围与证据
 
-按任务和实际改动选择验证，执行结果不得由历史报告代替。物理契约见 [transport.md](transport.md)，现有命令及参数说明复用 [README 的示例与验证](../README.md#示例与验证)。
+按任务和实际改动选择验证，执行结果不得由历史报告代替。物理契约见 [transport.md](transport.md)，现有命令及参数说明复用 [技术指南的示例与验证](../docs/rendering_guide.md#示例与验证)。
 
 ## 选择检查
 
@@ -50,10 +50,7 @@ git diff --check
 
 ## 当前验证限制
 
-- [config_render](../tests/config_render.rs) 的 `default_executable_renders_all_three_spheres_and_repeats_across_threads` 开启了 `diagnostics.path`，却在 Release + diagnostics 默认关闭 `debug_assertions` 时断言只有 3 个输出文件。按 [CLI](../src/main.rs) 和 [诊断输出实现](../src/diagnostics/mod.rs)，应有 3 张物理图、4 张 AOV 和 1 个 JSON，共 8 个文件。
-- [sphere_transport](../tests/sphere_transport.rs) 的 `debug_target_can_switch_between_sphere_ground_and_none_without_changing_radiance` 将诊断目标设为 `objects.len()`，在同一构建下断言 `integrate_rgb` 成功。[RGB 相机入口](../src/integrator/camera/rgb.rs) 在启用 `diagnostics` 时会对该越界目标返回 `Err`，与 `debug_assertions` 无关。
 - [Diagnostics::internal_tir](../src/diagnostics/mod.rs) 用 `material.ior()` 常数做 TIR 标签判定，未接收当前波长 IOR；不应将光谱 TIR 标签当作波长精确的物理真值。观察器不扰动路径的测试不能证明此标签准确。
-- 本轮通过源码核对确认了上述两处断言冲突，未运行 Release 测试。相关修复应保留 diagnostics 的 feature 门控。已有文档中的过期路径/注释按 [project.md](project.md#信息来源与范围) 判断。
 
 ## 交付证据
 
