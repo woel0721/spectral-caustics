@@ -1,6 +1,6 @@
 # Phase 3.3 局部 Majorant 基准记录
 
-2026-11-17，macOS arm64，Rust 1.99.1，Release 构建。记录本机结果，不作为其他机器的速度承诺或 CI 时间阈值。算法与运行接口见 [README](../README.md#非均匀密度网格)。
+2026-11-17，macOS arm64，Rust 1.99.1，Release 构建。记录本机结果，不作为其他机器的速度承诺或 CI 时间阈值。算法与运行接口见 [网格介质指南](rendering_guide.md#非均匀密度网格)。
 
 ## 方法
 
@@ -54,7 +54,7 @@
 
 ## 重跑与正确性
 
-命令见 [README 的基准入口](../README.md#非均匀密度网格)。将 `GRID_BENCHMARK_CONFIG` 分别指向三种密度场保存的 `config.json`，可重跑私有分块基准。普通 CI 会跳过该时间基准；它已在本轮对三类密度场单独执行。
+命令见 [网格介质指南的基准入口](rendering_guide.md#非均匀密度网格)。将 `GRID_BENCHMARK_CONFIG` 分别指向三种密度场保存的 `config.json`，可重跑私有分块基准。普通 CI 会跳过该时间基准；它已在本轮对三类密度场单独执行。
 
 原始结果和可重跑配置保存在 `output/phase_3_3/`：`baseline_repeat`/`final64`、`baseline128`/`final128`，分块结果在 `tuning_final_*.log`。这些是本地实验输出，不随仓库提交。
 
