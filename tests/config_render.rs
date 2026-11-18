@@ -1377,36 +1377,30 @@ fn default_executable_renders_all_three_spheres_and_repeats_across_threads() {
         } else {
             reference = Some(images);
         }
-        assert_eq!(
-            fs::read_dir(&output_directory).unwrap().count(),
-            if cfg!(debug_assertions) { 8 } else { 3 }
-        );
-        if cfg!(debug_assertions) {
-            let stats: serde_json::Value = serde_json::from_slice(
-                &fs::read(output_directory.join("path_debug.json")).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(stats["target_object_id"], target);
-            let pixels = stats["pixels"].as_array().unwrap();
-            for object in 0..4 {
-                let key = object.to_string();
-                assert!(
-                    pixels
-                        .iter()
-                        .any(|p| p["first_hit_objects"][&key].as_u64().unwrap_or(0) > 0)
-                );
-            }
-            let event = [
-                "specular_transmission",
-                "specular_reflection",
-                "glossy_reflection",
-            ][target];
+        assert_eq!(fs::read_dir(&output_directory).unwrap().count(), 8);
+        let stats: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_directory.join("path_debug.json")).unwrap())
+                .unwrap();
+        assert_eq!(stats["target_object_id"], target);
+        let pixels = stats["pixels"].as_array().unwrap();
+        for object in 0..4 {
+            let key = object.to_string();
             assert!(
                 pixels
                     .iter()
-                    .any(|p| p["events"][event].as_u64().unwrap() > 0)
+                    .any(|p| p["first_hit_objects"][&key].as_u64().unwrap_or(0) > 0)
             );
         }
+        let event = [
+            "specular_transmission",
+            "specular_reflection",
+            "glossy_reflection",
+        ][target];
+        assert!(
+            pixels
+                .iter()
+                .any(|p| p["events"][event].as_u64().unwrap() > 0)
+        );
     }
 }
 

@@ -494,7 +494,7 @@ fn debug_target_can_switch_between_sphere_ground_and_none_without_changing_radia
         }
     }
     scene.diagnostics.target = Some(scene.scene.objects.len());
-    assert_eq!(
+    assert!(
         spectral_caustics::integrator::camera::integrate_rgb(
             &scene,
             &spectral_caustics::config::render::RenderSetting {
@@ -506,7 +506,6 @@ fn debug_target_can_switch_between_sphere_ground_and_none_without_changing_radia
             },
             Some(&lighting)
         )
-        .is_err(),
-        cfg!(debug_assertions)
+        .is_err()
     );
 }
