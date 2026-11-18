@@ -4,8 +4,7 @@
 
 ## 信息来源与范围
 
-- 首次进入项目或涉及行为变更时，阅读 [README](../README.md) 和 [当前实现与开发边界](../ROADMAP.md)，再核对相关源码。路线图描述当前范围，不授权自动实现后续功能。
-- README 保留运行方式、配置、公共 API 和用户可见行为；ROADMAP 保留当前能力及限制。这些参考文档解释如何在该架构内工作，不复制完整使用手册或目录清单。
+- 按任务选读 [README](../README.md) 中的运行、配置、公共 API 或用户可见行为章节。判断当前能力和限制时查 [ROADMAP](../ROADMAP.md) 对应章节。涉及实现声明时核对相关源码，后续功能以本次任务授权为准。
 - [重构记录](../docs/refactor.md) 是带日期的迁移与验收证据，其中的测试数量、日志路径和当时授权不代表当前状态或持续权限。
 - [颜色数据说明](../assets/color/README.md) 负责来源、许可证与校验和。该文档仍有旧源码路径及已删除 API 的描述；当前接口以 [spectrum](../src/spectrum/mod.rs)、[emission](../src/spectrum/emission.rs) 和 [Material](../src/material/mod.rs) 为准。
 - 文档与实现冲突时先定位差异并报告，不为迎合陈旧文字恢复旧行为，也不借机修复任务外问题。改变接口或物理语义时同步其所属文档及相关链接。
@@ -25,12 +24,12 @@
 | 边界 | 当前职责 |
 | --- | --- |
 | [Config::load/from_json](../src/config/mod.rs) | 文件读取、Serde 结构解析；不等同于完整数值或场景验证 |
-| [Config::build / RenderJob::from_config](../src/config/build.rs) | 实际构造相机、几何、材质、光源、环境、介质，验证参数及对象绑定；HDRI 缺失返回错误 |
+| [Config::build](../src/config/mod.rs) → [RenderJob::from_config](../src/config/build.rs) | 实际构造相机、几何、材质、光源、环境、介质，验证参数及对象绑定；HDRI 缺失返回错误 |
 | [Renderer::new](../src/renderer.rs) | 验证 RenderSetting 并创建可选线程池 |
 | [光子计划与追踪器](../src/integrator/photon/generation.rs)、[PhotonTracer](../src/integrator/photon/path.rs) | 发射布局、接收区、目标、IOR、事件预算及归一化 |
 | [Camera Path 入口](../src/integrator/camera/path.rs) | 验证可由低层调用方提供的路径初态，检查自定义材质的事件/PDF/权重，以及介质采样结果的有限位置、非负有限权重与体散射预算 |
 
-`Config::validate` 用于显式配置检查和保存，包含部分几何试构建；正常渲染不先完整 validate 再重复 build。不要为了“统一验证”增加第二套完整场景构造。
+`Config::validate` 用于显式配置检查和保存。[SceneConfig::validate](../src/config/scene.rs) 会试构建部分几何，并在配置了介质时构造后丢弃该介质。对[网格介质](../src/medium/grid.rs)，这一步会复制密度数组并构建局部 Majorant 缓存。正常渲染直接调用 `Config::build`，避免重复承担这些构造成本。
 
 - 私有构造不变量成立时，不在每次查询或每次反弹重复校验整对象；例如 [Framebuffer](../src/film.rs) 的尺寸与 Vec 长度由构造函数绑定。公开可修改的状态、独立调用入口和跨对象绑定仍需各自必要的检查。
 - 仅在证明所有调用方已有保障后移除冗余检查。保留非有限值、实际溢出/下溢导致的无效量、退化方向、分配尺寸、零 PDF、TIR、无命中、零吞吐量和预算终止的处理。

@@ -1,6 +1,6 @@
 ---
 name: rendering-change
-description: Use when implementing or fixing camera/photon transport, BSDF sampling, NEE/MIS, continuation/RR, lighting/visibility, geometry affecting rendering, or existing medium transport. Prefer spectral-change for spectral algorithms, architecture-refactor for structural work, and rendering-review for reviews.
+description: Use when implementing or fixing camera/photon transport, BSDF sampling, NEE/MIS, continuation/RR, lighting/visibility, geometry affecting rendering, or achromatic medium transport, including new sampling algorithms within the Medium interface. Prefer spectral-change for spectral algorithms, architecture-refactor for structure-only changes, and rendering-review for reviews.
 ---
 
 # 渲染行为修改

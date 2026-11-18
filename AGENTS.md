@@ -24,6 +24,6 @@
 
 这些参考文档按条件显式读取，不假设会自动注入。跨领域任务合并所需阅读；进入新区域时补读对应文档和实际实现。
 
-任务匹配描述时，优先选择并遵循最相关的仓库 Skill：普通渲染改动用 [rendering-change](.agents/skills/rendering-change/SKILL.md)，光谱算法改动用 [spectral-change](.agents/skills/spectral-change/SKILL.md)，结构重构用 [architecture-refactor](.agents/skills/architecture-refactor/SKILL.md)，只读审查用 [rendering-review](.agents/skills/rendering-review/SKILL.md)。按主要目标选择，不因涉及多个文件而自动叠加 Skill；参考文档仍按上表读取。
+按主要目标选择一个仓库 Skill。普通渲染改动用 [rendering-change](.agents/skills/rendering-change/SKILL.md)，光谱算法改动用 [spectral-change](.agents/skills/spectral-change/SKILL.md)，结构重构用 [architecture-refactor](.agents/skills/architecture-refactor/SKILL.md)。只读审查渲染实现或核实文档中的渲染行为声明时用 [rendering-review](.agents/skills/rendering-review/SKILL.md)。只检查文档结构、链接、Skill 元数据或 CI 命令时，按 [testing.md 的文档检查](.agents/testing.md#选择检查) 核对相应文件。
 
 项目 [Hooks](.codex/hooks.json) 仅提供建议：`PostToolUse` 提示定向验证，`Stop` 检查 HEAD 到工作区的已跟踪净差异的空白问题（含暂存、不含未跟踪文件）；GitHub Actions CI 仍是强制验收层。
