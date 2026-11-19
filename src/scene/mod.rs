@@ -1,7 +1,9 @@
 //! Physical scene data and intersection. Integrators borrow it without owning algorithms.
 mod lighting;
+mod medium_interface;
 mod objects;
 use crate::{environment::Environment, light::Light, material::Material, medium::Medium};
+pub use medium_interface::{MediumInterface, MediumRegion};
 use nalgebra::Vector3;
 pub use objects::SceneObject;
 pub struct Scene {

@@ -19,6 +19,17 @@ pub struct Triangle {
 }
 
 impl Triangle {
+    /// Signed distance to this face plane, with its dot-product roundoff scale.
+    pub(super) fn plane_distance(&self, point: Vector3<f64>) -> Result<(f64, f64), &'static str> {
+        let offset = point - self.vertices[0];
+        let distance = self.normal.dot(&offset);
+        let tolerance = 8.0 * f64::EPSILON * self.normal.abs().dot(&offset.abs());
+        if !distance.is_finite() || !tolerance.is_finite() {
+            return Err("non-finite face-plane distance");
+        }
+        Ok((distance, tolerance))
+    }
+
     /// 用三个世界坐标顶点创建三角形，并缓存边与单位法线，减少重复求交的计算。
     ///
     /// 输入：按绕序给出的 v0、v1、v2（米）。

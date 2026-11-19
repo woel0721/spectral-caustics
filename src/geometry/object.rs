@@ -3,6 +3,20 @@
 use super::hit::GeometryHit as Hit;
 use super::ray::Ray;
 
+use nalgebra::Vector3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointLocation {
+    Inside,
+    Outside,
+    OnBoundary,
+}
+
+/// World-space containment for closed geometry with outward normals.
+pub trait ClosedVolume: Send + Sync {
+    fn classify_point(&self, point: Vector3<f64>) -> Result<PointLocation, &'static str>;
+}
+
 /// 实现此 trait 的类型可以接受光线查询，并允许并行追踪时共享只读引用。
 pub trait Hittable: Send + Sync {
     /// 查询一条光线最先碰到物体的哪个位置，供相机、阴影和光子追踪共用。
@@ -13,4 +27,8 @@ pub trait Hittable: Send + Sync {
     /// 求交须排除 t≤INTERSECTION_EPSILON 的自交。
     /// 几何只填写坐标、法线和距离，物体/材质编号由 RenderJob::intersect 补充。
     fn intersect(&self, ray: &Ray) -> Option<Hit>;
+
+    fn closed_volume(&self) -> Option<&dyn ClosedVolume> {
+        None
+    }
 }

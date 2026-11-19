@@ -2,7 +2,6 @@
 
 use super::BsdfSample;
 use super::Material;
-use super::ScatterType;
 use super::unit_vector;
 use crate::optics::dispersion::Cauchy;
 use crate::optics::dispersion::IorMode;
@@ -162,14 +161,7 @@ fn sample_interface(
     }
     Some(super::BsdfSample {
         wi: unit_vector(interface.direction)?,
-        event: match interface.event {
-            crate::optics::interface::DielectricEvent::Reflection => {
-                ScatterType::SpecularReflection
-            }
-            crate::optics::interface::DielectricEvent::Transmission => {
-                ScatterType::SpecularTransmission
-            }
-        },
+        event: interface.event.into(),
         pdf: None,
         weight,
     })
@@ -187,6 +179,7 @@ fn sample_interface(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::material::ScatterType;
     use crate::optics::interface::fresnel_dielectric;
     use rand::SeedableRng;
     use rand::rngs::StdRng;

@@ -27,6 +27,15 @@ pub enum ScatterType {
     SpecularReflection,
     SpecularTransmission,
 }
+impl From<crate::optics::interface::DielectricEvent> for ScatterType {
+    fn from(event: crate::optics::interface::DielectricEvent) -> Self {
+        use crate::optics::interface::DielectricEvent;
+        match event {
+            DielectricEvent::Reflection => Self::SpecularReflection,
+            DielectricEvent::Transmission => Self::SpecularTransmission,
+        }
+    }
+}
 impl ScatterType {
     /// 判断本次事件是否为理想镜面反射/透射；返回 true 时应使用离散事件权重，而非普通方向 PDF。
     pub fn is_delta(self) -> bool {

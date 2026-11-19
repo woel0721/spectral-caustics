@@ -1,4 +1,4 @@
-use super::Scene;
+use super::{MediumInterface, Scene};
 use crate::{
     geometry::{hit::Hit, object::Hittable, ray::Ray},
     material::Material,
@@ -6,6 +6,7 @@ use crate::{
 pub struct SceneObject {
     pub geometry: Box<dyn Hittable>,
     material_id: usize,
+    pub(super) medium_interface: Option<MediumInterface>,
 }
 impl SceneObject {
     pub fn material_id(&self) -> usize {
@@ -21,6 +22,7 @@ impl Scene {
         self.objects.push(SceneObject {
             geometry,
             material_id,
+            medium_interface: None,
         });
         object_id
     }
