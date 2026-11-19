@@ -62,6 +62,10 @@ impl Hittable for VerticalPrism {
     fn intersect(&self, ray: &Ray) -> Option<Hit> {
         self.mesh.intersect(ray)
     }
+
+    fn intersect_from_volume(&self, ray: &Ray) -> Option<Hit> {
+        self.mesh.intersect_from_volume(ray)
+    }
 }
 
 #[cfg(test)]

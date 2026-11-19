@@ -28,6 +28,12 @@ pub trait Hittable: Send + Sync {
     /// 几何只填写坐标、法线和距离，物体/材质编号由 RenderJob::intersect 补充。
     fn intersect(&self, ray: &Ray) -> Option<Hit>;
 
+    /// Query a boundary from a volume vertex, where a nearby positive hit can be real.
+    /// Built-in closed geometry accepts any strictly positive distance for this query.
+    fn intersect_from_volume(&self, ray: &Ray) -> Option<Hit> {
+        self.intersect(ray)
+    }
+
     fn closed_volume(&self) -> Option<&dyn ClosedVolume> {
         None
     }

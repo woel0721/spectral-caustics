@@ -128,11 +128,16 @@ pub fn trace_camera_path<T: CameraTransport>(
     let transport = state.transport;
     let (sun_wi, sun) = transport.sunlight(light_wi, light, map)?;
     let mut area = AreaLightSampler::new(job, rngs.camera);
+    let mut from_volume = false;
     let _termination = loop {
         if state.throughput == T::Value::default() {
             break StopReason::ZeroThroughput;
         }
-        let hit = job.scene.intersect(&state.ray);
+        let hit = if from_volume {
+            job.scene.intersect_from_volume(&state.ray)
+        } else {
+            job.scene.intersect(&state.ray)
+        };
         let medium = job.scene.active_medium(region)?;
         if let Some(medium) = medium {
             let allow_scattering = state.volume_scatters < job.camera_options.max_volume_scatters;
@@ -174,6 +179,7 @@ pub fn trace_camera_path<T: CameraTransport>(
                 state.has_non_delta_vertex = true;
                 state.last_scatter = None;
                 state.ray = Ray::new(position, sample.wi).ok_or("invalid phase ray")?;
+                from_volume = true;
                 continue;
             }
             if state.throughput == T::Value::default() {
@@ -312,6 +318,7 @@ pub fn trace_camera_path<T: CameraTransport>(
             .region_after_event(region, &hit, state.ray.direction, next.event)?;
         state.medium_region = Some(region);
         state.ray = next.ray;
+        from_volume = false;
     };
     #[cfg(feature = "diagnostics")]
     if let Some(o) = observer {

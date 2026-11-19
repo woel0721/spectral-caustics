@@ -92,13 +92,19 @@ impl Triangle {
 }
 
 impl Hittable for Triangle {
+    fn intersect(&self, ray: &Ray) -> Option<Hit> {
+        self.intersect_after(ray, INTERSECTION_EPSILON)
+    }
+}
+
+impl Triangle {
     /// 求光线与三角形的最近正向交点，两面都能命中，供封闭玻璃寻找入射面和出射面。
     ///
     /// 输入：世界空间 Ray；输出：坐标、距离和原始几何法线组成的 Hit，未命中或数值无效返回 None。
     ///
-    /// 公式：解 o+t·d=v0+u·e1+v·e2；仅接受 u≥0、v≥0、u+v≤1 和 t>ε。
+    /// 公式：解 o+t·d=v0+u·e1+v·e2；仅接受 u≥0、v≥0、u+v≤1 和 t>min_distance。
     /// 使用 Möller–Trumbore 的叉积与点积求 t/u/v；法线不随光线方向翻转。
-    fn intersect(&self, ray: &Ray) -> Option<Hit> {
+    pub(super) fn intersect_after(&self, ray: &Ray, min_distance: f64) -> Option<Hit> {
         if !ray.origin.iter().all(|c| c.is_finite()) || !ray.direction.iter().all(|c| c.is_finite())
         {
             return None;
@@ -131,7 +137,7 @@ impl Hittable for Triangle {
         }
 
         let distance = self.edge2.dot(&q) / det;
-        if !distance.is_finite() || distance <= INTERSECTION_EPSILON {
+        if !distance.is_finite() || distance <= min_distance {
             return None;
         }
         let coords = ray.at(distance);

@@ -72,5 +72,10 @@ fn transmittance_to_point(
     let delta = target - origin;
     let distance = delta.norm();
     let ray = Ray::new(origin, delta).ok_or("invalid shadow segment")?;
-    Ok(shadow_transmittance(job, &ray, distance, medium))
+    Ok(shadow_transmittance(
+        job.scene.intersect(&ray),
+        &ray,
+        distance,
+        medium,
+    ))
 }
