@@ -30,11 +30,24 @@ impl Scene {
         &*self.materials[id]
     }
     pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
+        self.intersect_objects(ray, false)
+    }
+
+    pub(crate) fn intersect_from_volume(&self, ray: &Ray) -> Option<Hit> {
+        self.intersect_objects(ray, true)
+    }
+
+    fn intersect_objects(&self, ray: &Ray, from_volume: bool) -> Option<Hit> {
         self.objects
             .iter()
             .enumerate()
             .filter_map(|(id, o)| {
-                o.geometry.intersect(ray).map(|h| Hit {
+                let hit = if from_volume && o.medium_interface.is_some() {
+                    o.geometry.intersect_from_volume(ray)
+                } else {
+                    o.geometry.intersect(ray)
+                };
+                hit.map(|h| Hit {
                     coords: h.coords,
                     normal: h.normal,
                     distance: h.distance,

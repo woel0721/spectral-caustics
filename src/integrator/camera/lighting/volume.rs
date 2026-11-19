@@ -22,22 +22,27 @@ pub(in crate::integrator::camera) fn volume_lighting<T: CameraTransport>(
     transport: T,
     rng: &mut dyn RngCore,
 ) -> Result<T::Value, Box<dyn Error + Send + Sync>> {
+    let transmittance = |ray: &Ray, distance| {
+        shadow_transmittance(
+            job.scene.intersect_from_volume(ray),
+            ray,
+            distance,
+            Some(medium),
+        )
+    };
     let mut result = T::Value::default();
     if sun != T::Value::default() {
         let ray = Ray::new(position, sun_wi).ok_or("invalid volume shadow ray")?;
-        result += sun
-            * (phase.eval(wo, sun_wi)
-                * shadow_transmittance(job, &ray, f64::INFINITY, Some(medium)));
+        result += sun * (phase.eval(wo, sun_wi) * transmittance(&ray, f64::INFINITY));
     }
     if let Some(disk) = job.scene.light.as_disk() {
         for _ in 0..job.camera_options.light_samples {
             if let Some(s) = disk.sample_direct(position, [rng.random(), rng.random()])? {
                 let ray = Ray::new(position, s.wi).ok_or("invalid volume disk ray")?;
                 // incident_weight already contains Le cos_light / (r² p_area).
-                let weight = s.incident_weight
-                    * phase.eval(wo, s.wi)
-                    * shadow_transmittance(job, &ray, s.distance, Some(medium))
-                    / job.camera_options.light_samples as f64;
+                let weight =
+                    s.incident_weight * phase.eval(wo, s.wi) * transmittance(&ray, s.distance)
+                        / job.camera_options.light_samples as f64;
                 result += transport.disk_emission() * weight;
             }
         }
@@ -88,7 +93,7 @@ pub(in crate::integrator::camera) fn volume_lighting<T: CameraTransport>(
                         .ok_or("invalid volume environment radiance")?,
                 )
                 .ok_or("volume emission overflow")?;
-            result += li * (weight * shadow_transmittance(job, &ray, f64::INFINITY, Some(medium)));
+            result += li * (weight * transmittance(&ray, f64::INFINITY));
         }
     }
     if !transport.finite(result) {

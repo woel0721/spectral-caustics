@@ -58,13 +58,23 @@ impl Hittable for Sphere {
         Some(self)
     }
 
+    fn intersect(&self, ray: &Ray) -> Option<Hit> {
+        self.intersect_after(ray, INTERSECTION_EPSILON)
+    }
+
+    fn intersect_from_volume(&self, ray: &Ray) -> Option<Hit> {
+        self.intersect_after(ray, 0.0)
+    }
+}
+
+impl Sphere {
     /// 求光线与球面最近的正向交点；从球内出发时返回出射交点。
     ///
     /// 输入：Ray；输出：最近的 Hit，未命中或数值无效返回 None；法线始终朝球外。
     ///
     /// 公式：令 q=o-center、a=d·d、b=q·d，则 t=(-b±√D)/a，D=a·radius²-‖q×d‖²。
-    /// 依次尝试较小、较大根，只接受 t>ε；n=normalize(P-center)。
-    fn intersect(&self, ray: &Ray) -> Option<Hit> {
+    /// 依次尝试较小、较大根，只接受 t>min_distance；n=normalize(P-center)。
+    fn intersect_after(&self, ray: &Ray, min_distance: f64) -> Option<Hit> {
         if ray
             .origin
             .iter()
@@ -92,7 +102,7 @@ impl Hittable for Sphere {
         let roots = [midpoint - half_chord, midpoint + half_chord];
         let distance = roots
             .into_iter()
-            .find(|t| t.is_finite() && *t > INTERSECTION_EPSILON)?;
+            .find(|t| t.is_finite() && *t > min_distance)?;
         let coords = ray.at(distance);
         let outward = coords - self.center;
         let length = outward.norm();

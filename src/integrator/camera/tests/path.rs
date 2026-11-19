@@ -10,9 +10,145 @@ use super::support::sun;
 use super::support::two_planes;
 use crate::geometry::ray::INTERSECTION_EPSILON;
 use crate::geometry::ray::Ray;
+use crate::geometry::sphere::Sphere;
 use crate::geometry::triangle::Triangle;
+use crate::geometry::vertical_prism::VerticalPrism;
 use crate::material::dielectric::Dielectric;
-use nalgebra::Vector3;
+use crate::medium::{HomogeneousMedium, HomogeneousMediumConfig};
+use crate::scene::{MediumInterface, MediumRegion};
+use nalgebra::{Vector2, Vector3};
+
+#[test]
+fn volume_scatter_near_sphere_enters_before_crossing_the_interior() {
+    let mut job = crate::config::RenderJob::new();
+    job.scene.environment = None;
+    job.camera_options.max_volume_scatters = 1;
+    let sphere = job.scene.add(
+        Box::new(Sphere::new(Vector3::zeros(), 1.0).unwrap()),
+        Box::new(Dielectric::new(1.5).unwrap()),
+    );
+    let fog = HomogeneousMediumConfig {
+        min_m: [-3.0; 3],
+        max_m: [3.0; 3],
+        sigma_a: 0.0,
+        sigma_s: 1.0,
+        g: -0.5,
+    };
+    job.scene.medium = Some(Box::new(HomogeneousMedium::try_from(&fog).unwrap()));
+    let absorption = HomogeneousMediumConfig {
+        sigma_a: 0.7,
+        sigma_s: 0.0,
+        ..fog
+    };
+    job.scene
+        .bind_medium_interface(
+            sphere,
+            MediumInterface {
+                interior: Some(Box::new(HomogeneousMedium::try_from(&absorption).unwrap())),
+            },
+        )
+        .unwrap();
+
+    let ray = Ray::new(Vector3::z() * 2.0, -Vector3::z()).unwrap();
+    let mut state = CameraPathState::new(ray, 0);
+    // Scatter half an epsilon before the sphere, then sample exact forward HG.
+    let gap = 0.5 * INTERSECTION_EPSILON;
+    let free_flight = 1.0 - gap;
+    let mut medium = SequenceRng::new(&[-(-free_flight).exp_m1(), 0.0, 0.0]);
+    trace_camera_path(
+        &job,
+        &mut state,
+        &mut CameraPathRngs {
+            camera: &mut SequenceRng::new(&[]),
+            environment: &mut SequenceRng::new(&[]),
+            diffuse: &mut SequenceRng::new(&[0.9, 0.9]),
+            medium: &mut medium,
+        },
+        Vector3::z(),
+        0.0,
+        Caustics::None,
+        crate::optics::dispersion::IorMode::Constant,
+        #[cfg(feature = "diagnostics")]
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(medium.draws, 3);
+    assert_eq!(state.volume_scatters, 1);
+    assert_eq!(state.delta_events(), 2);
+    assert_eq!(state.medium_region, Some(MediumRegion::Exterior));
+    // After the collision the deterministic optical depth is the remaining
+    // entry gap, 2 m of interior absorption, and 2 m from glass to fog exit.
+    let expected = (-(gap + 2.0 * 0.7 + 2.0)).exp();
+    close(state.throughput, Vector3::repeat(expected));
+}
+
+#[test]
+fn volume_scatter_near_prism_cap_sees_exit_and_opaque_shadow() {
+    let mut job = crate::config::RenderJob::new();
+    job.scene.environment = None;
+    job.camera_options.max_volume_scatters = 1;
+    let top = 1.0 + 5e-6;
+    let prism = job.scene.add(
+        Box::new(
+            VerticalPrism::new(
+                [
+                    Vector2::new(-1.0, -1.0),
+                    Vector2::new(1.0, -1.0),
+                    Vector2::new(0.0, 1.0),
+                ],
+                1.0,
+                top,
+            )
+            .unwrap(),
+        ),
+        Box::new(Dielectric::new(1.5).unwrap()),
+    );
+    let medium = HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+        min_m: [-3.0; 3],
+        max_m: [3.0; 3],
+        sigma_a: 0.0,
+        sigma_s: 100_000.0,
+        g: -0.5,
+    })
+    .unwrap();
+    job.scene
+        .bind_medium_interface(
+            prism,
+            MediumInterface {
+                interior: Some(Box::new(medium)),
+            },
+        )
+        .unwrap();
+
+    let origin = 1.0 + 2.5e-6;
+    let ray = Ray::new(Vector3::z() * origin, Vector3::z()).unwrap();
+    let mut state = CameraPathState::new(ray, 0);
+    let gap = 0.5 * INTERSECTION_EPSILON;
+    let depth = (top - origin - gap) * 100_000.0;
+    trace_camera_path(
+        &job,
+        &mut state,
+        &mut CameraPathRngs {
+            camera: &mut SequenceRng::new(&[]),
+            environment: &mut SequenceRng::new(&[]),
+            diffuse: &mut SequenceRng::new(&[0.9]),
+            medium: &mut SequenceRng::new(&[-(-depth).exp_m1(), 0.0, 0.0]),
+        },
+        Vector3::z(),
+        1.0,
+        Caustics::None,
+        crate::optics::dispersion::IorMode::Constant,
+        #[cfg(feature = "diagnostics")]
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(state.volume_scatters, 1);
+    assert_eq!(state.delta_events(), 1);
+    assert_eq!(state.medium_region, Some(MediumRegion::Exterior));
+    assert_eq!(state.radiance.direct, Vector3::zeros());
+}
 
 #[test]
 fn glass_prefix_and_deep_diffuse_keep_independent_counts_and_roulette_order() {

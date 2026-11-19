@@ -3,7 +3,11 @@ pub(crate) mod environment;
 pub(crate) mod volume;
 // Camera render boundary and binary shadow visibility.
 use super::surface_ray_origin;
-use crate::{config::RenderJob, geometry::ray::Ray, medium::Medium};
+use crate::{
+    config::RenderJob,
+    geometry::{hit::Hit, ray::Ray},
+    medium::Medium,
+};
 use nalgebra::Vector3;
 use std::error::Error;
 
@@ -17,7 +21,7 @@ pub(in crate::integrator::camera) fn transmittance_to_light(
     let origin = surface_ray_origin(&scene.scene, position, normal, 1.0);
     let shadow_ray = Ray::new(origin, wi).ok_or("阴影光线起点或方向无效")?;
     Ok(shadow_transmittance(
-        scene,
+        scene.scene.intersect(&shadow_ray),
         &shadow_ray,
         f64::INFINITY,
         medium,
@@ -26,16 +30,12 @@ pub(in crate::integrator::camera) fn transmittance_to_light(
 
 /// Geometry remains opaque (including glass); an unblocked segment includes medium Tr.
 pub(in crate::integrator::camera) fn shadow_transmittance(
-    job: &RenderJob,
+    hit: Option<Hit>,
     ray: &Ray,
     distance: f64,
     medium: Option<&dyn Medium>,
 ) -> f64 {
-    if job
-        .scene
-        .intersect(ray)
-        .is_some_and(|h| h.distance < distance)
-    {
+    if hit.is_some_and(|h| h.distance < distance) {
         return 0.0;
     }
     medium.map_or(1.0, |m| m.transmittance_ray(ray, distance))

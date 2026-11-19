@@ -2,6 +2,7 @@
 
 use super::hit::GeometryHit as Hit;
 use super::object::{ClosedVolume, Hittable, PointLocation};
+use super::ray::INTERSECTION_EPSILON;
 use super::ray::Ray;
 use super::triangle::Triangle;
 use nalgebra::Vector3;
@@ -102,16 +103,26 @@ impl Hittable for Prism {
         Some(self)
     }
 
+    fn intersect(&self, ray: &Ray) -> Option<Hit> {
+        self.intersect_after(ray, INTERSECTION_EPSILON)
+    }
+
+    fn intersect_from_volume(&self, ray: &Ray) -> Option<Hit> {
+        self.intersect_after(ray, 0.0)
+    }
+}
+
+impl Prism {
     /// 查询三棱镜各三角面，返回离 Ray 起点最近的正向 Hit。
     ///
     /// 输入：世界空间 Ray；输出：最近交点，所有面都未命中时返回 None。
     /// 取 min(t) 而非第一个命中的面，使结果与面存储顺序无关。
-    fn intersect(&self, ray: &Ray) -> Option<Hit> {
-        // Triangle 已检查正向距离、epsilon 和非有限值。
+    fn intersect_after(&self, ray: &Ray, min_distance: f64) -> Option<Hit> {
+        // Triangle 已检查距离下限和非有限值。
         // 必须检查所有面再比较距离，索引靠前的面不一定离光线起点最近。
         self.faces
             .iter()
-            .filter_map(|face| face.intersect(ray))
+            .filter_map(|face| face.intersect_after(ray, min_distance))
             .min_by(|a, b| a.distance.total_cmp(&b.distance))
     }
 }
