@@ -7,6 +7,7 @@ use crate::config::scene::EnvironmentMisHeuristic;
 use crate::geometry::hit::Hit;
 use crate::material::Material;
 use crate::material::unit_vector;
+use crate::medium::Medium;
 use crate::optics::dispersion::IorMode;
 use nalgebra::Vector3;
 use rand::Rng;
@@ -35,6 +36,7 @@ struct EnvironmentMisWeights {
 /// 目标积分：L_env=∫f_r(wi,wo)·L_i(wi)·max(n·wi,0)·V(wi)dω。
 /// HDR 多样本固定分配材质/环境策略并用 Balance 或 Power MIS；单样本随机 50/50，渐变只用材质方向采样。
 /// 无环境/无连续分量返回零；遮挡与零贡献样本不补采，玻璃按二值遮挡处理，不含太阳或焦散图。
+#[allow(clippy::too_many_arguments)]
 pub(in crate::integrator::camera) fn environment_lighting<T: CameraTransport>(
     scene: &RenderJob,
     hit: &Hit,
@@ -43,6 +45,7 @@ pub(in crate::integrator::camera) fn environment_lighting<T: CameraTransport>(
     rng: &mut dyn rand::RngCore,
     transport: T,
     ior: IorMode,
+    medium: Option<&dyn Medium>,
 ) -> Result<T::Value, Box<dyn Error + Send + Sync>> {
     let Some(environment) = &scene.scene.environment else {
         return Ok(T::Value::default());
@@ -104,7 +107,7 @@ pub(in crate::integrator::camera) fn environment_lighting<T: CameraTransport>(
             }),
         });
         rgb += environment_direction_contribution(
-            scene, hit, material, wo, normal, wi, weights, transport,
+            scene, hit, material, wo, normal, wi, weights, transport, medium,
         )? / average_count;
     }
     if !transport.finite(rgb) {
@@ -129,6 +132,7 @@ fn environment_direction_contribution<T: CameraTransport>(
     wi: Vector3<f64>,
     pdf_weights: Option<EnvironmentMisWeights>,
     transport: T,
+    medium: Option<&dyn Medium>,
 ) -> Result<T::Value, Box<dyn Error + Send + Sync>> {
     let environment = scene.scene.environment.as_ref().ok_or("环境不存在")?;
     let wi = unit_vector(wi).ok_or("环境采样方向无效")?;
@@ -190,7 +194,7 @@ fn environment_direction_contribution<T: CameraTransport>(
     if !transport.finite(contribution) {
         return Err("环境采样贡献计算溢出".into());
     }
-    Ok(contribution * transmittance_to_light(scene, hit.coords, normal, wi)?)
+    Ok(contribution * transmittance_to_light(scene, hit.coords, normal, wi, medium)?)
 }
 
 /// 计算 Power MIS 的策略权重及其除采样密度后的值，供 RGB/光谱环境共用。

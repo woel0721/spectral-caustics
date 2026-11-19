@@ -1,10 +1,11 @@
 //! Disk NEE owns its RNG cursor; changing its quota cannot consume path or environment draws.
-use super::super::{offset_ray_origin, transport::CameraTransport};
+use super::super::{surface_ray_origin, transport::CameraTransport};
 use super::shadow_transmittance;
 use crate::{
     config::RenderJob,
     geometry::{hit::Hit, ray::Ray},
     material::{Material, unit_vector},
+    medium::Medium,
 };
 use nalgebra::Vector3;
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -26,6 +27,7 @@ impl AreaLightSampler {
         m: &dyn Material,
         wo: Vector3<f64>,
         transport: T,
+        medium: Option<&dyn Medium>,
     ) -> Result<T::Value, Box<dyn Error + Send + Sync>> {
         let mut result = T::Value::default();
         let Some(rng) = &mut self.0 else {
@@ -41,7 +43,7 @@ impl AreaLightSampler {
             if cosine == 0.0 || sample.incident_weight == 0.0 {
                 continue;
             }
-            let tr = transmittance_to_point(job, hit.coords, normal, sample.position)?;
+            let tr = transmittance_to_point(job, hit.coords, normal, sample.position, medium)?;
             if tr == 0.0 {
                 continue;
             }
@@ -64,10 +66,11 @@ fn transmittance_to_point(
     position: Vector3<f64>,
     normal: Vector3<f64>,
     target: Vector3<f64>,
+    medium: Option<&dyn Medium>,
 ) -> Result<f64, Box<dyn Error + Send + Sync>> {
-    let origin = offset_ray_origin(position, normal, 1.0);
+    let origin = surface_ray_origin(&job.scene, position, normal, 1.0);
     let delta = target - origin;
     let distance = delta.norm();
     let ray = Ray::new(origin, delta).ok_or("invalid shadow segment")?;
-    Ok(shadow_transmittance(job, &ray, distance))
+    Ok(shadow_transmittance(job, &ray, distance, medium))
 }

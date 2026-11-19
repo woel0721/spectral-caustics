@@ -146,7 +146,7 @@ git diff --check
 }
 ```
 
-边界是世界坐标轴对齐盒，距离单位为米，`sigma_a`、`sigma_s` 单位为 m⁻¹，`sigma_t = sigma_a + sigma_s`；`-1 < g < 1`。这些系数目前与波长无关；RGB 和 Spectral 在各自 Transport 中乘同一个标量权重，没有 RGB 插值介质光谱。盒边界没有可见表面、不折射；它是空间掩膜，也覆盖盒内玻璃的内部，暂不表达排除固体或内外介质切换。
+边界是世界坐标轴对齐盒，距离单位为米，`sigma_a`、`sigma_s` 单位为 m⁻¹，`sigma_t = sigma_a + sigma_s`；`-1 < g < 1`。这些系数目前与波长无关；RGB 和 Spectral 在各自 Transport 中乘同一个标量权重，没有 RGB 插值介质光谱。盒边界没有可见表面、不折射。JSON 场景使用全局空间盒，也覆盖盒内玻璃的内部。
 
 每条当前射线先求最近表面，再把盒交区间裁到该距离（miss 则裁到盒出口）。体散射次数尚未达到 `scene.max_volume_scatters` 时，用 `s = -ln(1-u)/sigma_t` 抽取区间入口后的自由程。如果 `s < L`，距离 PDF 是 `sigma_t exp(-sigma_t s)`，因此 `sigma_s Tr(s) / pdf = sigma_s/sigma_t`，把这项乘入 throughput；这是隐式吸收，每次散射均按单次散射反照率缩权。若自由程越过区间，离散生存概率为 `Tr(L)`，其权重 `Tr(L)/Tr(L)=1`，不能再乘衰减。达到预算后使用解析 `exp(-sigma_t L)`，不再采样自由程；`sigma_s=0` 时无论预算多少都使用解析 `exp(-sigma_a L)`。解析分支不消费介质 RNG。
 
@@ -173,13 +173,15 @@ cargo test --locked --test volume
 
 每个对照子目录包含三个分量 PNG 和可独立重跑的 `config.json`。纯吸收组把相同总消光全部设为 `sigma_a`；两个散射组保持相同 `sigma_a/sigma_s`，只改变 g。密度倍率同时缩放两个系数，0 等价于无介质。
 
-相机预算截断后丢弃更高阶散射。焦散图记录未发生体散射的源端通量，由相机在符合条件的地面交点读取。当前积分器使用场景介质。Ratio Tracking、介质发光和波长相关系数仍未实现。平行光沿用无限解析太阳模型，发射窗口只裁剪光子发射位置。
+相机预算截断后丢弃更高阶散射。焦散图记录未发生体散射的源端通量，由相机在符合条件的地面交点读取。Forward Photon 各段使用场景介质。Ratio Tracking、介质发光和波长相关系数仍未实现。平行光沿用无限解析太阳模型，发射窗口只裁剪光子发射位置。
 
 ### 单一玻璃边界的 Rust 运行时契约
 
-通过 `Scene::bind_medium_interface(object_id, MediumInterface { interior })` 为一个封闭的理想玻璃物体登记内部参与介质。球体和凸三棱柱（含竖直棱柱）提供点分类。外侧解析为 `Scene.medium`，内部的 `None` 表示真空。此绑定目前供 Rust 调用者显式查询，现行渲染路径和 JSON 仍使用上文的全局空间盒语义。
+通过 `Scene::bind_medium_interface(object_id, MediumInterface { interior })` 为一个封闭的理想玻璃物体登记内部参与介质。球体和凸三棱柱（含竖直棱柱）提供点分类。外侧解析为 `Scene.medium`，内部的 `None` 表示真空。此绑定通过 Rust API 提供给 RGB、Hero 和 Packet 共用的 Camera Path。
 
-首段开始前调用 `initial_medium_region(origin, None)`。位于几何边界或其浮点舍入范围内的起点，需要显式提供出发侧。用 `active_medium(region)` 取得本段介质。在界面事件被接受后，用 `region_after_event` 及**入射传播方向**决定下一段的区域。反射（包括 TIR）保留当前侧，透射切换到另一侧。路径使用期间应保持场景物体索引稳定。区域只描述参与介质，IOR 和事件权重由光学接口负责。
+Camera Path 首段用 `initial_medium_region` 对起点分类。位于几何边界或其浮点舍入范围内的起点，须通过低层 `CameraPathState.medium_region` 显式给出出发侧。每段用 `active_medium` 解析介质，表面和体积顶点的局部阴影查询使用同一区域的介质，玻璃仍按二值遮挡处理。接受界面事件后，`region_after_event` 用入射传播方向决定下一段区域。反射（含 TIR）和体散射保留当前侧，透射切换到另一侧。路径使用期间应保持场景物体索引稳定。区域只描述参与介质，IOR 和事件权重由光学接口负责。
+
+绑定介质边界的场景中，相机续追和表面阴影射线均从实际交点发出，避免法线偏移跨过近处的玻璃。几何求交仍排除距离不大于 1 µm 的命中。
 
 ## 非均匀密度网格
 

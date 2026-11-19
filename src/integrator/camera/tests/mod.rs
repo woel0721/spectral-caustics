@@ -129,6 +129,7 @@ fn estimate_environment(
         &mut StdRng::seed_from_u64(seed),
         crate::integrator::camera::transport::Rgb::default(),
         crate::optics::dispersion::IorMode::Constant,
+        scene.scene.medium.as_deref(),
     )
     .unwrap()
 }
