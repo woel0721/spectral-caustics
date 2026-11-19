@@ -121,6 +121,10 @@ pub fn trace_camera_path<T: CameraTransport>(
     if state.volume_scatters > job.camera_options.max_volume_scatters {
         return Err("initial volume scatters exceed camera budget".into());
     }
+    let mut region = job
+        .scene
+        .initial_medium_region(state.ray.origin, state.medium_region)?;
+    state.medium_region = Some(region);
     let transport = state.transport;
     let (sun_wi, sun) = transport.sunlight(light_wi, light, map)?;
     let mut area = AreaLightSampler::new(job, rngs.camera);
@@ -129,7 +133,8 @@ pub fn trace_camera_path<T: CameraTransport>(
             break StopReason::ZeroThroughput;
         }
         let hit = job.scene.intersect(&state.ray);
-        if let Some(medium) = &job.scene.medium {
+        let medium = job.scene.active_medium(region)?;
+        if let Some(medium) = medium {
             let allow_scattering = state.volume_scatters < job.camera_options.max_volume_scatters;
             let sample = medium.sample_segment(
                 &state.ray,
@@ -151,6 +156,7 @@ pub fn trace_camera_path<T: CameraTransport>(
                 let phase = medium.phase();
                 let direct = volume_lighting(
                     job,
+                    medium,
                     position,
                     wo,
                     phase,
@@ -240,15 +246,16 @@ pub fn trace_camera_path<T: CameraTransport>(
             let mut direct = T::Value::default();
             if !disable && cosine > 0.0 && f != T::Value::default() && sun != T::Value::default() {
                 direct = transport.multiply(f, sun)
-                    * (cosine * transmittance_to_light(job, hit.coords, normal, sun_wi)?);
+                    * (cosine * transmittance_to_light(job, hit.coords, normal, sun_wi, medium)?);
             }
             let env_rng = if state.has_non_delta_vertex || state.non_delta_bounces > 0 {
                 &mut *rngs.diffuse
             } else {
                 &mut *rngs.environment
             };
-            direct += environment_lighting(job, &hit, material, wo, env_rng, transport, ior)?;
-            direct += area.lighting(job, &hit, material, wo, transport)?;
+            direct +=
+                environment_lighting(job, &hit, material, wo, env_rng, transport, ior, medium)?;
+            direct += area.lighting(job, &hit, material, wo, transport, medium)?;
             state.radiance.direct += transport.multiply(state.throughput, direct) * scale;
             if !state.has_non_delta_vertex && state.non_delta_bounces == 0 {
                 state.radiance.caustics += transport.multiply(
@@ -300,6 +307,10 @@ pub fn trace_camera_path<T: CameraTransport>(
         if !continues {
             break StopReason::ZeroThroughput;
         }
+        region = job
+            .scene
+            .region_after_event(region, &hit, state.ray.direction, next.event)?;
+        state.medium_region = Some(region);
         state.ray = next.ray;
     };
     #[cfg(feature = "diagnostics")]

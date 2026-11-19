@@ -1,6 +1,6 @@
 //! Path state contains transport quantities and algorithm budgets only.
 use super::transport::{CameraTransport, Rgb, Spectral};
-use crate::{film::Framebuffer, geometry::ray::Ray, material::ScatterType};
+use crate::{film::Framebuffer, geometry::ray::Ray, material::ScatterType, scene::MediumRegion};
 use nalgebra::Vector3;
 pub struct CameraLightingImages {
     pub direct: Framebuffer,
@@ -34,6 +34,9 @@ pub struct ScatterRay<V = Vector3<f64>> {
 }
 pub struct CameraPathState<T: CameraTransport = Rgb> {
     pub ray: Ray,
+    /// Region of the current ray in this scene. Fresh launches infer it from
+    /// the origin unless the caller supplies a side, as required on a boundary.
+    pub medium_region: Option<MediumRegion>,
     pub transport: T,
     pub last_scatter: Option<ScatterType>,
     pub throughput: T::Value,
@@ -67,6 +70,7 @@ impl<T: CameraTransport> Clone for CameraPathState<T> {
     fn clone(&self) -> Self {
         Self {
             ray: self.ray,
+            medium_region: self.medium_region,
             transport: self.transport,
             last_scatter: self.last_scatter,
             throughput: self.throughput,
@@ -88,6 +92,7 @@ impl<T: CameraTransport> CameraPathState<T> {
     fn with_transport(ray: Ray, max_non_delta_bounces: usize, transport: T) -> Self {
         Self {
             ray,
+            medium_region: None,
             transport,
             last_scatter: None,
             throughput: transport.one(),

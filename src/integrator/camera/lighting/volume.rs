@@ -4,7 +4,7 @@ use crate::{
     config::{RenderJob, scene::EnvironmentMisHeuristic},
     geometry::ray::Ray,
     integrator::camera::transport::CameraTransport,
-    medium::phase::HenyeyGreenstein,
+    medium::{Medium, phase::HenyeyGreenstein},
 };
 use nalgebra::Vector3;
 use rand::{Rng, RngCore};
@@ -13,6 +13,7 @@ use std::error::Error;
 #[allow(clippy::too_many_arguments)]
 pub(in crate::integrator::camera) fn volume_lighting<T: CameraTransport>(
     job: &RenderJob,
+    medium: &dyn Medium,
     position: Vector3<f64>,
     wo: Vector3<f64>,
     phase: HenyeyGreenstein,
@@ -24,7 +25,9 @@ pub(in crate::integrator::camera) fn volume_lighting<T: CameraTransport>(
     let mut result = T::Value::default();
     if sun != T::Value::default() {
         let ray = Ray::new(position, sun_wi).ok_or("invalid volume shadow ray")?;
-        result += sun * (phase.eval(wo, sun_wi) * shadow_transmittance(job, &ray, f64::INFINITY));
+        result += sun
+            * (phase.eval(wo, sun_wi)
+                * shadow_transmittance(job, &ray, f64::INFINITY, Some(medium)));
     }
     if let Some(disk) = job.scene.light.as_disk() {
         for _ in 0..job.camera_options.light_samples {
@@ -33,7 +36,7 @@ pub(in crate::integrator::camera) fn volume_lighting<T: CameraTransport>(
                 // incident_weight already contains Le cos_light / (r² p_area).
                 let weight = s.incident_weight
                     * phase.eval(wo, s.wi)
-                    * shadow_transmittance(job, &ray, s.distance)
+                    * shadow_transmittance(job, &ray, s.distance, Some(medium))
                     / job.camera_options.light_samples as f64;
                 result += transport.disk_emission() * weight;
             }
@@ -85,7 +88,7 @@ pub(in crate::integrator::camera) fn volume_lighting<T: CameraTransport>(
                         .ok_or("invalid volume environment radiance")?,
                 )
                 .ok_or("volume emission overflow")?;
-            result += li * (weight * shadow_transmittance(job, &ray, f64::INFINITY));
+            result += li * (weight * shadow_transmittance(job, &ray, f64::INFINITY, Some(medium)));
         }
     }
     if !transport.finite(result) {

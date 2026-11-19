@@ -200,6 +200,7 @@ fn diffuse_miss_does_not_add_hdri_background() {
         &mut SequenceRng::new(&[0.0, 0.25, 0.0]),
         crate::integrator::camera::transport::Rgb::default(),
         crate::optics::dispersion::IorMode::Constant,
+        scene.scene.medium.as_deref(),
     )
     .unwrap();
     assert!(e.norm() > 0.0);

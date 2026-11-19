@@ -222,6 +222,7 @@ fn both_hdri_strategies_use_the_complete_mixture_pdf_in_world_space() {
                 &mut rng,
                 crate::integrator::camera::transport::Rgb::default(),
                 crate::optics::dispersion::IorMode::Constant,
+                scene.scene.medium.as_deref(),
             )
             .unwrap();
             let pdf_env = environment.pdf_direction(wi).unwrap();
@@ -270,7 +271,8 @@ fn hdri_sampling_accepts_zero_bsdf_pdf_and_rejects_invalid_numeric_results() {
             wi,
             &mut FirstWordRng::new(u64::MAX, 42),
             crate::integrator::camera::transport::Rgb::default(),
-            crate::optics::dispersion::IorMode::Constant
+            crate::optics::dispersion::IorMode::Constant,
+            scene.scene.medium.as_deref(),
         )
         .unwrap()
         .norm()
@@ -287,7 +289,8 @@ fn hdri_sampling_accepts_zero_bsdf_pdf_and_rejects_invalid_numeric_results() {
                     wi,
                     &mut FirstWordRng::new(first, 42),
                     crate::integrator::camera::transport::Rgb::default(),
-                    crate::optics::dispersion::IorMode::Constant
+                    crate::optics::dispersion::IorMode::Constant,
+                    scene.scene.medium.as_deref(),
                 )
                 .is_err()
             );
@@ -309,7 +312,8 @@ fn hdri_sampling_accepts_zero_bsdf_pdf_and_rejects_invalid_numeric_results() {
                 wi,
                 &mut FirstWordRng::new(u64::MAX, 42),
                 crate::integrator::camera::transport::Rgb::default(),
-                crate::optics::dispersion::IorMode::Constant
+                crate::optics::dispersion::IorMode::Constant,
+                scene.scene.medium.as_deref(),
             )
             .is_err()
         );
@@ -329,7 +333,8 @@ fn hdri_sampling_accepts_zero_bsdf_pdf_and_rejects_invalid_numeric_results() {
                 wi,
                 &mut FirstWordRng::new(0, 42),
                 crate::integrator::camera::transport::Rgb::default(),
-                crate::optics::dispersion::IorMode::Constant
+                crate::optics::dispersion::IorMode::Constant,
+                scene.scene.medium.as_deref(),
             )
             .is_err()
         );
@@ -349,7 +354,8 @@ fn hdri_sampling_accepts_zero_bsdf_pdf_and_rejects_invalid_numeric_results() {
             wi,
             &mut FirstWordRng::new(u64::MAX, 42),
             crate::integrator::camera::transport::Rgb::default(),
-            crate::optics::dispersion::IorMode::Constant
+            crate::optics::dispersion::IorMode::Constant,
+            scene.scene.medium.as_deref(),
         )
         .is_err()
     );
@@ -378,6 +384,7 @@ fn back_hemisphere_and_blocked_hdri_samples_keep_the_total_denominator() {
         &mut rng,
         crate::integrator::camera::transport::Rgb::default(),
         crate::optics::dispersion::IorMode::Constant,
+        scene.scene.medium.as_deref(),
     )
     .unwrap();
     assert!((actual - Vector3::repeat(0.64)).norm() < 1e-12);
@@ -411,6 +418,7 @@ fn back_hemisphere_and_blocked_hdri_samples_keep_the_total_denominator() {
         &mut rng,
         crate::integrator::camera::transport::Rgb::default(),
         crate::optics::dispersion::IorMode::Constant,
+        scene.scene.medium.as_deref(),
     )
     .unwrap();
     let cosine = 0.5_f64.sqrt();
@@ -431,7 +439,8 @@ fn back_hemisphere_and_blocked_hdri_samples_keep_the_total_denominator() {
             Vector3::z(),
             &mut StdRng::seed_from_u64(42),
             crate::integrator::camera::transport::Rgb::default(),
-            crate::optics::dispersion::IorMode::Constant
+            crate::optics::dispersion::IorMode::Constant,
+            scene.scene.medium.as_deref(),
         )
         .unwrap(),
         Vector3::zeros()
@@ -474,6 +483,7 @@ fn uniform_and_black_hdri_lighting_match_the_analytic_expectation() {
                         &mut StdRng::seed_from_u64(seed),
                         crate::integrator::camera::transport::Rgb::default(),
                         crate::optics::dispersion::IorMode::Constant,
+                        scene.scene.medium.as_deref(),
                     )
                     .unwrap();
                     assert!(result.iter().all(|v| v.is_finite()));
@@ -488,7 +498,8 @@ fn uniform_and_black_hdri_lighting_match_the_analytic_expectation() {
                                 normal,
                                 &mut StdRng::seed_from_u64(seed),
                                 crate::integrator::camera::transport::Rgb::default(),
-                                crate::optics::dispersion::IorMode::Constant
+                                crate::optics::dispersion::IorMode::Constant,
+                                scene.scene.medium.as_deref(),
                             )
                             .unwrap()
                         );
@@ -587,6 +598,7 @@ fn ggx_balance_and_power_match_hemisphere_integral_with_rejected_bsdf_quotas() {
                 &mut rng,
                 crate::integrator::camera::transport::Rgb::default(),
                 crate::optics::dispersion::IorMode::Constant,
+                scene.scene.medium.as_deref(),
             )
             .unwrap();
         }
@@ -649,6 +661,7 @@ mod power {
                 &mut rng,
                 crate::integrator::camera::transport::Rgb::default(),
                 crate::optics::dispersion::IorMode::Constant,
+                scene.scene.medium.as_deref(),
             )
             .unwrap();
             let qb = pb; // n_b=1
@@ -691,6 +704,7 @@ mod power {
                     &mut a,
                     crate::integrator::camera::transport::Rgb::default(),
                     crate::optics::dispersion::IorMode::Constant,
+                    scene.scene.medium.as_deref(),
                 )
                 .unwrap();
                 scene.camera_options.environment_mis_heuristic = EnvironmentMisHeuristic::Power;
@@ -702,6 +716,7 @@ mod power {
                     &mut b,
                     crate::integrator::camera::transport::Rgb::default(),
                     crate::optics::dispersion::IorMode::Constant,
+                    scene.scene.medium.as_deref(),
                 )
                 .unwrap();
                 assert_eq!(a.next_u64(), b.next_u64());
@@ -724,6 +739,7 @@ mod power {
                 &mut a,
                 crate::integrator::camera::transport::Rgb::default(),
                 crate::optics::dispersion::IorMode::Constant,
+                scene.scene.medium.as_deref(),
             )
             .unwrap();
             scene.camera_options.environment_mis_heuristic = EnvironmentMisHeuristic::Power;
@@ -735,6 +751,7 @@ mod power {
                 &mut b,
                 crate::integrator::camera::transport::Rgb::default(),
                 crate::optics::dispersion::IorMode::Constant,
+                scene.scene.medium.as_deref(),
             )
             .unwrap();
             assert_eq!(balance.map(f64::to_bits), power.map(f64::to_bits));
@@ -765,6 +782,7 @@ mod power {
             &mut rng,
             crate::integrator::camera::transport::Rgb::default(),
             crate::optics::dispersion::IorMode::Constant,
+            scene.scene.medium.as_deref(),
         )
         .unwrap();
         assert!((actual - Vector3::repeat(0.8 * 16.0 / 17.0)).norm() < 1e-12);
@@ -784,7 +802,8 @@ mod power {
                 Vector3::z(),
                 &mut StdRng::seed_from_u64(42),
                 crate::integrator::camera::transport::Rgb::default(),
-                crate::optics::dispersion::IorMode::Constant
+                crate::optics::dispersion::IorMode::Constant,
+                scene.scene.medium.as_deref(),
             )
             .unwrap(),
             Vector3::zeros()
@@ -802,7 +821,8 @@ mod power {
                     Vector3::z(),
                     &mut StdRng::seed_from_u64(42),
                     crate::integrator::camera::transport::Rgb::default(),
-                    crate::optics::dispersion::IorMode::Constant
+                    crate::optics::dispersion::IorMode::Constant,
+                    scene.scene.medium.as_deref(),
                 )
                 .unwrap(),
                 Vector3::zeros()
@@ -843,6 +863,7 @@ mod power {
                             &mut rng,
                             crate::integrator::camera::transport::Rgb::default(),
                             crate::optics::dispersion::IorMode::Constant,
+                            scene.scene.medium.as_deref(),
                         )
                         .unwrap()
                         .x / 512.0;
@@ -953,6 +974,7 @@ mod stratified {
                     &mut rng,
                     crate::integrator::camera::transport::Rgb::default(),
                     crate::optics::dispersion::IorMode::Constant,
+                    scene.scene.medium.as_deref(),
                 )
                 .unwrap();
                 assert_eq!(material.samples.load(Ordering::Relaxed), nb);
@@ -989,6 +1011,7 @@ mod stratified {
             &mut rng,
             crate::integrator::camera::transport::Rgb::default(),
             crate::optics::dispersion::IorMode::Constant,
+            scene.scene.medium.as_deref(),
         )
         .unwrap();
         let f_r = Vector3::new(0.2, 0.4, 0.8);
@@ -1023,6 +1046,7 @@ mod stratified {
             &mut rng,
             crate::integrator::camera::transport::Rgb::default(),
             crate::optics::dispersion::IorMode::Constant,
+            scene.scene.medium.as_deref(),
         )
         .unwrap();
         assert_eq!(actual, Vector3::zeros());
@@ -1065,6 +1089,7 @@ mod stratified {
             &mut rng,
             crate::integrator::camera::transport::Rgb::default(),
             crate::optics::dispersion::IorMode::Constant,
+            scene.scene.medium.as_deref(),
         )
         .unwrap();
         let expected = Vector3::new(0.2, 0.4, 0.8) * (2.0 / (2.0 * 0.25 + 2.0 / (4.0 * PI)));
@@ -1099,6 +1124,7 @@ mod stratified {
                     &mut StdRng::seed_from_u64(seed),
                     crate::integrator::camera::transport::Rgb::default(),
                     crate::optics::dispersion::IorMode::Constant,
+                    scene.scene.medium.as_deref(),
                 )
                 .unwrap()
                     / 4096.0;
@@ -1133,7 +1159,8 @@ mod stratified {
                         Vector3::z(),
                         &mut StdRng::seed_from_u64(42),
                         crate::integrator::camera::transport::Rgb::default(),
-                        crate::optics::dispersion::IorMode::Constant
+                        crate::optics::dispersion::IorMode::Constant,
+                        scene.scene.medium.as_deref(),
                     )
                     .is_err()
                 );
@@ -1148,7 +1175,8 @@ mod stratified {
                     Vector3::z(),
                     &mut StdRng::seed_from_u64(42),
                     crate::integrator::camera::transport::Rgb::default(),
-                    crate::optics::dispersion::IorMode::Constant
+                    crate::optics::dispersion::IorMode::Constant,
+                    scene.scene.medium.as_deref(),
                 )
                 .is_err()
             );
@@ -1164,7 +1192,8 @@ mod stratified {
                 Vector3::z(),
                 &mut StdRng::seed_from_u64(42),
                 crate::integrator::camera::transport::Rgb::default(),
-                crate::optics::dispersion::IorMode::Constant
+                crate::optics::dispersion::IorMode::Constant,
+                scene.scene.medium.as_deref(),
             )
             .is_err()
         );
@@ -1185,7 +1214,16 @@ mod stratified {
             for col in 0..phi_steps {
                 let phi = 2.0 * PI * (col as f64 + 0.5) / phi_steps as f64;
                 let wi = Vector3::new(radius * phi.cos(), radius * phi.sin(), z);
-                if transmittance_to_light(scene, position, Vector3::z(), wi).unwrap() > 0.0 {
+                if transmittance_to_light(
+                    scene,
+                    position,
+                    Vector3::z(),
+                    wi,
+                    scene.scene.medium.as_deref(),
+                )
+                .unwrap()
+                    > 0.0
+                {
                     integral += environment.radiance(wi).unwrap() * z;
                 }
             }
@@ -1237,6 +1275,7 @@ mod stratified {
                             &mut rng,
                             crate::integrator::camera::transport::Rgb::default(),
                             crate::optics::dispersion::IorMode::Constant,
+                            scene.scene.medium.as_deref(),
                         )
                         .unwrap()
                         .x;

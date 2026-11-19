@@ -1,13 +1,30 @@
 use nalgebra::{Vector2, Vector3};
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use spectral_caustics::{
-    config::RenderJob,
+    camera::Camera,
+    config::{
+        RenderJob,
+        camera::CameraConfig,
+        render::{CameraMode, RenderSetting},
+    },
     geometry::{
         ground::Ground, prism::Prism, ray::Ray, sphere::Sphere, vertical_prism::VerticalPrism,
     },
-    material::{Material, ScatterType, dielectric::Dielectric, mirror::Mirror},
+    integrator::camera::{
+        path::{MAX_DELTA_EVENTS, trace_camera_path},
+        transport::{CameraTransport, Caustics},
+        types::{CameraPathRngs, CameraPathState},
+    },
+    light::{DiskAreaLight, Light},
+    material::{
+        Material, ScatterType, dielectric::Dielectric, lambertian::Lambertian, mirror::Mirror,
+    },
     medium::{HomogeneousMedium, HomogeneousMediumConfig, Medium},
-    optics::interface::{DielectricEvent, sample_dielectric},
+    optics::{
+        dispersion::IorMode,
+        interface::{DielectricEvent, sample_dielectric},
+    },
+    renderer::Renderer,
     scene::{
         MediumInterface,
         MediumRegion::{Exterior, Interior},
@@ -46,6 +63,199 @@ fn absorption(sigma: f64) -> Box<dyn Medium> {
         })
         .unwrap(),
     )
+}
+
+fn trace<T: CameraTransport>(job: &RenderJob, state: &mut CameraPathState<T>, camera_seed: u64) {
+    trace_camera_path(
+        job,
+        state,
+        &mut CameraPathRngs {
+            camera: &mut StdRng::seed_from_u64(camera_seed),
+            environment: &mut StdRng::seed_from_u64(2),
+            diffuse: &mut StdRng::seed_from_u64(3),
+            medium: &mut StdRng::seed_from_u64(4),
+        },
+        Vector3::z(),
+        0.0,
+        Caustics::None,
+        IorMode::Constant,
+        #[cfg(feature = "diagnostics")]
+        None,
+    )
+    .unwrap();
+}
+
+#[test]
+fn camera_sphere_launches_inside_and_outside_and_attenuates_each_segment() {
+    let mut job = RenderJob::new();
+    job.scene.environment = None;
+    job.scene.background_color = Vector3::repeat(1.0);
+    let id = job.scene.add(sphere(), glass());
+    job.scene.medium = Some(absorption(0.2));
+    job.scene
+        .bind_medium_interface(
+            id,
+            MediumInterface {
+                interior: Some(absorption(0.7)),
+            },
+        )
+        .unwrap();
+
+    // Normal incidence. The continuation origin is offset 10 μm per interface.
+    let offset = 1e-5_f64;
+    for (z, departure, events, interior_distance, exterior_before, eta_weight) in [
+        (0.0, None, 1, 1.0, 0.0, 1.5_f64.powi(2)),
+        (-1.0, Some(Interior(id)), 1, 2.0, 0.0, 1.5_f64.powi(2)),
+        (-3.0, None, 2, 2.0 - offset, 2.0, 1.0),
+    ] {
+        let ray = Ray::new(Vector3::z() * z, Vector3::z()).unwrap();
+        let exterior_distance = exterior_before + 9.0 - offset;
+        let expected = eta_weight * (-0.7 * interior_distance - 0.2 * exterior_distance).exp();
+
+        let mut rgb = CameraPathState::new(ray, 0);
+        rgb.medium_region = departure;
+        trace(&job, &mut rgb, 1);
+        assert_eq!(rgb.delta_events(), events);
+        assert_eq!(rgb.medium_region, Some(Exterior));
+        assert!((rgb.radiance.direct - Vector3::repeat(expected)).norm() < 1e-14);
+
+        let mut spectral = CameraPathState::spectral(ray, 550.0, 0).unwrap();
+        spectral.medium_region = departure;
+        trace(&job, &mut spectral, 1);
+        assert_eq!(spectral.delta_events(), events);
+        assert_eq!(spectral.medium_region, Some(Exterior));
+        assert!((spectral.throughput - expected).abs() < 1e-14);
+    }
+}
+
+#[test]
+fn camera_plate_keeps_the_incident_medium_across_reflection_and_tir() {
+    let mut job = RenderJob::new();
+    let id = job.scene.add(slab(), glass());
+    job.scene.medium = Some(absorption(0.2));
+    job.scene
+        .bind_medium_interface(
+            id,
+            MediumInterface {
+                interior: Some(absorption(0.7)),
+            },
+        )
+        .unwrap();
+
+    // Starting inside, cos(theta) = 0.6 is below the critical cosine.
+    // Allow one TIR, then measure attenuation to the opposite cap.
+    let ray = Ray::new(Vector3::z() * 1.5, Vector3::new(0.8, 0.0, 0.6)).unwrap();
+    let mut state = CameraPathState::new(ray, 0);
+    state.path_depth = MAX_DELTA_EVENTS - 1;
+    trace(&job, &mut state, 1);
+    assert_eq!(state.delta_events(), MAX_DELTA_EVENTS);
+    assert_eq!(state.last_scatter, Some(ScatterType::SpecularReflection));
+    assert_eq!(state.medium_region, Some(Interior(id)));
+    assert!(state.ray.direction.z < 0.0);
+    let expected = (-0.7_f64 * (1.5 - 1e-5) / 0.6).exp();
+    assert!((state.throughput - Vector3::repeat(expected)).norm() < 1e-14);
+
+    // A grazing front-face hit reflects with seed 1. The reflected ray
+    // traverses the exterior box on its way to y = 10.
+    let ray = Ray::new(
+        Vector3::new(0.0, -5.0, 2.004),
+        Vector3::new(0.0, 1.0, -0.001),
+    )
+    .unwrap();
+    let mut state = CameraPathState::new(ray, 0);
+    trace(&job, &mut state, 1);
+    assert_eq!(state.delta_events(), 1);
+    assert_eq!(state.last_scatter, Some(ScatterType::SpecularReflection));
+    assert_eq!(state.medium_region, Some(Exterior));
+    let expected = (-0.2_f64 * 15.0 / ray.direction.y).exp();
+    assert!((state.throughput - Vector3::repeat(expected)).norm() < 1e-14);
+}
+
+#[test]
+fn camera_disk_shadow_segment_inside_sphere_uses_the_interior_medium() {
+    let radiance = |interior| {
+        let mut job = RenderJob::new();
+        job.scene.environment = None;
+        job.scene.medium = Some(absorption(4.0));
+        job.scene.light = Light::DiskArea(
+            DiskAreaLight::new(0.5 * Vector3::z(), -Vector3::z(), 1e-4, 1.0).unwrap(),
+        );
+        let id = job.scene.add(sphere(), glass());
+        job.scene.add(
+            Box::new(Ground::new(-0.5).unwrap()),
+            Box::new(Lambertian::new(Vector3::repeat(0.5)).unwrap()),
+        );
+        job.scene
+            .bind_medium_interface(id, MediumInterface { interior })
+            .unwrap();
+        let ray = Ray::new(Vector3::zeros(), -Vector3::z()).unwrap();
+        let mut state = CameraPathState::new(ray, 0);
+        trace(&job, &mut state, 1);
+        state.radiance.direct.x
+    };
+    let vacuum = radiance(None);
+    let absorbing = radiance(Some(absorption(0.7)));
+    assert!(vacuum > 0.0);
+    // Camera segment is 0.5 m. The near-point emitter is 1 m from the floor,
+    // less the shadow-origin offset, to within O(disk_radius²).
+    let expected = (-0.7_f64 * (1.5 - 1e-5)).exp();
+    assert!((absorbing / vacuum - expected).abs() < 1e-8);
+}
+
+#[test]
+fn bound_sphere_renders_deterministically_in_rgb_hero_and_packet() {
+    let mut job = RenderJob::new();
+    job.camera = Camera::from_config(&CameraConfig {
+        position: [0.0; 3],
+        target: [0.0, 0.0, 1.0],
+        up: [0.0, 1.0, 0.0],
+        fov_y_degrees: 35.0,
+    })
+    .unwrap();
+    job.scene.environment = None;
+    job.scene.background_color = Vector3::repeat(1.0);
+    let id = job.scene.add(sphere(), glass());
+    job.scene
+        .bind_medium_interface(
+            id,
+            MediumInterface {
+                interior: Some(absorption(0.7)),
+            },
+        )
+        .unwrap();
+    for (mode, packet) in [
+        (CameraMode::Rgb, 1),
+        (CameraMode::Spectral, 1),
+        (CameraMode::Spectral, 4),
+    ] {
+        let mut settings = RenderSetting {
+            width: 8,
+            height: 8,
+            camera_spp: 16,
+            seed: 42,
+            camera_mode: mode,
+            spectral_packet_size: packet,
+            ..Default::default()
+        };
+        let mut reference = None;
+        for threads in [1, 2, 4] {
+            settings.thread_count = Some(threads);
+            let image = Renderer::new(settings.clone())
+                .unwrap()
+                .render(&job)
+                .unwrap();
+            for (direct, caustics) in image.direct.pixels().iter().zip(image.caustics.pixels()) {
+                assert!(direct.y.is_finite() && direct.y > 0.0);
+                assert_eq!(*caustics, Vector3::zeros());
+            }
+            assert_eq!(image.direct.pixels(), image.combined.pixels());
+            if let Some(pixels) = &reference {
+                assert_eq!(image.combined.pixels(), pixels);
+            } else {
+                reference = Some(image.combined.pixels().to_vec());
+            }
+        }
+    }
 }
 
 #[test]
