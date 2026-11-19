@@ -1,7 +1,7 @@
 //! XY 三角形沿世界 Z 轴挤出的无倒角封闭三棱柱。
 
 use super::hit::GeometryHit as Hit;
-use super::object::Hittable;
+use super::object::{ClosedVolume, Hittable};
 use super::prism::Prism;
 use super::ray::Ray;
 use nalgebra::Vector2;
@@ -54,6 +54,10 @@ impl VerticalPrism {
 }
 
 impl Hittable for VerticalPrism {
+    fn closed_volume(&self) -> Option<&dyn ClosedVolume> {
+        Some(&self.mesh)
+    }
+
     /// 把输入 Ray 交给内部封闭三棱柱求交，返回最近正向 Hit；未命中返回 None。
     fn intersect(&self, ray: &Ray) -> Option<Hit> {
         self.mesh.intersect(ray)

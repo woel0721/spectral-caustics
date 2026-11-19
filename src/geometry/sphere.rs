@@ -1,7 +1,7 @@
 //! 由球心和半径（米）定义的解析球面；几何法线始终朝外。
 
 use super::hit::GeometryHit as Hit;
-use super::object::Hittable;
+use super::object::{ClosedVolume, Hittable, PointLocation};
 use super::ray::INTERSECTION_EPSILON;
 use super::ray::Ray;
 use nalgebra::Vector3;
@@ -34,7 +34,30 @@ impl Sphere {
     }
 }
 
+impl ClosedVolume for Sphere {
+    fn classify_point(&self, point: Vector3<f64>) -> Result<PointLocation, &'static str> {
+        if !point.iter().all(|x| x.is_finite()) {
+            return Err("non-finite launch point");
+        }
+        let d = point - self.center;
+        let distance = d.x.hypot(d.y).hypot(d.z);
+        // Roundoff band in metres, scaled to the radius rather than the ray's self-hit cutoff.
+        let tolerance = 8.0 * f64::EPSILON * self.radius;
+        Ok(if (distance - self.radius).abs() <= tolerance {
+            PointLocation::OnBoundary
+        } else if distance < self.radius {
+            PointLocation::Inside
+        } else {
+            PointLocation::Outside
+        })
+    }
+}
+
 impl Hittable for Sphere {
+    fn closed_volume(&self) -> Option<&dyn ClosedVolume> {
+        Some(self)
+    }
+
     /// 求光线与球面最近的正向交点；从球内出发时返回出射交点。
     ///
     /// 输入：Ray；输出：最近的 Hit，未命中或数值无效返回 None；法线始终朝球外。

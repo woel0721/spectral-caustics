@@ -1,7 +1,7 @@
 //! 默认三角截面沿 Y 轴拉伸；from_vertices 可构建任意朝向的凸三棱柱，共 8 个三角形。
 
 use super::hit::GeometryHit as Hit;
-use super::object::Hittable;
+use super::object::{ClosedVolume, Hittable, PointLocation};
 use super::ray::Ray;
 use super::triangle::Triangle;
 use nalgebra::Vector3;
@@ -10,6 +10,8 @@ use nalgebra::Vector3;
 pub struct Prism {
     /// 三角形与缓存法线由 Triangle 管理，外部不能单独修改顶点。
     faces: Vec<Triangle>,
+    /// 构造时已验证位于每个有向面的内侧。
+    center: Vector3<f64>,
 }
 
 impl Prism {
@@ -75,11 +77,31 @@ impl Prism {
             }
         }
 
-        Some(Self { faces })
+        Some(Self { faces, center })
+    }
+}
+
+impl ClosedVolume for Prism {
+    fn classify_point(&self, point: Vector3<f64>) -> Result<PointLocation, &'static str> {
+        // 以内部中心和八个实际三角面组成四面体。构造容差允许侧面轻微折叠，
+        // 此时一个三角形的延伸平面可能切过同一侧面的另一半。
+        let mut location = PointLocation::Outside;
+        for face in &self.faces {
+            match face.classify_tetrahedron(self.center, point)? {
+                PointLocation::OnBoundary => return Ok(PointLocation::OnBoundary),
+                PointLocation::Inside => location = PointLocation::Inside,
+                PointLocation::Outside => {}
+            }
+        }
+        Ok(location)
     }
 }
 
 impl Hittable for Prism {
+    fn closed_volume(&self) -> Option<&dyn ClosedVolume> {
+        Some(self)
+    }
+
     /// 查询三棱镜各三角面，返回离 Ray 起点最近的正向 Hit。
     ///
     /// 输入：世界空间 Ray；输出：最近交点，所有面都未命中时返回 None。

@@ -1,7 +1,7 @@
 //! 单个三角形与双面的 Möller–Trumbore 求交。
 
 use super::hit::GeometryHit as Hit;
-use super::object::Hittable;
+use super::object::{Hittable, PointLocation};
 use super::ray::INTERSECTION_EPSILON;
 use super::ray::PARALLEL_EPSILON;
 use super::ray::Ray;
@@ -19,6 +19,48 @@ pub struct Triangle {
 }
 
 impl Triangle {
+    /// 分类中心与本面张成的四面体。只有三角形所在的底面是物体的边界。
+    pub(super) fn classify_tetrahedron(
+        &self,
+        center: Vector3<f64>,
+        point: Vector3<f64>,
+    ) -> Result<PointLocation, &'static str> {
+        let vertices = self.vertices.map(|v| v - center);
+        let direction = point - center;
+        let distance = self.normal.dot(&(point - self.vertices[0]));
+        let tolerance = 8.0
+            * f64::EPSILON
+            * self
+                .normal
+                .abs()
+                .dot(&(vertices[0].abs() + direction.abs()));
+        if !distance.is_finite() || !tolerance.is_finite() {
+            return Err("non-finite face-plane distance");
+        }
+        if distance > tolerance {
+            return Ok(PointLocation::Outside);
+        }
+        // 外向绕序保证每个径向侧面的叉积指向第三个顶点。共享面包含在两侧。
+        for i in 0..3 {
+            let a = vertices[i];
+            let b = vertices[(i + 1) % 3];
+            let normal = a.cross(&b);
+            let side = normal.dot(&direction);
+            let roundoff = 8.0 * f64::EPSILON * normal.abs().dot(&direction.abs());
+            if !side.is_finite() || !roundoff.is_finite() {
+                return Err("non-finite tetrahedron side");
+            }
+            if side < -roundoff {
+                return Ok(PointLocation::Outside);
+            }
+        }
+        Ok(if distance >= -tolerance {
+            PointLocation::OnBoundary
+        } else {
+            PointLocation::Inside
+        })
+    }
+
     /// 用三个世界坐标顶点创建三角形，并缓存边与单位法线，减少重复求交的计算。
     ///
     /// 输入：按绕序给出的 v0、v1、v2（米）。
