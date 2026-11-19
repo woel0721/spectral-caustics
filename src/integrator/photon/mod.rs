@@ -15,7 +15,7 @@ pub(crate) use path::PhotonTracer;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PhotonLanding {
     pub position: Vector3<f64>,
-    /// Flux coefficient / event probability; excludes radiance eta squared.
+    /// Product of segment transmittances and interface flux weights.
     pub weight: f64,
 }
 pub fn trace_photon(

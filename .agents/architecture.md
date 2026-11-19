@@ -34,7 +34,7 @@ Hero 与四波长 Packet 使用同一个标量路径循环。Packet 共享主射
 - [Dielectric](../src/material/dielectric.rs) 按几何法线和方向判断空气/玻璃两侧，外部 IOR 固定为 1；光子有显式 Air/Glass 状态。没有嵌套介质栈，也不支持从玻璃内部启动光子。
 - `Scene.medium` 持有 `Option<Box<dyn Medium>>`。[Medium](../src/medium/mod.rs) 要求 `Send + Sync`，内置实现为 [HomogeneousMedium](../src/medium/homogeneous.rs) 和 [GridMedium](../src/medium/grid.rs)。内置介质在单个轴对齐盒内作用于空间，也覆盖盒内固体。光线穿过盒边界时方向不变。
 - 相机只通过 `sample_segment` 取得可选的真实散射位置和已补偿权重，通过 `phase()` 取得 Henyey–Greenstein 相函数，通过 `transmittance_ray` 查询确定性阴影透射率（接口无 RNG 参数）。密度遍历、Majorant、空碰撞与权重补偿由介质实现负责。密度、系数和全局 Majorant 的只读查询供数据检查使用。相机按真实事件管理独立于表面的[体散射预算](transport.md#相函数与体散射预算)。网格采样权重见[传输契约](transport.md#非均匀网格介质)，遍历和分块选择见[私有 DDA 实现](../src/medium/grid/dda.rs)和[基准记录](../docs/medium_majorant_benchmark.md#分块选择与内存)。
-- 光子不感知雾；现有焦散图只受相机侧介质权重影响，不代表有雾时源端到地面的完整能量。层次化空块跳跃、Ratio Tracking、波长相关介质、介质发光和内外介质切换未实现。
+- Forward 光子只通过 `transmittance_ray` 累积各有限命中段的消光，首段 Tr 随首交点缓存。XYZ、Eλ 与独立光子 Direct 预览均记录未发生体散射的通量。Air/Glass 负责界面折射率侧别。层次化空块跳跃、Ratio Tracking、波长相关介质、介质发光和内外介质切换未实现。
 
 ## Diagnostics
 

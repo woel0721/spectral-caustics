@@ -4,8 +4,27 @@ use super::PhotonLanding;
 use crate::config::RenderJob;
 use crate::geometry::hit::Hit;
 use crate::geometry::ray::Ray;
+use crate::medium::Medium;
 use nalgebra::Vector3;
 use rand::RngCore;
+
+pub(super) fn segment_transmittance(
+    medium: Option<&dyn Medium>,
+    ray: &Ray,
+    distance: f64,
+) -> Result<f64, &'static str> {
+    let Some(medium) = medium else {
+        return Ok(1.0);
+    };
+    if !distance.is_finite() || distance <= 0.0 {
+        return Err("invalid photon segment distance");
+    }
+    let tr = medium.transmittance_ray(ray, distance);
+    if !(0.0..=1.0).contains(&tr) {
+        return Err("invalid photon medium transmittance");
+    }
+    Ok(tr)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhotonMedium {
@@ -19,9 +38,9 @@ pub enum PhotonMedium {
 pub struct PhotonPathState {
     /// 当前向前续追的射线，从光源或上一个界面出发。
     pub ray: Ray,
-    /// 射线当前所在的介质，用于决定界面两侧的折射率与法线方向。
+    /// 界面的折射率一侧，用于决定 IOR 与法线方向。
     pub medium: PhotonMedium,
-    /// 相对于发射光谱通量 Φλ 的无量纲系数，不含 CIE、Δλ 或像素面积。
+    /// 相对于发射光谱通量 Φλ 的无量纲系数，包含已追踪段的 Tr 与界面通量权重。
     pub flux_weight: f64,
     /// 已发生的反射/透射总次数，用于事件上限截断。
     pub event_count: usize,
@@ -35,7 +54,7 @@ pub struct PhotonPathState {
 
 impl PhotonPathState {
     /// 从输入 Ray 初始化空气中的光子状态，通量比例为 1，事件/反射/透射计数均为 0，供 Forward 开始追踪。
-    fn new(ray: Ray) -> Self {
+    pub(super) fn new(ray: Ray) -> Self {
         Self {
             ray,
             medium: PhotonMedium::Air,
@@ -117,11 +136,7 @@ impl PhotonTracer {
         })
     }
 
-    /// 校验参数并启动单条 Forward 光子路径，供 XYZ 和 Eλ 图集共用。
-    ///
-    /// 输入：scene、从空气出发的 ray、它的最近 first_hit（无命中为 None）及事件 RNG。
-    ///
-    /// 输出：最终 PhotonPathResult；目标/地面/IOR/事件预算无效或界面状态错误时 Err。
+    /// 从空气发射单条光子路径，先计算到最近命中的透射率。
     pub fn trace(
         &self,
         scene: &RenderJob,
@@ -129,20 +144,23 @@ impl PhotonTracer {
         first_hit: Option<Hit>,
         rng: &mut dyn RngCore,
     ) -> Result<PhotonPathResult, &'static str> {
-        self.trace_state(scene, PhotonPathState::new(ray), first_hit, rng)
+        let mut state = PhotonPathState::new(ray);
+        if let Some(first) = first_hit {
+            state.flux_weight =
+                segment_transmittance(scene.scene.medium.as_deref(), &ray, first.distance)?;
+        }
+        self.trace_state(scene, state, first_hit, rng)
     }
 
-    /// 反复求交和散射直到光子落地或终止，供 Forward 追踪循环使用。
-    ///
-    /// 输入：场景、当前路径状态、当前最近命中和事件 RNG；输出：保留最终状态及落地/逃逸/遮挡/事件上限的结果。
-    /// 路径状态或界面数值错误返回 Err；恰好完成 max_events 次后仍允许落地/逃逸，到下一次散射才截断。
-    fn trace_state(
+    /// 从当前命中继续追踪。进入时通量已包含到该命中的 Tr，供各波长复用发射首段。
+    pub(super) fn trace_state(
         &self,
         scene: &RenderJob,
         mut state: PhotonPathState,
         mut hit: Option<Hit>,
         rng: &mut dyn RngCore,
     ) -> Result<PhotonPathResult, &'static str> {
+        let medium = scene.scene.medium.as_deref();
         let termination = loop {
             let Some(current) = hit else {
                 break PhotonTermination::Escaped;
@@ -159,6 +177,9 @@ impl PhotonTracer {
             }
             self.scatter(&mut state, current, rng)?;
             hit = scene.scene.intersect(&state.ray);
+            if let Some(next) = hit {
+                state.flux_weight *= segment_transmittance(medium, &state.ray, next.distance)?;
+            }
         };
         Ok(PhotonPathResult { state, termination })
     }
@@ -222,6 +243,7 @@ mod tests {
     use crate::geometry::object::Hittable;
     use crate::geometry::sphere::Sphere;
     use crate::material::dielectric::Dielectric;
+    use crate::medium::{GridMedium, GridMediumConfig, HomogeneousMedium, HomogeneousMediumConfig};
     use crate::optics::dispersion::IorMode;
     use crate::optics::interface::{fresnel_dielectric, refract};
     use rand::SeedableRng;
@@ -294,6 +316,128 @@ mod tests {
             },
             ray,
         )
+    }
+
+    #[test]
+    fn refracted_slab_accumulates_clipped_air_and_glass_segments() {
+        let ior = 1.5;
+        let (mut scene, tracer, _) = slab(ior, 4);
+        let theta = 30.0_f64.to_radians();
+        let glass_theta = (theta.sin() / ior).asin();
+        let ray = Ray::new(
+            Vector3::z() * 3.0,
+            Vector3::new(theta.sin(), 0.0, -theta.cos()),
+        )
+        .unwrap();
+        let min_m = [-10.0, -10.0, 0.5];
+        let max_m = [10.0, 10.0, 2.5];
+        let homogeneous = |sigma_a, sigma_s| -> Box<dyn Medium> {
+            Box::new(
+                HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+                    min_m,
+                    max_m,
+                    sigma_a,
+                    sigma_s,
+                    g: 0.7,
+                })
+                .unwrap(),
+            )
+        };
+        let grid = GridMedium::try_from(&GridMediumConfig {
+            min_m,
+            max_m,
+            resolution: [1, 1, 2],
+            densities: vec![1.0, 3.0],
+            sigma_a_base: 0.2,
+            sigma_s_base: 0.3,
+            g: 0.7,
+        })
+        .unwrap();
+        // Half a metre per outside leg and three crossings of the full glass slab.
+        let optical_depth = 0.5 * (1.0 / theta.cos() + 3.0 / glass_theta.cos());
+        for (medium, expected_tr) in [
+            (None, 1.0),
+            (Some(homogeneous(0.0, 0.0)), 1.0),
+            (Some(homogeneous(0.2, 0.3)), (-optical_depth).exp()),
+            (Some(Box::new(grid)), (-2.0 * optical_depth).exp()),
+            (Some(homogeneous(1400.0, 0.0)), 0.0),
+        ] {
+            scene.scene.medium = medium;
+            // Force entry, two internal reflections, and exit using the original Fresnel draws.
+            let mut rng = Sequence::new(&[u64::MAX, 0, 0, u64::MAX]);
+            let result = tracer
+                .trace(&scene, ray, scene.scene.intersect(&ray), &mut rng)
+                .unwrap();
+            let landing = result.landing().unwrap();
+            let expected_x = 2.0 * theta.tan() + 3.0 * glass_theta.tan();
+            assert!((landing.position - Vector3::x() * expected_x).norm() < 1e-14);
+            if expected_tr == 0.0 || expected_tr == 1.0 {
+                assert_eq!(landing.weight.to_bits(), expected_tr.to_bits());
+            } else {
+                assert!((landing.weight / expected_tr - 1.0).abs() < 1e-14);
+            }
+            assert_eq!(
+                (result.state.transmissions, result.state.reflections),
+                (2, 2)
+            );
+            assert_eq!(result.state.medium, PhotonMedium::Air);
+            assert_eq!(rng.draws, 4);
+        }
+    }
+
+    #[test]
+    fn photon_segments_reject_invalid_distance_and_transmittance() {
+        use crate::medium::{MediumCoefficients, MediumSample, phase::HenyeyGreenstein};
+
+        struct FixedTransmittance(f64);
+        impl Medium for FixedTransmittance {
+            fn density_at(&self, _: Vector3<f64>) -> f64 {
+                unreachable!()
+            }
+            fn coefficients_at(&self, _: Vector3<f64>) -> MediumCoefficients {
+                unreachable!()
+            }
+            fn sigma_t_majorant(&self) -> f64 {
+                unreachable!()
+            }
+            fn phase(&self) -> HenyeyGreenstein {
+                unreachable!()
+            }
+            fn sample_segment(
+                &self,
+                _: &Ray,
+                _: f64,
+                _: bool,
+                _: &mut dyn RngCore,
+            ) -> Result<MediumSample, String> {
+                unreachable!()
+            }
+            fn transmittance_ray(&self, _: &Ray, _: f64) -> f64 {
+                self.0
+            }
+        }
+
+        let (mut scene, tracer, ray) = slab(1.5, 2);
+        let hit = scene.scene.intersect(&ray).unwrap();
+        for tr in [-0.01, 1.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            scene.scene.medium = Some(Box::new(FixedTransmittance(tr)));
+            assert_eq!(
+                tracer
+                    .trace(&scene, ray, Some(hit), &mut Sequence::new(&[]))
+                    .unwrap_err(),
+                "invalid photon medium transmittance"
+            );
+        }
+        scene.scene.medium = Some(Box::new(FixedTransmittance(1.0)));
+        for distance in [-1.0, 0.0, f64::NAN, f64::INFINITY] {
+            let hit = Hit { distance, ..hit };
+            assert_eq!(
+                tracer
+                    .trace(&scene, ray, Some(hit), &mut Sequence::new(&[]))
+                    .unwrap_err(),
+                "invalid photon segment distance"
+            );
+        }
     }
 
     #[test]
