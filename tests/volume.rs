@@ -659,37 +659,3 @@ fn volume_disk_matches_finite_distance_single_scattering_quadrature() {
     let expected = Rgb::default().disk_emission() * integral;
     assert!((mean - expected).norm() / expected.norm() < 0.025);
 }
-
-#[test]
-fn adding_fog_preserves_existing_xyz_and_spectral_photon_maps() {
-    use spectral_caustics::integrator::photon;
-    let mut c = Config::load("configs/vertical_prism_spectral_caustics.json").unwrap();
-    c.render.width = 12;
-    c.render.height = 8;
-    c.render.samples_per_pixel_axis = 2;
-    let mut job = c.build().unwrap();
-    let target = job.photon.caustics_object_id;
-    let ground = job.photon.ground_id.unwrap();
-    let xyz = photon::integrate_xyz(&job, target, ground, &c.render).unwrap();
-    let spectral = photon::integrate_spectral(&job, &c.render)
-        .unwrap()
-        .unwrap();
-    job.scene.medium = Some(slab(2.0, 4.0, 0.7));
-    job.camera_options.max_volume_scatters = 8;
-    let fog_xyz = photon::integrate_xyz(&job, target, ground, &c.render).unwrap();
-    let fog_spectral = photon::integrate_spectral(&job, &c.render)
-        .unwrap()
-        .unwrap();
-    assert_eq!(xyz.caustics.pixels(), fog_xyz.caustics.pixels());
-    assert_eq!(
-        xyz.direct.unwrap().pixels(),
-        fog_xyz.direct.unwrap().pixels()
-    );
-    assert_eq!(xyz.sun_irradiance_xyz, fog_xyz.sun_irradiance_xyz);
-    for i in 0..spectral.wavelength_samples().len() {
-        assert_eq!(
-            spectral.layer_irradiance(i),
-            fog_spectral.layer_irradiance(i)
-        );
-    }
-}

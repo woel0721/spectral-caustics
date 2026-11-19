@@ -18,7 +18,7 @@ use nalgebra::Vector3;
 use phase::HenyeyGreenstein;
 use rand::RngCore;
 
-/// Achromatic camera medium, shared by RGB and spectral paths and Rayon workers.
+/// Achromatic scene medium, shared by camera and photon paths and Rayon workers.
 /// Implementations return nonnegative finite local coefficients and a global
 /// extinction bound covering all positions. Ray distances are in metres.
 /// Camera transport uses only sample_segment, transmittance_ray and phase:
@@ -28,6 +28,7 @@ pub trait Medium: Send + Sync {
     fn coefficients_at(&self, position: Vector3<f64>) -> MediumCoefficients;
     fn sigma_t_majorant(&self) -> f64;
     fn phase(&self) -> HenyeyGreenstein;
+    /// Deterministic transmittance in [0, 1] from the ray origin up to max_distance.
     fn transmittance_ray(&self, ray: &Ray, max_distance: f64) -> f64;
 
     /// Return a position on the input ray within the clipped segment and a finite,

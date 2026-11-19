@@ -1,7 +1,10 @@
 use crate::caustics::map::ground_splat_weights;
 use crate::geometry::hit::Hit;
 // Shared forward emission and scalar irradiance kernel for XYZ and wavelength atlases.
-use super::PhotonTracer;
+use super::{
+    PhotonTracer,
+    path::{PhotonPathState, segment_transmittance},
+};
 use crate::{
     caustics::{SpectralCausticsMap, SpectralLighting},
     config::{RenderJob, render::RenderSetting},
@@ -17,7 +20,8 @@ use rayon::prelude::*;
 use std::ops::Range;
 type PhotonError = Box<dyn std::error::Error + Send + Sync>;
 struct EmissionBlock {
-    hits: Vec<(usize, Ray, Hit)>,
+    // Sample index, emission ray, first hit, and its wavelength-independent Tr.
+    hits: Vec<(usize, Ray, Hit, f64)>,
     direct: Option<Vec<f64>>,
 }
 struct PhotonPlan {
@@ -42,6 +46,7 @@ impl PhotonPlan {
         {
             return Err("invalid photon target or receiver".into());
         }
+        let target = target.filter(|&id| job.supports_ideal_caustics(id));
         job.scene.light.validate_emission()?;
         let area = job.photon.receiver.area();
         let span = job.photon.receiver.max_m - job.photon.receiver.min_m;
@@ -81,6 +86,7 @@ impl PhotonPlan {
             .light
             .spectral_normalization(&nodes)
             .ok_or("invalid source spectrum")?;
+        let medium = job.scene.medium.as_deref();
         let blocks: Result<Vec<_>, &'static str> = spectral_sample_blocks(
             nx,
             ny,
@@ -97,17 +103,20 @@ impl PhotonPlan {
             for_each_emitted_hit(job, nx, ny, rows, &mut rng, |index, ray, hit| {
                 if hit.object_id == ground {
                     if let Some(values) = &mut block.direct {
+                        let irradiance =
+                            weight * segment_transmittance(medium, &ray, hit.distance)?;
                         for (x, y, w) in ground_splat_weights(
                             hit.coords,
                             settings.width,
                             settings.height,
                             &job.photon.receiver,
                         )? {
-                            values[y * settings.width + x] += weight * w;
+                            values[y * settings.width + x] += irradiance * w;
                         }
                     }
                 } else if Some(hit.object_id) == target {
-                    block.hits.push((index, ray, hit));
+                    let tr = segment_transmittance(medium, &ray, hit.distance)?;
+                    block.hits.push((index, ray, hit, tr));
                 }
                 Ok(())
             })?;
@@ -154,10 +163,14 @@ fn geometry_layer(
             caustics: vec![0.0; count],
         };
         if let Some(tracer) = &tracer {
-            for &(index, ray, hit) in &source.hits {
+            for &(index, ray, hit, tr) in &source.hits {
                 let mut events = ChaCha12Rng::seed_from_u64(settings.seed);
                 events.set_stream((index as u64) ^ 0x7068_6f74_6f6e_0001);
-                let Some(landing) = tracer.trace(job, ray, Some(hit), &mut events)?.landing()
+                let mut state = PhotonPathState::new(ray);
+                state.flux_weight = tr;
+                let Some(landing) = tracer
+                    .trace_state(job, state, Some(hit), &mut events)?
+                    .landing()
                 else {
                     continue;
                 };

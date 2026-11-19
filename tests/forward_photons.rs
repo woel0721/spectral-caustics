@@ -2,9 +2,11 @@ use nalgebra::Vector3;
 use spectral_caustics::caustics::SpectralCausticsMap;
 use spectral_caustics::config::Config;
 use spectral_caustics::config::RenderJob;
-use spectral_caustics::config::render::RenderSetting;
+use spectral_caustics::config::render::{CameraMode, RenderSetting};
 use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 use spectral_caustics::film::Framebuffer;
+use spectral_caustics::integrator::photon::integrate_xyz;
+use spectral_caustics::medium::{GridMediumConfig, MediumConfig};
 use spectral_caustics::optics::dispersion::IorMode;
 use spectral_caustics::renderer::Renderer;
 use spectral_caustics::spectrum::cie_xyz;
@@ -44,6 +46,120 @@ fn map(scene: &RenderJob, settings: &RenderSetting, threads: usize) -> SpectralC
                 .unwrap()
                 .unwrap()
         })
+}
+
+fn two_layer_photon_scene() -> (Config, GridMediumConfig, f64) {
+    let c = config(include_str!("../configs/sphere.json"));
+    // Both layers are below the emitter and above the sphere and camera. Every
+    // landing crosses them once along the incident beam [0.45, 0, -1].
+    let grid = GridMediumConfig {
+        min_m: [-10.0, -10.0, 2.7],
+        max_m: [10.0, 10.0, 2.9],
+        resolution: [1, 1, 2],
+        densities: vec![1.0, 3.0],
+        sigma_a_base: 0.2,
+        sigma_s_base: 0.3,
+        g: 0.7,
+    };
+    let tr = (-0.5 * (0.1 + 0.3) * 1.0_f64.hypot(0.45)).exp();
+    (c, grid, tr)
+}
+
+fn assert_frame_attenuated(clear: &Framebuffer, fog: &Framebuffer, tr: f64) {
+    assert!(clear.pixels().iter().any(|p| p.y > 0.0));
+    for (clear, fog) in clear.pixels().iter().zip(fog.pixels()) {
+        assert!((clear * tr - fog).norm() <= 2e-12 * clear.norm());
+    }
+}
+
+#[test]
+fn photon_xyz_atlas_and_direct_preview_apply_the_same_analytic_extinction() {
+    let (mut c, grid, tr) = two_layer_photon_scene();
+    for mode in [IorMode::Constant, IorMode::Dispersion] {
+        c.render.mode = mode;
+        c.scene.medium = None;
+        let clear = c.build().unwrap();
+        let target = clear.photon.caustics_object_id;
+        let ground = clear.photon.ground_id.unwrap();
+        let xyz = |job| integrate_xyz(job, target, ground, &c.render).unwrap();
+        let clear_xyz = xyz(&clear);
+        let clear_atlas = map(&clear, &c.render, 1);
+        let mut vacuum = grid.clone();
+        vacuum.densities.fill(0.0);
+        c.scene.medium = Some(MediumConfig::Grid(vacuum));
+        let vacuum = c.build().unwrap();
+        let vacuum_xyz = xyz(&vacuum);
+        let vacuum_atlas = map(&vacuum, &c.render, 2);
+        same(&clear_xyz.caustics, &vacuum_xyz.caustics);
+        same(
+            clear_xyz.direct.as_ref().unwrap(),
+            vacuum_xyz.direct.as_ref().unwrap(),
+        );
+
+        c.scene.medium = Some(MediumConfig::Grid(grid.clone()));
+        let fog = c.build().unwrap();
+        let fog_xyz = xyz(&fog);
+        assert_frame_attenuated(&clear_xyz.caustics, &fog_xyz.caustics, tr);
+        assert_frame_attenuated(
+            clear_xyz.direct.as_ref().unwrap(),
+            fog_xyz.direct.as_ref().unwrap(),
+            tr,
+        );
+        assert_eq!(clear_xyz.sun_irradiance_xyz, fog_xyz.sun_irradiance_xyz);
+        let fog_atlas = map(&fog, &c.render, 4);
+        for (layer, _) in clear_atlas.wavelength_samples().iter().enumerate() {
+            let clear = clear_atlas.layer_irradiance(layer).unwrap();
+            let vacuum = vacuum_atlas.layer_irradiance(layer).unwrap();
+            let fog = fog_atlas.layer_irradiance(layer).unwrap();
+            // The source spectrum can have zero density at individual nodes.
+            for ((&a, &b), &e) in clear.iter().zip(vacuum).zip(fog) {
+                assert_eq!(a.to_bits(), b.to_bits());
+                assert!((a * tr - e).abs() <= 2e-12 * a);
+            }
+        }
+    }
+}
+
+#[test]
+fn attenuated_caustics_repeat_bitwise_in_rgb_hero_and_packet() {
+    let (mut c, grid, tr) = two_layer_photon_scene();
+    c.scene.max_volume_scatters = 0;
+    c.scene.max_diffuse_bounces = 0;
+    let clear = c.build().unwrap();
+    c.scene.medium = Some(MediumConfig::Grid(grid));
+    let fog = c.build().unwrap();
+    for (mode, packet) in [
+        (CameraMode::Rgb, 1),
+        (CameraMode::Spectral, 1),
+        (CameraMode::Spectral, 4),
+    ] {
+        c.render.camera_mode = mode;
+        c.render.spectral_packet_size = packet;
+        c.render.thread_count = Some(1);
+        let renderer = Renderer::new(c.render.clone()).unwrap();
+        let clear = renderer.render(&clear).unwrap();
+        let reference = renderer.render(&fog).unwrap();
+        assert_frame_attenuated(&clear.caustics, &reference.caustics, tr);
+        for ((d, a), combined) in reference
+            .direct
+            .pixels()
+            .iter()
+            .zip(reference.caustics.pixels())
+            .zip(reference.combined.pixels())
+        {
+            assert_eq!(d + a, *combined);
+        }
+        for threads in [2, 4] {
+            c.render.thread_count = Some(threads);
+            let actual = Renderer::new(c.render.clone())
+                .unwrap()
+                .render(&fog)
+                .unwrap();
+            same(&reference.direct, &actual.direct);
+            same(&reference.caustics, &actual.caustics);
+            same(&reference.combined, &actual.combined);
+        }
+    }
 }
 
 #[test]
