@@ -2,7 +2,9 @@ use nalgebra::{Vector2, Vector3};
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use spectral_caustics::{
     config::RenderJob,
-    geometry::{ground::Ground, ray::Ray, sphere::Sphere, vertical_prism::VerticalPrism},
+    geometry::{
+        ground::Ground, prism::Prism, ray::Ray, sphere::Sphere, vertical_prism::VerticalPrism,
+    },
     material::{Material, ScatterType, dielectric::Dielectric, mirror::Mirror},
     medium::{HomogeneousMedium, HomogeneousMediumConfig, Medium},
     optics::interface::{DielectricEvent, sample_dielectric},
@@ -108,6 +110,48 @@ fn sphere_classifies_launch_before_any_intersection_and_resolves_vacuum() {
         ),
         Ok(Interior(id))
     );
+}
+
+#[test]
+fn warped_prism_classifies_launch_against_the_hit_triangle() {
+    let prism = Prism::from_vertices([
+        Vector3::new(-0.5, -1.0, 1.0),
+        Vector3::new(0.5, -1.0, 1.0),
+        Vector3::new(0.0, -1.0, 1.8),
+        Vector3::new(-0.5, 1.0, 1.0),
+        Vector3::new(0.5, 1.0, 1.0 + 1e-9),
+        Vector3::new(0.0, 1.0, 1.8),
+    ])
+    .unwrap();
+    let mut scene = RenderJob::new().scene;
+    let id = scene.add(Box::new(prism), glass());
+    scene
+        .bind_medium_interface(id, MediumInterface { interior: None })
+        .unwrap();
+
+    // Probe each bottom triangle and their shared diagonal.
+    for (x, y, z) in [
+        (0.25, -0.5, 1.00000000025),
+        (-0.25, 0.5, 1.00000000025),
+        (0.0, 0.0, 1.0000000005),
+    ] {
+        let ray = Ray::new(Vector3::new(x, y, 0.0), Vector3::z()).unwrap();
+        let surface = scene.intersect(&ray).unwrap().coords;
+        assert!((surface.z - z).abs() < 1e-15);
+        assert!(scene.initial_medium_region(surface, None).is_err());
+        for side in [Interior(id), Exterior] {
+            assert_eq!(scene.initial_medium_region(surface, Some(side)), Ok(side));
+        }
+        let offset = Vector3::z() * 2e-10;
+        assert_eq!(
+            scene.initial_medium_region(surface + offset, None),
+            Ok(Interior(id))
+        );
+        assert_eq!(
+            scene.initial_medium_region(surface - offset, None),
+            Ok(Exterior)
+        );
+    }
 }
 
 #[test]

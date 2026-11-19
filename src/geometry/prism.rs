@@ -10,6 +10,8 @@ use nalgebra::Vector3;
 pub struct Prism {
     /// 三角形与缓存法线由 Triangle 管理，外部不能单独修改顶点。
     faces: Vec<Triangle>,
+    /// 构造时已验证位于每个有向面的内侧。
+    center: Vector3<f64>,
 }
 
 impl Prism {
@@ -75,20 +77,20 @@ impl Prism {
             }
         }
 
-        Some(Self { faces })
+        Some(Self { faces, center })
     }
 }
 
 impl ClosedVolume for Prism {
     fn classify_point(&self, point: Vector3<f64>) -> Result<PointLocation, &'static str> {
-        let mut location = PointLocation::Inside;
+        // 以内部中心和八个实际三角面组成四面体。构造容差允许侧面轻微折叠，
+        // 此时一个三角形的延伸平面可能切过同一侧面的另一半。
+        let mut location = PointLocation::Outside;
         for face in &self.faces {
-            let (distance, tolerance) = face.plane_distance(point)?;
-            if distance > tolerance {
-                return Ok(PointLocation::Outside);
-            }
-            if distance >= -tolerance {
-                location = PointLocation::OnBoundary;
+            match face.classify_tetrahedron(self.center, point)? {
+                PointLocation::OnBoundary => return Ok(PointLocation::OnBoundary),
+                PointLocation::Inside => location = PointLocation::Inside,
+                PointLocation::Outside => {}
             }
         }
         Ok(location)
