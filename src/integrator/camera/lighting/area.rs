@@ -1,5 +1,5 @@
 //! Disk NEE owns its RNG cursor; changing its quota cannot consume path or environment draws.
-use super::super::{offset_ray_origin, transport::CameraTransport};
+use super::super::{surface_ray_origin, transport::CameraTransport};
 use super::shadow_transmittance;
 use crate::{
     config::RenderJob,
@@ -68,7 +68,7 @@ fn transmittance_to_point(
     target: Vector3<f64>,
     medium: Option<&dyn Medium>,
 ) -> Result<f64, Box<dyn Error + Send + Sync>> {
-    let origin = offset_ray_origin(position, normal, 1.0);
+    let origin = surface_ray_origin(&job.scene, position, normal, 1.0);
     let delta = target - origin;
     let distance = delta.norm();
     let ray = Ray::new(origin, delta).ok_or("invalid shadow segment")?;

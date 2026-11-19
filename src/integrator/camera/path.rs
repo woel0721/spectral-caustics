@@ -3,7 +3,7 @@ use super::{
     lighting::area::AreaLightSampler,
     lighting::environment::environment_lighting,
     lighting::{transmittance_to_light, volume::volume_lighting},
-    offset_ray_origin,
+    surface_ray_origin,
     transport::{CameraTransport, Caustics},
     types::{CameraPathRngs, CameraPathState, ScatterRay},
 };
@@ -96,8 +96,8 @@ pub fn sample_scatter_ray<T: CameraTransport>(
         return Ok(None);
     }
     let side = if normal.dot(&wi) >= 0.0 { 1.0 } else { -1.0 };
-    let ray =
-        Ray::new(offset_ray_origin(hit.coords, normal, side), wi).ok_or("surface ray overflow")?;
+    let ray = Ray::new(surface_ray_origin(&job.scene, hit.coords, normal, side), wi)
+        .ok_or("surface ray overflow")?;
     Ok(Some(ScatterRay {
         ray,
         throughput: weight,

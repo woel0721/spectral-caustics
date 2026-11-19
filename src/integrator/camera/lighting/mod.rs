@@ -2,7 +2,7 @@ pub(crate) mod area;
 pub(crate) mod environment;
 pub(crate) mod volume;
 // Camera render boundary and binary shadow visibility.
-use super::offset_ray_origin;
+use super::surface_ray_origin;
 use crate::{config::RenderJob, geometry::ray::Ray, medium::Medium};
 use nalgebra::Vector3;
 use std::error::Error;
@@ -14,7 +14,7 @@ pub(in crate::integrator::camera) fn transmittance_to_light(
     wi: Vector3<f64>,
     medium: Option<&dyn Medium>,
 ) -> Result<f64, Box<dyn Error + Send + Sync>> {
-    let origin = offset_ray_origin(position, normal, 1.0);
+    let origin = surface_ray_origin(&scene.scene, position, normal, 1.0);
     let shadow_ray = Ray::new(origin, wi).ok_or("阴影光线起点或方向无效")?;
     Ok(shadow_transmittance(
         scene,

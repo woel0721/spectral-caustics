@@ -181,6 +181,8 @@ cargo test --locked --test volume
 
 Camera Path 首段用 `initial_medium_region` 对起点分类。位于几何边界或其浮点舍入范围内的起点，须通过低层 `CameraPathState.medium_region` 显式给出出发侧。每段用 `active_medium` 解析介质，表面和体积顶点的局部阴影查询使用同一区域的介质，玻璃仍按二值遮挡处理。接受界面事件后，`region_after_event` 用入射传播方向决定下一段区域。反射（含 TIR）和体散射保留当前侧，透射切换到另一侧。路径使用期间应保持场景物体索引稳定。区域只描述参与介质，IOR 和事件权重由光学接口负责。
 
+绑定介质边界的场景中，相机续追和表面阴影射线均从实际交点发出，避免法线偏移跨过近处的玻璃。几何求交仍排除距离不大于 1 µm 的命中。
+
 ## 非均匀密度网格
 
 运行时接口为 `Medium: Send + Sync` trait，`HomogeneousMedium` 与 `GridMedium` 各自实现它，`Scene.medium` 保存 `Option<Box<dyn Medium>>`。这与 `Material` 的接口和所有权方式一致，自定义介质可以直接 `Some(Box::new(medium))` 放入 Scene，无需修改内置类型列表。

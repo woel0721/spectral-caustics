@@ -19,17 +19,20 @@ pub use rgb::integrate_rgb;
 pub use spectral::integrate_spectral;
 pub use types::CameraLightingImages;
 
-/// 将表面点沿法线略微移动，避免相机续追和阴影光线立刻再次命中自身。
-///
-/// 输入：世界位置 position、单位几何法线 normal 和侧别 side（+1 外侧，-1 内侧）；不在此校验。
-///
-/// 输出：新起点 P′=P+side·10ε·normal，ε=1e-6 m；只返回坐标，不构造 Ray。
-fn offset_ray_origin(
+/// 有介质边界时从实际交点出发，由几何求交的 epsilon 排除自交。
+/// 这也保护普通表面发出的射线，法线偏移可能越过紧邻的玻璃。
+/// 其余场景沿单位法线移动 side·10ε，side 为 +1 或 -1。
+fn surface_ray_origin(
+    scene: &crate::scene::Scene,
     position: nalgebra::Vector3<f64>,
     normal: nalgebra::Vector3<f64>,
     side: f64,
 ) -> nalgebra::Vector3<f64> {
-    position + normal * (side * 10.0 * crate::geometry::ray::INTERSECTION_EPSILON)
+    if scene.has_medium_interface() {
+        position
+    } else {
+        position + normal * (side * 10.0 * crate::geometry::ray::INTERSECTION_EPSILON)
+    }
 }
 
 #[cfg(test)]

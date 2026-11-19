@@ -1,6 +1,6 @@
 //! Participating-medium sides of a single closed dielectric. Regions belong to one
 //! scene with stable object indices for the lifetime of a transport path.
-use super::Scene;
+use super::{Scene, SceneObject};
 use crate::{
     geometry::{hit::Hit, object::PointLocation},
     material::ScatterType,
@@ -21,12 +21,23 @@ pub enum MediumRegion {
 }
 
 impl Scene {
+    fn medium_boundary(&self) -> Option<(usize, &SceneObject)> {
+        self.objects
+            .iter()
+            .enumerate()
+            .find(|(_, object)| object.medium_interface.is_some())
+    }
+
+    pub(crate) fn has_medium_interface(&self) -> bool {
+        self.medium_boundary().is_some()
+    }
+
     pub fn bind_medium_interface(
         &mut self,
         object_id: usize,
         interface: MediumInterface,
     ) -> Result<(), &'static str> {
-        if self.objects.iter().any(|o| o.medium_interface.is_some()) {
+        if self.has_medium_interface() {
             return Err("only one medium interface is supported");
         }
         let object = self
@@ -74,12 +85,7 @@ impl Scene {
             return Err("non-finite launch point");
         }
         let mut region = MediumRegion::Exterior;
-        if let Some((id, object)) = self
-            .objects
-            .iter()
-            .enumerate()
-            .find(|(_, o)| o.medium_interface.is_some())
-        {
+        if let Some((id, object)) = self.medium_boundary() {
             let solid = object
                 .geometry
                 .closed_volume()
