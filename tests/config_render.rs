@@ -1261,6 +1261,7 @@ fn runtime_rejects_unsupported_counts_and_invalid_prism_geometry() {
     config = original.clone();
     config.objects[0] = ObjectConfig::Prism {
         caustics: true,
+        medium_interface: None,
         vertices_m: [[0.0; 3]; 6],
         material: MaterialConfig::Dielectric {
             ior: 1.5,

@@ -104,14 +104,15 @@ impl RenderJob {
         }
         let mut scene = Self::empty_from_config(config)?;
         let ground_bounds = config.ground_bounds()?;
-        for object in &config.objects {
-            match object {
+        for (index, object) in config.objects.iter().enumerate() {
+            let (id, caustics) = match object {
                 ObjectConfig::VerticalPrism {
                     cross_section_m,
                     z_min_m,
                     z_max_m,
                     material,
                     caustics,
+                    ..
                 } => {
                     let prism =
                         VerticalPrism::new(cross_section_m.map(Vector2::from), *z_min_m, *z_max_m)
@@ -119,23 +120,20 @@ impl RenderJob {
                     let id = scene
                         .scene
                         .add(Box::new(prism), material::from_config(material)?);
-                    if *caustics {
-                        scene.select_caustics_object(id)?;
-                    }
+                    (id, *caustics)
                 }
                 ObjectConfig::Prism {
                     vertices_m,
                     material,
                     caustics,
+                    ..
                 } => {
                     let prism = Prism::from_vertices(vertices_m.map(Vector3::from))
                         .ok_or("三棱镜顶点无效：需要按示例顺序描述非退化、朝外法线的凸三棱镜")?;
                     let id = scene
                         .scene
                         .add(Box::new(prism), material::from_config(material)?);
-                    if *caustics {
-                        scene.select_caustics_object(id)?;
-                    }
+                    (id, *caustics)
                 }
                 ObjectConfig::Ground { height_m, material } => {
                     if scene.photon.ground_id.is_some() {
@@ -148,34 +146,33 @@ impl RenderJob {
                     {
                         return Err("光源发射面必须高于接收地面".into());
                     }
-                    scene.photon.ground_id = Some(
-                        scene.scene.add(
-                            Box::new(
-                                Ground::with_bounds(
-                                    *height_m,
-                                    Vector2::from(ground_bounds.min_m),
-                                    Vector2::from(ground_bounds.max_m),
-                                )
-                                .ok_or("地面高度或范围无效")?,
-                            ),
-                            material::from_config(material)?,
+                    let id = scene.scene.add(
+                        Box::new(
+                            Ground::with_bounds(
+                                *height_m,
+                                Vector2::from(ground_bounds.min_m),
+                                Vector2::from(ground_bounds.max_m),
+                            )
+                            .ok_or("地面高度或范围无效")?,
                         ),
+                        material::from_config(material)?,
                     );
+                    scene.photon.ground_id = Some(id);
+                    (id, false)
                 }
                 ObjectConfig::Sphere {
                     center_m,
                     radius_m,
                     material,
                     caustics,
+                    ..
                 } => {
                     let sphere = Sphere::new(Vector3::from(*center_m), *radius_m)
                         .ok_or("球体的球心或半径无效")?;
                     let id = scene
                         .scene
                         .add(Box::new(sphere), material::from_config(material)?);
-                    if *caustics {
-                        scene.select_caustics_object(id)?;
-                    }
+                    (id, *caustics)
                 }
                 ObjectConfig::BeveledPrism {
                     cross_section_m,
@@ -191,10 +188,24 @@ impl RenderJob {
                         *bevel_size_m,
                     )
                     .ok_or("倒角三棱镜截面、y 范围或倒角长度无效")?;
-                    scene
+                    let id = scene
                         .scene
                         .add(Box::new(prism), material::from_config(material)?);
+                    (id, false)
                 }
+            };
+            if let Some((interface, _)) = object.medium_interface() {
+                let field = format!("scene.objects[{index}].medium_interface");
+                let interface = interface
+                    .build()
+                    .map_err(|error| format!("{field}.interior {error}"))?;
+                scene
+                    .scene
+                    .bind_medium_interface(id, interface)
+                    .map_err(|error| format!("{field} {error}"))?;
+            }
+            if caustics {
+                scene.select_caustics_object(id)?;
             }
         }
         if scene.photon.ground_id.is_none() {

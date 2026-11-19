@@ -162,6 +162,7 @@ mod tests {
         expected.scene.objects = vec![
             ObjectConfig::Sphere {
                 caustics: false,
+                medium_interface: None,
                 center_m: [-1.55, 0.0, 0.68],
                 radius_m: 0.65,
                 material: MaterialConfig::Dielectric {
@@ -171,6 +172,7 @@ mod tests {
             },
             ObjectConfig::Sphere {
                 caustics: false,
+                medium_interface: None,
                 center_m: [0.0, 0.0, 0.68],
                 radius_m: 0.65,
                 material: MaterialConfig::Mirror {
@@ -179,6 +181,7 @@ mod tests {
             },
             ObjectConfig::Sphere {
                 caustics: false,
+                medium_interface: None,
                 center_m: [1.55, 0.0, 0.68],
                 radius_m: 0.65,
                 material: MaterialConfig::GgxMetal {
@@ -1025,6 +1028,7 @@ mod tests {
         assert!(config.to_json().is_err());
         config.scene.objects[0] = ObjectConfig::Prism {
             caustics: true,
+            medium_interface: None,
             vertices_m: [[f64::INFINITY; 3]; 6],
             material: Default::default(),
         };

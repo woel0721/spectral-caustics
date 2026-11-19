@@ -44,6 +44,7 @@ cargo run --release --locked -- configs/grid_fog.json
 | 玻璃球聚光 | [configs/sphere_forward_preview.json](configs/sphere_forward_preview.json) |
 | 棱镜色散与地面焦散 | [configs/vertical_prism_forward_preview.json](configs/vertical_prism_forward_preview.json) |
 | 比较均匀雾与网格雾 | [configs/homogeneous_fog.json](configs/homogeneous_fog.json) · [configs/grid_fog.json](configs/grid_fog.json) |
+| 在雾中渲染内部真空的玻璃球 | [configs/sphere_medium_interface.json](configs/sphere_medium_interface.json) |
 
 **第一次改配置**可以复制一份 `grid_fog.json`，把 `scene.max_volume_scatters` 从 `8` 改为 `0`，再将 `render.output_path` 改到另一个目录。用同一条命令运行新文件，即可对照只保留消光和允许多次散射的结果。配置中的相对路径从启动目录解析，请在仓库根目录运行。
 
@@ -71,12 +72,13 @@ Renderer 调度光子和相机两部分。相机在符合条件的地面交点�
 | 从 JSON 到成图的执行流程、Rust API 与模块职责 | [代码入口与调用示例](docs/rendering_guide.md#从入口阅读代码) · [架构说明](.agents/architecture.md) |
 | 相机与光子的权重、MIS、波长积分 | [传输约定](docs/rendering_guide.md#传输约定) |
 | 如何配置雾、比较散射阶数，以及网格内如何采样 | [均匀介质与多次体散射](docs/rendering_guide.md#均匀介质与多次体散射) · [非均匀密度网格](docs/rendering_guide.md#非均匀密度网格) |
+| 如何给玻璃设置内部真空、均匀介质或网格介质 | [玻璃介质界面](docs/rendering_guide.md#玻璃介质界面) |
 | 分块上界在均匀、稀疏和尖峰密度场中的耗时与内存 | [局部 Majorant 基准与测量条件](docs/medium_majorant_benchmark.md) |
 | 配置默认值、路径诊断和可运行的实验 | [配置与 Diagnostics](docs/rendering_guide.md#配置与-diagnostics) · [示例与验证](docs/rendering_guide.md#示例与验证) |
 
 ## 当前限制
 
 - **焦散**仅支持单个玻璃球或棱镜在有限地面接收区内形成的焦散。环境光不生成焦散，玻璃对阴影射线仍按完全遮挡处理。
-- **体渲染**限于一个轴对齐盒内的无色介质。相机路径按预算采样体散射，照明阴影和 Forward 光子按实际路径段计算消光。焦散图记录未发生体散射的光子通量。
+- **体渲染**使用轴对齐盒内的无色介质。一个场景可给一个封闭玻璃指定独立内部介质。相机路径按预算采样体散射，照明阴影和 Forward 光子按实际路径段计算消光。焦散图记录未发生体散射的光子通量。
 - **材质与几何**方面，GGX 粗糙金属仅支持 RGB 相机。玻璃界面使用空气与玻璃两侧的折射率，暂不支持嵌套介质。
 - **运行方式**为 CPU 离线渲染，路径深度有限。完整支持范围见[当前实现与开发边界](ROADMAP.md)。
