@@ -11,6 +11,7 @@ use crate::{
     film::Framebuffer,
     geometry::ray::Ray,
     optics::dispersion::IorMode,
+    scene::MediumRegion,
     spectrum::{cie_xyz, d65_spd},
 };
 use nalgebra::Vector3;
@@ -19,9 +20,16 @@ use rand_chacha::ChaCha12Rng;
 use rayon::prelude::*;
 use std::ops::Range;
 type PhotonError = Box<dyn std::error::Error + Send + Sync>;
+// Wavelength-independent data for a photon that hit the caustics target.
+struct EmissionHit {
+    index: usize,
+    ray: Ray,
+    hit: Hit,
+    region: MediumRegion,
+    tr: f64,
+}
 struct EmissionBlock {
-    // Sample index, emission ray, first hit, and its wavelength-independent Tr.
-    hits: Vec<(usize, Ray, Hit, f64)>,
+    hits: Vec<EmissionHit>,
     direct: Option<Vec<f64>>,
 }
 struct PhotonPlan {
@@ -86,7 +94,6 @@ impl PhotonPlan {
             .light
             .spectral_normalization(&nodes)
             .ok_or("invalid source spectrum")?;
-        let medium = job.scene.medium.as_deref();
         let blocks: Result<Vec<_>, &'static str> = spectral_sample_blocks(
             nx,
             ny,
@@ -100,11 +107,11 @@ impl PhotonPlan {
                 hits: Vec::new(),
                 direct: direct.then(|| vec![0.0; pixels]),
             };
-            for_each_emitted_hit(job, nx, ny, rows, &mut rng, |index, ray, hit| {
+            for_each_emitted_hit(job, nx, ny, rows, &mut rng, |index, ray, hit, region| {
                 if hit.object_id == ground {
                     if let Some(values) = &mut block.direct {
                         let irradiance =
-                            weight * segment_transmittance(medium, &ray, hit.distance)?;
+                            weight * segment_transmittance(&job.scene, region, &ray, hit.distance)?;
                         for (x, y, w) in ground_splat_weights(
                             hit.coords,
                             settings.width,
@@ -115,8 +122,14 @@ impl PhotonPlan {
                         }
                     }
                 } else if Some(hit.object_id) == target {
-                    let tr = segment_transmittance(medium, &ray, hit.distance)?;
-                    block.hits.push((index, ray, hit, tr));
+                    let tr = segment_transmittance(&job.scene, region, &ray, hit.distance)?;
+                    block.hits.push(EmissionHit {
+                        index,
+                        ray,
+                        hit,
+                        region,
+                        tr,
+                    });
                 }
                 Ok(())
             })?;
@@ -163,11 +176,17 @@ fn geometry_layer(
             caustics: vec![0.0; count],
         };
         if let Some(tracer) = &tracer {
-            for &(index, ray, hit, tr) in &source.hits {
+            for &EmissionHit {
+                index,
+                ray,
+                hit,
+                region,
+                tr,
+            } in &source.hits
+            {
                 let mut events = ChaCha12Rng::seed_from_u64(settings.seed);
                 events.set_stream((index as u64) ^ 0x7068_6f74_6f6e_0001);
-                let mut state = PhotonPathState::new(ray);
-                state.flux_weight = tr;
+                let state = PhotonPathState::new(ray, region, tracer.object_id, tr);
                 let Some(landing) = tracer
                     .trace_state(job, state, Some(hit), &mut events)?
                     .landing()
@@ -404,7 +423,7 @@ fn for_each_emitted_hit(
     samples_y: usize,
     rows: Range<usize>,
     rng: &mut ChaCha12Rng,
-    mut visit: impl FnMut(usize, Ray, crate::geometry::hit::Hit) -> Result<(), &'static str>,
+    mut visit: impl FnMut(usize, Ray, Hit, MediumRegion) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
     let area = scene.scene.light.as_disk().is_some();
     for sample_y in rows {
@@ -423,8 +442,9 @@ fn for_each_emitted_hit(
                 .light
                 .emission_ray(u, v)
                 .ok_or("光源发射采样失败")?;
+            let region = scene.scene.initial_medium_region(ray.origin, None)?;
             if let Some(hit) = scene.scene.intersect(&ray) {
-                visit(sample_y * samples_x + sample_x, ray, hit)?;
+                visit(sample_y * samples_x + sample_x, ray, hit, region)?;
             }
         }
     }

@@ -1,14 +1,19 @@
-use nalgebra::Vector3;
+use nalgebra::{Vector2, Vector3};
 use spectral_caustics::caustics::SpectralCausticsMap;
 use spectral_caustics::config::Config;
 use spectral_caustics::config::RenderJob;
 use spectral_caustics::config::render::{CameraMode, RenderSetting};
 use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 use spectral_caustics::film::Framebuffer;
+use spectral_caustics::geometry::{ground::Ground, vertical_prism::VerticalPrism};
 use spectral_caustics::integrator::photon::integrate_xyz;
-use spectral_caustics::medium::{GridMediumConfig, MediumConfig};
-use spectral_caustics::optics::dispersion::IorMode;
+use spectral_caustics::material::{dielectric::Dielectric, lambertian::Lambertian};
+use spectral_caustics::medium::{
+    GridMediumConfig, HomogeneousMedium, HomogeneousMediumConfig, Medium, MediumConfig,
+};
+use spectral_caustics::optics::dispersion::{Cauchy, IorMode};
 use spectral_caustics::renderer::Renderer;
+use spectral_caustics::scene::MediumInterface;
 use spectral_caustics::spectrum::cie_xyz;
 use spectral_caustics::spectrum::d65_normalization;
 use spectral_caustics::spectrum::d65_spd;
@@ -65,10 +70,10 @@ fn two_layer_photon_scene() -> (Config, GridMediumConfig, f64) {
     (c, grid, tr)
 }
 
-fn assert_frame_attenuated(clear: &Framebuffer, fog: &Framebuffer, tr: f64) {
+fn assert_frame_attenuated(clear: &Framebuffer, fog: &Framebuffer, tr: f64, tolerance: f64) {
     assert!(clear.pixels().iter().any(|p| p.y > 0.0));
     for (clear, fog) in clear.pixels().iter().zip(fog.pixels()) {
-        assert!((clear * tr - fog).norm() <= 2e-12 * clear.norm());
+        assert!((clear * tr - fog).norm() <= tolerance * clear.norm());
     }
 }
 
@@ -99,11 +104,12 @@ fn photon_xyz_atlas_and_direct_preview_apply_the_same_analytic_extinction() {
         c.scene.medium = Some(MediumConfig::Grid(grid.clone()));
         let fog = c.build().unwrap();
         let fog_xyz = xyz(&fog);
-        assert_frame_attenuated(&clear_xyz.caustics, &fog_xyz.caustics, tr);
+        assert_frame_attenuated(&clear_xyz.caustics, &fog_xyz.caustics, tr, 2e-12);
         assert_frame_attenuated(
             clear_xyz.direct.as_ref().unwrap(),
             fog_xyz.direct.as_ref().unwrap(),
             tr,
+            2e-12,
         );
         assert_eq!(clear_xyz.sun_irradiance_xyz, fog_xyz.sun_irradiance_xyz);
         let fog_atlas = map(&fog, &c.render, 4);
@@ -118,6 +124,150 @@ fn photon_xyz_atlas_and_direct_preview_apply_the_same_analytic_extinction() {
             }
         }
     }
+}
+
+#[test]
+fn bound_five_micron_plate_attenuates_xyz_atlas_and_direct_from_each_launch_side() {
+    let bottom = 1.0;
+    let top = bottom + 5e-6;
+    let sigma_exterior = 0.2;
+    let sigma_interior = 140_000.0;
+    let absorption = |sigma_a| -> Box<dyn Medium> {
+        Box::new(
+            HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+                min_m: [-10.0; 3],
+                max_m: [10.0; 3],
+                sigma_a,
+                sigma_s: 0.0,
+                g: 0.0,
+            })
+            .unwrap(),
+        )
+    };
+    let build = |height_m, ground_height, absorbing: bool| {
+        let mut job = RenderJob::new();
+        let light = job.scene.light.as_parallel_mut().unwrap();
+        light.direction = -Vector3::z();
+        light.height_m = height_m;
+        let glass = Dielectric::with_dispersion(1.5, Some(Cauchy::default())).unwrap();
+        let plate = VerticalPrism::new(
+            [
+                Vector2::new(-1.0, -1.0),
+                Vector2::new(1.0, -1.0),
+                Vector2::new(0.0, 1.0),
+            ],
+            bottom,
+            top,
+        )
+        .unwrap();
+        let target = job.scene.add(Box::new(plate), Box::new(glass));
+        let ground = job.scene.add(
+            Box::new(Ground::new(ground_height).unwrap()),
+            Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()),
+        );
+        job.photon.ground_id = Some(ground);
+        job.select_caustics_object(target).unwrap();
+        job.scene
+            .bind_medium_interface(
+                target,
+                MediumInterface {
+                    interior: absorbing.then(|| absorption(sigma_interior)),
+                },
+            )
+            .unwrap();
+        job.scene.medium = absorbing.then(|| absorption(sigma_exterior));
+        job
+    };
+
+    for (height, max_events) in [(2.0, 2), ((bottom + top) / 2.0, 1)] {
+        let clear = build(height, 0.0, false);
+        let absorbing = build(height, 0.0, true);
+        // At normal incidence and this event budget, photons landing through the
+        // glass make one pass. Rays missing the plate go straight to the ground.
+        let glass_length = height.min(top) - bottom;
+        let caustics_tr =
+            (-sigma_exterior * (height - glass_length) - sigma_interior * glass_length).exp();
+        let direct_tr = (-sigma_exterior * height).exp();
+        // World-space hit rounding at metre scale is amplified by the large sigma.
+        let tolerance = 1e-10;
+        for mode in [IorMode::Constant, IorMode::Dispersion] {
+            let settings = RenderSetting {
+                width: 16,
+                height: 12,
+                samples_per_pixel_axis: 2,
+                wavelength_step_nm: 100.0,
+                photon_max_events: max_events,
+                mode,
+                ..RenderSetting::default()
+            };
+            let xyz = |job: &RenderJob| {
+                integrate_xyz(
+                    job,
+                    job.photon.caustics_object_id,
+                    job.photon.ground_id.unwrap(),
+                    &settings,
+                )
+                .unwrap()
+            };
+            let clear_xyz = xyz(&clear);
+            let step_xyz = xyz(&absorbing);
+            assert_frame_attenuated(
+                &clear_xyz.caustics,
+                &step_xyz.caustics,
+                caustics_tr,
+                tolerance,
+            );
+            assert_frame_attenuated(
+                clear_xyz.direct.as_ref().unwrap(),
+                step_xyz.direct.as_ref().unwrap(),
+                direct_tr,
+                tolerance,
+            );
+
+            let clear_map = map(&clear, &settings, 1);
+            let step_map = map(&absorbing, &settings, 1);
+            let parallel_map = map(&absorbing, &settings, 4);
+            let mut reweighted = vec![Vector3::zeros(); step_xyz.caustics.pixels().len()];
+            for (i, &(nm, width)) in step_map.wavelength_samples().iter().enumerate() {
+                let clear = clear_map.layer_irradiance(i).unwrap();
+                let step = step_map.layer_irradiance(i).unwrap();
+                let parallel = parallel_map.layer_irradiance(i).unwrap();
+                for (((&clear, &step), &parallel), xyz) in
+                    clear.iter().zip(step).zip(parallel).zip(&mut reweighted)
+                {
+                    assert!((step - clear * caustics_tr).abs() <= tolerance * clear);
+                    assert_eq!(step.to_bits(), parallel.to_bits());
+                    *xyz += cie_xyz(nm).unwrap() * (step * width);
+                }
+            }
+            for (integrated, expected) in reweighted.iter().zip(step_xyz.caustics.pixels()) {
+                assert!((integrated - expected).norm() <= 2e-12 * expected.norm());
+            }
+        }
+    }
+
+    // The source and receiver share the interior of a glass plate used only
+    // as a medium boundary. The direct path reaches the receiver before a cap.
+    let height = bottom + 4e-6;
+    let ground_height = bottom + 1e-6;
+    let settings = RenderSetting {
+        width: 4,
+        height: 4,
+        samples_per_pixel_axis: 1,
+        ..RenderSetting::default()
+    };
+    let direct = |absorbing| {
+        let mut job = build(height, ground_height, absorbing);
+        let light = job.scene.light.as_parallel_mut().unwrap();
+        light.aperture_min_m = Vector2::repeat(-0.1);
+        light.aperture_max_m = Vector2::repeat(0.1);
+        integrate_xyz(&job, None, job.photon.ground_id.unwrap(), &settings)
+            .unwrap()
+            .direct
+            .unwrap()
+    };
+    let interior_tr = (-sigma_interior * (height - ground_height)).exp();
+    assert_frame_attenuated(&direct(false), &direct(true), interior_tr, 1e-10);
 }
 
 #[test]
@@ -139,7 +289,7 @@ fn attenuated_caustics_repeat_bitwise_in_rgb_hero_and_packet() {
         let renderer = Renderer::new(c.render.clone()).unwrap();
         let clear = renderer.render(&clear).unwrap();
         let reference = renderer.render(&fog).unwrap();
-        assert_frame_attenuated(&clear.caustics, &reference.caustics, tr);
+        assert_frame_attenuated(&clear.caustics, &reference.caustics, tr, 2e-12);
         for ((d, a), combined) in reference
             .direct
             .pixels()
