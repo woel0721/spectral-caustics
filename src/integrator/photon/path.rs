@@ -4,16 +4,17 @@ use super::PhotonLanding;
 use crate::config::RenderJob;
 use crate::geometry::hit::Hit;
 use crate::geometry::ray::Ray;
-use crate::medium::Medium;
+use crate::scene::{MediumRegion, Scene};
 use nalgebra::Vector3;
 use rand::RngCore;
 
 pub(super) fn segment_transmittance(
-    medium: Option<&dyn Medium>,
+    scene: &Scene,
+    region: MediumRegion,
     ray: &Ray,
     distance: f64,
 ) -> Result<f64, &'static str> {
-    let Some(medium) = medium else {
+    let Some(medium) = scene.active_medium(region)? else {
         return Ok(1.0);
     };
     if !distance.is_finite() || distance <= 0.0 {
@@ -40,6 +41,8 @@ pub struct PhotonPathState {
     pub ray: Ray,
     /// 界面的折射率一侧，用于决定 IOR 与法线方向。
     pub medium: PhotonMedium,
+    /// 当前射线所在的参与介质区域。
+    pub medium_region: MediumRegion,
     /// 相对于发射光谱通量 Φλ 的无量纲系数，包含已追踪段的 Tr 与界面通量权重。
     pub flux_weight: f64,
     /// 已发生的反射/透射总次数，用于事件上限截断。
@@ -53,12 +56,17 @@ pub struct PhotonPathState {
 }
 
 impl PhotonPathState {
-    /// 从输入 Ray 初始化空气中的光子状态，通量比例为 1，事件/反射/透射计数均为 0，供 Forward 开始追踪。
-    pub(super) fn new(ray: Ray) -> Self {
+    /// 从已分类的起射点和发射段 Tr 初始化光子状态。
+    pub(super) fn new(ray: Ray, region: MediumRegion, target: usize, tr: f64) -> Self {
         Self {
             ray,
-            medium: PhotonMedium::Air,
-            flux_weight: 1.0,
+            medium: if region == MediumRegion::Interior(target) {
+                PhotonMedium::Glass
+            } else {
+                PhotonMedium::Air
+            },
+            medium_region: region,
+            flux_weight: tr,
             event_count: 0,
             #[cfg(any(feature = "diagnostics", test))]
             reflections: 0,
@@ -136,7 +144,7 @@ impl PhotonTracer {
         })
     }
 
-    /// 从空气发射单条光子路径，先计算到最近命中的透射率。
+    /// 对单条光子的起射点分类，再计算到最近命中的透射率。
     pub fn trace(
         &self,
         scene: &RenderJob,
@@ -144,11 +152,12 @@ impl PhotonTracer {
         first_hit: Option<Hit>,
         rng: &mut dyn RngCore,
     ) -> Result<PhotonPathResult, &'static str> {
-        let mut state = PhotonPathState::new(ray);
-        if let Some(first) = first_hit {
-            state.flux_weight =
-                segment_transmittance(scene.scene.medium.as_deref(), &ray, first.distance)?;
-        }
+        let region = scene.scene.initial_medium_region(ray.origin, None)?;
+        let tr = match first_hit {
+            Some(first) => segment_transmittance(&scene.scene, region, &ray, first.distance)?,
+            None => 1.0,
+        };
+        let state = PhotonPathState::new(ray, region, self.object_id, tr);
         self.trace_state(scene, state, first_hit, rng)
     }
 
@@ -160,7 +169,6 @@ impl PhotonTracer {
         mut hit: Option<Hit>,
         rng: &mut dyn RngCore,
     ) -> Result<PhotonPathResult, &'static str> {
-        let medium = scene.scene.medium.as_deref();
         let termination = loop {
             let Some(current) = hit else {
                 break PhotonTermination::Escaped;
@@ -175,10 +183,15 @@ impl PhotonTracer {
             if state.event_count == self.max_events {
                 break PhotonTermination::EventLimit;
             }
-            self.scatter(&mut state, current, rng)?;
+            self.scatter(&scene.scene, &mut state, current, rng)?;
             hit = scene.scene.intersect(&state.ray);
             if let Some(next) = hit {
-                state.flux_weight *= segment_transmittance(medium, &state.ray, next.distance)?;
+                state.flux_weight *= segment_transmittance(
+                    &scene.scene,
+                    state.medium_region,
+                    &state.ray,
+                    next.distance,
+                )?;
             }
         };
         Ok(PhotonPathResult { state, termination })
@@ -193,6 +206,7 @@ impl PhotonTracer {
     /// 全反射与 F=0 的确定事件不抽 RNG；从真实交点续追，由几何 ε 排除自交，避免法线偏移跨过尖棱。
     fn scatter(
         &self,
+        scene: &Scene,
         state: &mut PhotonPathState,
         hit: Hit,
         rng: &mut dyn RngCore,
@@ -202,7 +216,7 @@ impl PhotonTracer {
             PhotonMedium::Glass => (-hit.normal, self.glass_ior, 1.0, PhotonMedium::Air),
         };
         let cos_i = -state.ray.direction.dot(&normal);
-        // 背面/切线与显式介质不匹配时不能偷偷翻转介质（例如从内部发射）。
+        // 背面或切线命中与当前折射率侧别不一致。
         if !cos_i.is_finite() || cos_i <= 0.0 {
             return Err("光子方向与当前介质/界面法线不一致");
         }
@@ -215,9 +229,16 @@ impl PhotonTracer {
         )
         .ok_or("invalid photon interface")?;
         let reflected = interface.event == crate::optics::interface::DielectricEvent::Reflection;
+        let region = scene.region_after_event(
+            state.medium_region,
+            &hit,
+            state.ray.direction,
+            interface.event,
+        )?;
         state.flux_weight *= interface.flux_weight();
         // Starting at the real hit avoids crossing the adjacent face at a prism corner.
         state.ray = Ray::new(hit.coords, interface.direction).ok_or("invalid photon ray")?;
+        state.medium_region = region;
         state.event_count += 1;
         if reflected {
             #[cfg(any(feature = "diagnostics", test))]
@@ -243,9 +264,12 @@ mod tests {
     use crate::geometry::object::Hittable;
     use crate::geometry::sphere::Sphere;
     use crate::material::dielectric::Dielectric;
-    use crate::medium::{GridMedium, GridMediumConfig, HomogeneousMedium, HomogeneousMediumConfig};
+    use crate::medium::{
+        GridMedium, GridMediumConfig, HomogeneousMedium, HomogeneousMediumConfig, Medium,
+    };
     use crate::optics::dispersion::IorMode;
     use crate::optics::interface::{fresnel_dielectric, refract};
+    use crate::scene::MediumInterface;
     use rand::SeedableRng;
     use rand_chacha::ChaCha12Rng;
 
@@ -489,9 +513,9 @@ mod tests {
                 Vector3::new(angle.sin(), 0.0, -angle.cos()),
             )
             .unwrap();
-            let mut state = PhotonPathState::new(ray);
+            let mut state =
+                PhotonPathState::new(ray, MediumRegion::Exterior, tracer.object_id, 2.5);
             state.medium = PhotonMedium::Glass;
-            state.flux_weight = 2.5;
             let mut rng = Sequence::new(&[]);
             let result = tracer
                 .trace_state(&scene, state, scene.scene.intersect(&ray), &mut rng)
@@ -555,9 +579,14 @@ mod tests {
         let ray = Ray::new(point + reverse, -reverse).unwrap();
         let entry = scene.scene.intersect(&ray).unwrap();
         assert!((entry.coords - point).norm() < 1e-12);
-        let mut state = PhotonPathState::new(ray);
+        let mut state = PhotonPathState::new(ray, MediumRegion::Exterior, object_id, 1.0);
         tracer
-            .scatter(&mut state, entry, &mut Sequence::new(&[u64::MAX]))
+            .scatter(
+                &scene.scene,
+                &mut state,
+                entry,
+                &mut Sequence::new(&[u64::MAX]),
+            )
             .unwrap();
         assert_eq!(state.medium, PhotonMedium::Glass);
         let exit = scene.scene.intersect(&state.ray).unwrap();
@@ -680,6 +709,87 @@ mod tests {
         .unwrap();
         assert_eq!(result.termination, PhotonTermination::Blocked);
         assert!(result.landing().is_none());
+    }
+
+    #[test]
+    fn bound_sphere_uses_launch_region_and_preserves_it_on_external_reflection() {
+        use crate::integrator::photon::trace_photon;
+        use crate::material::lambertian::Lambertian;
+
+        let mut job = RenderJob::new();
+        let target = job.scene.add(
+            Box::new(Sphere::new(Vector3::z() * 2.0, 1.0).unwrap()),
+            Box::new(Dielectric::new(1.5).unwrap()),
+        );
+        let ground = job.scene.add(
+            Box::new(Ground::new(0.0).unwrap()),
+            Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()),
+        );
+        job.photon.ground_id = Some(ground);
+        job.select_caustics_object(target).unwrap();
+        let absorption = |sigma_a| {
+            Box::new(
+                HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+                    min_m: [-10.0; 3],
+                    max_m: [10.0; 3],
+                    sigma_a,
+                    sigma_s: 0.0,
+                    g: 0.0,
+                })
+                .unwrap(),
+            )
+        };
+        job.scene.medium = Some(absorption(0.2));
+        job.scene
+            .bind_medium_interface(
+                target,
+                MediumInterface {
+                    interior: Some(absorption(0.7)),
+                },
+            )
+            .unwrap();
+
+        let trace = |ray, draws: &[u64]| {
+            trace_photon(
+                &job,
+                ray,
+                None,
+                IorMode::Constant,
+                2,
+                &mut Sequence::new(draws),
+            )
+        };
+        for (height, dz, draws, events, optical_depth) in [
+            (4.0, -1.0, [u64::MAX; 2], (2, 0), 1.8_f64),
+            (2.0, -1.0, [u64::MAX; 2], (1, 0), 0.9),
+            (2.0, 1.0, [0, u64::MAX], (1, 1), 2.3),
+        ] {
+            let ray = Ray::new(Vector3::z() * height, Vector3::z() * dz).unwrap();
+            let result = trace(ray, &draws).unwrap();
+            assert_eq!(
+                (result.state.transmissions, result.state.reflections),
+                events
+            );
+            assert_eq!(result.state.medium, PhotonMedium::Air);
+            assert_eq!(result.state.medium_region, MediumRegion::Exterior);
+            assert!((result.landing().unwrap().weight - (-optical_depth).exp()).abs() < 1e-14);
+        }
+
+        // The normal at this front-face hit is (0.8, 0, -0.6). Its reflection
+        // travels down to the ground with a vertical component of -0.96.
+        let ray = Ray::new(Vector3::new(2.0, 0.0, 1.4), -Vector3::x()).unwrap();
+        let result = trace(ray, &[0]).unwrap();
+        assert_eq!(result.state.reflections, 1);
+        assert_eq!(result.state.medium, PhotonMedium::Air);
+        assert_eq!(result.state.medium_region, MediumRegion::Exterior);
+        let expected = (-0.2_f64 * (1.2 + 1.4 / 0.96)).exp();
+        assert!((result.landing().unwrap().weight - expected).abs() < 1e-14);
+
+        let boundary = Ray::new(Vector3::z(), -Vector3::z()).unwrap();
+        assert_eq!(
+            trace(boundary, &[]).unwrap_err(),
+            "boundary launch requires a departure side"
+        );
     }
 
     #[test]

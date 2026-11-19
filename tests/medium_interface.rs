@@ -15,6 +15,7 @@ use spectral_caustics::{
         transport::{CameraTransport, Caustics},
         types::{CameraPathRngs, CameraPathState},
     },
+    integrator::photon::{PhotonMedium, PhotonTermination, trace_photon},
     light::{DiskAreaLight, Light},
     material::{
         Material, ScatterType, dielectric::Dielectric, lambertian::Lambertian, mirror::Mirror,
@@ -194,6 +195,47 @@ fn camera_thin_plate_finds_both_faces_and_attenuates_only_inside() {
     // Both interfaces transmit with seed 1, so their radiance eta factors cancel.
     let expected = (-0.7_f64 * thickness).exp();
     assert!((state.radiance.direct - Vector3::repeat(expected)).norm() < 1e-14);
+}
+
+#[test]
+fn photon_tir_inside_five_micron_plate_attenuates_both_segments_without_rng() {
+    let thickness = 5e-6;
+    let mut job = RenderJob::new();
+    let target = job.scene.add(slab(1.0 + thickness), glass());
+    job.photon.ground_id = Some(job.scene.add(
+        Box::new(Ground::new(0.0).unwrap()),
+        Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()),
+    ));
+    job.select_caustics_object(target).unwrap();
+    job.scene.medium = Some(absorption(0.2));
+    job.scene
+        .bind_medium_interface(
+            target,
+            MediumInterface {
+                interior: Some(absorption(140_000.0)),
+            },
+        )
+        .unwrap();
+
+    let ray = Ray::new(
+        Vector3::z() * (1.0 + thickness / 2.0),
+        Vector3::new(0.8, 0.0, 0.6),
+    )
+    .unwrap();
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut untouched = rng.clone();
+    let result = trace_photon(&job, ray, None, IorMode::Constant, 1, &mut rng).unwrap();
+    assert_eq!(result.termination, PhotonTermination::EventLimit);
+    assert_eq!(result.state.event_count, 1);
+    assert_eq!(result.state.medium, PhotonMedium::Glass);
+    assert_eq!(result.state.medium_region, Interior(target));
+    assert!(result.state.ray.direction.z < 0.0);
+    assert_eq!(rng.next_u64(), untouched.next_u64());
+
+    // The first segment crosses half the thickness and the reflected segment
+    // crosses the whole thickness, each at cos(theta) = 0.6.
+    let expected = (-140_000.0_f64 * (1.5 * thickness) / 0.6).exp();
+    assert!((result.state.flux_weight - expected).abs() < 2e-10);
 }
 
 #[test]

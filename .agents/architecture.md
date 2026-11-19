@@ -31,10 +31,10 @@ Hero 与四波长 Packet 使用同一个标量路径循环。Packet 共享主射
 
 - 这是有限深度、二值几何阴影与地面焦散图结合的估计器，不应描述成通用无偏 Path Tracer。不要顺带加入透明阴影、环境焦散、新材质、通用 Photon Mapping、BVH/KD-Tree、GUI 或 GPU。
 - JSON 光子焦散目标限一个 Dielectric Sphere/Prism/VerticalPrism；其他物体阻断。XYZ 图绑定 RGB 相机时要求中性 Lambertian 地面；Eλ 图集支持 Lambertian 地面的波长反射率。图外通量丢弃，不把有限接收区当作整个实体地面。
-- [Dielectric](../src/material/dielectric.rs) 按几何法线和方向判断空气/玻璃两侧，外部 IOR 固定为 1；光子有显式 Air/Glass 状态。没有嵌套介质栈，也不支持从玻璃内部启动光子。
+- [Dielectric](../src/material/dielectric.rs) 按几何法线和方向判断空气/玻璃两侧，外部 IOR 固定为 1；光子有显式 Air/Glass 状态。绑定介质界面的焦散目标支持从玻璃内部发射光子。没有嵌套介质栈。
 - `Scene.medium` 持有 `Option<Box<dyn Medium>>`。[Medium](../src/medium/mod.rs) 要求 `Send + Sync`，内置实现为 [HomogeneousMedium](../src/medium/homogeneous.rs) 和 [GridMedium](../src/medium/grid.rs)。内置介质在单个轴对齐盒内作用于空间。光线穿过盒边界时方向不变。Rust 场景可为一个封闭理想玻璃绑定 [MediumInterface](../src/scene/medium_interface.rs)，由共享的 Camera Path 记录参与介质区域。相机起射时分类，接受透射后切换区域，路径与二值可见的局部阴影段均使用活跃介质。
 - 相机只通过 `sample_segment` 取得可选的真实散射位置和已补偿权重，通过 `phase()` 取得 Henyey–Greenstein 相函数，通过 `transmittance_ray` 查询确定性阴影透射率（接口无 RNG 参数）。密度遍历、Majorant、空碰撞与权重补偿由介质实现负责。密度、系数和全局 Majorant 的只读查询供数据检查使用。相机按真实事件管理独立于表面的[体散射预算](transport.md#相函数与体散射预算)。网格采样权重见[传输契约](transport.md#非均匀网格介质)，遍历和分块选择见[私有 DDA 实现](../src/medium/grid/dda.rs)和[基准记录](../docs/medium_majorant_benchmark.md#分块选择与内存)。
-- Forward 光子只通过 `transmittance_ray` 在场景介质中累积各有限命中段的消光，首段 Tr 随首交点缓存。XYZ、Eλ 与独立光子 Direct 预览均记录未发生体散射的通量。Air/Glass 负责界面折射率侧别。层次化空块跳跃、Ratio Tracking、波长相关介质和介质发光未实现。
+- Forward 光子跟踪参与介质区域与 Air/Glass 折射率侧别，通过活跃介质的 `transmittance_ray` 累积各有限命中段的消光。起射区域与首段 Tr 随首交点缓存。XYZ、Eλ 与独立光子 Direct 预览均记录未发生体散射的通量。层次化空块跳跃、Ratio Tracking、波长相关介质和介质发光未实现。
 
 ## Diagnostics
 
