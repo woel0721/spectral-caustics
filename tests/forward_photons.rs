@@ -3,7 +3,7 @@ use spectral_caustics::caustics::SpectralCausticsMap;
 use spectral_caustics::config::Config;
 use spectral_caustics::config::RenderJob;
 use spectral_caustics::config::render::{CameraMode, RenderSetting};
-use spectral_caustics::config::scene::EnvironmentMisHeuristic;
+use spectral_caustics::config::scene::{EnvironmentMisHeuristic, ObjectConfig};
 use spectral_caustics::film::Framebuffer;
 use spectral_caustics::geometry::{ground::Ground, vertical_prism::VerticalPrism};
 use spectral_caustics::integrator::photon::integrate_xyz;
@@ -51,6 +51,87 @@ fn map(scene: &RenderJob, settings: &RenderSetting, threads: usize) -> SpectralC
                 .unwrap()
                 .unwrap()
         })
+}
+
+#[test]
+fn json_vacuum_interface_matches_manual_binding_in_camera_and_photon_outputs() {
+    let c = config(include_str!("../configs/sphere_medium_interface.json"));
+    let bound = c.build().unwrap();
+    let mut unbound_config = c.clone();
+    let ObjectConfig::Sphere {
+        medium_interface, ..
+    } = &mut unbound_config.scene.objects[0]
+    else {
+        panic!("expected a glass sphere");
+    };
+    *medium_interface = None;
+    let unbound = unbound_config.build().unwrap();
+    let mut manual = unbound_config.build().unwrap();
+    let target = manual.photon.caustics_object_id.unwrap();
+    manual
+        .scene
+        .bind_medium_interface(target, MediumInterface { interior: None })
+        .unwrap();
+    let ground = manual.photon.ground_id.unwrap();
+
+    let xyz = |job| integrate_xyz(job, Some(target), ground, &c.render).unwrap();
+    let json_xyz = xyz(&bound);
+    let rust_xyz = xyz(&manual);
+    same(&json_xyz.caustics, &rust_xyz.caustics);
+    same(
+        json_xyz.direct.as_ref().unwrap(),
+        rust_xyz.direct.as_ref().unwrap(),
+    );
+
+    // Removing extinction inside the glass increases the deposited caustic flux.
+    // Geometrically direct photons never enter the sphere.
+    let unbound_xyz = xyz(&unbound);
+    same(
+        json_xyz.direct.as_ref().unwrap(),
+        unbound_xyz.direct.as_ref().unwrap(),
+    );
+    let luminance = |image: &Framebuffer| image.pixels().iter().map(|p| p.y).sum::<f64>();
+    assert!(luminance(&json_xyz.caustics) > luminance(&unbound_xyz.caustics));
+
+    let json_atlas = map(&bound, &c.render, 1);
+    let rust_atlas = map(&manual, &c.render, 4);
+    assert_eq!(
+        json_atlas.wavelength_samples(),
+        rust_atlas.wavelength_samples()
+    );
+    for layer in 0..json_atlas.wavelength_samples().len() {
+        let a = json_atlas.layer_irradiance(layer).unwrap();
+        let b = rust_atlas.layer_irradiance(layer).unwrap();
+        assert!(a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits()));
+    }
+
+    for (camera_mode, packet) in [
+        (CameraMode::Rgb, 1),
+        (CameraMode::Spectral, 1),
+        (CameraMode::Spectral, 4),
+    ] {
+        let settings = RenderSetting {
+            camera_mode,
+            spectral_packet_size: packet,
+            ..c.render.clone()
+        };
+        let renderer = Renderer::new(settings.clone()).unwrap();
+        let json_image = renderer.render(&bound).unwrap();
+        let rust_image = Renderer::new(RenderSetting {
+            thread_count: Some(4),
+            ..settings
+        })
+        .unwrap()
+        .render(&manual)
+        .unwrap();
+        same(&json_image.direct, &rust_image.direct);
+        same(&json_image.caustics, &rust_image.caustics);
+        same(&json_image.combined, &rust_image.combined);
+        assert_ne!(
+            json_image.direct.pixels(),
+            renderer.render(&unbound).unwrap().direct.pixels()
+        );
+    }
 }
 
 fn two_layer_photon_scene() -> (Config, GridMediumConfig, f64) {

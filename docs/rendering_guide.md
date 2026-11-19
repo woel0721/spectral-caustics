@@ -130,11 +130,11 @@ git diff --check
 
 固定配置 / seed 在当前实现的 Rayon 1/2/4 线程下逐位可复现。改变采样块数量会改变浮点加法分组，测试使用数值容差；不冻结旧算法的 RNG 消耗或旧版本逐位结果。
 
-当前不支持内部光子发射、嵌套介质、透明 Shadow Ray、环境焦散、通用 Photon Mapping、BVH / KD-Tree、GUI / GPU 或光谱 GGX。RGB 到光谱是近似模型，CIE / D65 及 PBRT 基谱来源、许可证与校验和见 [颜色数据说明](../assets/color/README.md)。
+当前不支持嵌套介质、透明 Shadow Ray、环境焦散、通用 Photon Mapping、BVH / KD-Tree、GUI / GPU 或光谱 GGX。RGB 到光谱是近似模型，CIE / D65 及 PBRT 基谱来源、许可证与校验和见 [颜色数据说明](../assets/color/README.md)。
 
 ## 均匀介质与多次体散射
 
-`configs/homogeneous_fog.json` 提供球体、棋盘地面和逆光雾。`scene.medium` 省略或设为 `null` 时关闭介质；原有场景不改变随机数消耗和渲染结果。配置示例：
+`configs/homogeneous_fog.json` 提供球体、棋盘地面和逆光雾。省略 `scene.medium` 或设为 `null` 时，外部按真空处理。这个示例使用以下均匀介质。
 
 ```json
 "medium": {
@@ -146,7 +146,7 @@ git diff --check
 }
 ```
 
-边界是世界坐标轴对齐盒，距离单位为米，`sigma_a`、`sigma_s` 单位为 m⁻¹，`sigma_t = sigma_a + sigma_s`；`-1 < g < 1`。这些系数目前与波长无关；RGB 和 Spectral 在各自 Transport 中乘同一个标量权重，没有 RGB 插值介质光谱。盒边界没有可见表面、不折射。JSON 场景使用全局空间盒，也覆盖盒内玻璃的内部。
+边界是世界坐标轴对齐盒，距离单位为米，`sigma_a`、`sigma_s` 单位为 m⁻¹，`sigma_t = sigma_a + sigma_s`；`-1 < g < 1`。这些系数目前与波长无关；RGB 和 Spectral 在各自 Transport 中乘同一个标量权重，没有 RGB 插值介质光谱。盒边界没有可见表面、不折射。省略物体的介质界面绑定时，`scene.medium` 的空间盒也覆盖盒内玻璃的内部。
 
 每条当前射线先求最近表面，再把盒交区间裁到该距离（miss 则裁到盒出口）。体散射次数尚未达到 `scene.max_volume_scatters` 时，用 `s = -ln(1-u)/sigma_t` 抽取区间入口后的自由程。如果 `s < L`，距离 PDF 是 `sigma_t exp(-sigma_t s)`，因此 `sigma_s Tr(s) / pdf = sigma_s/sigma_t`，把这项乘入 throughput；这是隐式吸收，每次散射均按单次散射反照率缩权。若自由程越过区间，离散生存概率为 `Tr(L)`，其权重 `Tr(L)/Tr(L)=1`，不能再乘衰减。达到预算后使用解析 `exp(-sigma_t L)`，不再采样自由程；`sigma_s=0` 时无论预算多少都使用解析 `exp(-sigma_a L)`。解析分支不消费介质 RNG。
 
@@ -175,9 +175,25 @@ cargo test --locked --test volume
 
 相机预算截断后丢弃更高阶散射。焦散图记录未发生体散射的源端通量，由相机在符合条件的地面交点读取。Ratio Tracking、介质发光和波长相关系数仍未实现。平行光沿用无限解析太阳模型，发射窗口只裁剪光子发射位置。
 
-### 单一玻璃边界的 Rust 运行时契约
+### 玻璃介质界面
 
-通过 `Scene::bind_medium_interface(object_id, MediumInterface { interior })` 为一个封闭的理想玻璃物体登记内部参与介质。球体和凸三棱柱（含竖直棱柱）提供点分类。外侧解析为 `Scene.medium`，内部的 `None` 表示真空。Camera Path 和 Photon Path 均通过 Rust API 使用此绑定。
+每个场景可以为一个理想玻璃物体绑定 `medium_interface`。字段写在 `scene.objects[i]` 中，与 `material`、`caustics` 同级。支持 `sphere`、`prism` 和 `vertical_prism`，材质须为 `dielectric`。绑定本身独立于焦散目标选择。
+
+| JSON 写法 | 介质行为 |
+| --- | --- |
+| 省略 `medium_interface` 或设为 `null` | 无区域绑定，路径按 `scene.medium` 的空间范围计算介质效果。 |
+| `"medium_interface": { "interior": null }` | 绑定边界，内部为参与介质真空，表面按玻璃 IOR 折射和反射。空对象 `{}` 同样表示内部真空。 |
+| `"medium_interface": { "interior": { ... } }` | 绑定边界，内部使用指定的介质。内部介质接受与 `scene.medium` 相同的均匀或网格配置。 |
+
+绑定后外侧使用 `scene.medium`。内部介质的 `min_m` 和 `max_m` 仍是世界坐标，内部消光和散射只发生在玻璃内部与介质盒重叠的范围。
+
+`configs/sphere_medium_interface.json` 在有雾的场景中把玻璃球内部设为真空。运行下列命令会把三张分量图写到 `output/sphere_medium_interface/`。
+
+```sh
+cargo run --release --locked -- configs/sphere_medium_interface.json
+```
+
+场景构建取得物体编号后调用 `Scene::bind_medium_interface(object_id, MediumInterface { interior })`。Rust 调用方可以直接使用同一个接口，`interior: None` 表示内部真空。
 
 Camera Path 首段用 `initial_medium_region` 对起点分类。位于几何边界或其浮点舍入范围内的起点，须通过低层 `CameraPathState.medium_region` 显式给出出发侧。每段用 `active_medium` 解析介质，表面和体积顶点的局部阴影查询使用同一区域的介质，玻璃仍按二值遮挡处理。接受界面事件后，`region_after_event` 用入射传播方向决定下一段区域。反射（含 TIR）和体散射保留当前侧，透射切换到另一侧。路径使用期间应保持场景物体索引稳定。区域只描述参与介质，IOR 和事件权重由光学接口负责。
 

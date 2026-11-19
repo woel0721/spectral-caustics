@@ -1,9 +1,10 @@
 use nalgebra::{Vector2, Vector3};
 use rand::{RngCore, SeedableRng, rngs::StdRng};
+use serde_json::{Value, json};
 use spectral_caustics::{
     camera::Camera,
     config::{
-        RenderJob,
+        Config, RenderJob,
         camera::CameraConfig,
         render::{CameraMode, RenderSetting},
     },
@@ -31,6 +32,148 @@ use spectral_caustics::{
         MediumRegion::{Exterior, Interior},
     },
 };
+
+fn interface_example_json() -> Value {
+    serde_json::from_str(include_str!("../configs/sphere_medium_interface.json")).unwrap()
+}
+
+#[test]
+fn json_medium_interface_roundtrip_preserves_binding_and_interior_extinction() {
+    let homogeneous = json!({
+        "min_m": [-1.0, -1.0, 0.0], "max_m": [1.0, 1.0, 3.0],
+        "sigma_a": 0.5, "sigma_s": 0.0, "g": 0.0
+    });
+    let grid = json!({
+        "min_m": [-1.0, -1.0, 0.0], "max_m": [1.0, 1.0, 3.0],
+        "resolution": [1, 1, 1], "densities": [2.0],
+        "sigma_a_base": 0.75, "sigma_s_base": 0.0, "g": 0.0
+    });
+    let vacuum = json!({"interior": null});
+    for (input, serialized, region, sigma_t) in [
+        (None, None, Exterior, 0.32_f64),
+        (Some(Value::Null), None, Exterior, 0.32),
+        (Some(vacuum.clone()), Some(vacuum.clone()), Interior(0), 0.0),
+        (Some(json!({})), Some(vacuum), Interior(0), 0.0),
+        (
+            Some(json!({"interior": homogeneous})),
+            Some(json!({"interior": homogeneous})),
+            Interior(0),
+            0.5,
+        ),
+        (
+            Some(json!({"interior": grid})),
+            Some(json!({"interior": grid})),
+            Interior(0),
+            1.5,
+        ),
+    ] {
+        let mut json = interface_example_json();
+        let object = json["scene"]["objects"][0].as_object_mut().unwrap();
+        object.insert("caustics".into(), Value::Bool(false));
+        match input {
+            Some(input) => object.insert("medium_interface".into(), input),
+            None => object.remove("medium_interface"),
+        };
+        let config = Config::from_json(&json.to_string()).unwrap();
+        let text = config.to_json().unwrap();
+        let saved: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            saved["scene"]["objects"][0].get("medium_interface"),
+            serialized.as_ref()
+        );
+        let reloaded = Config::from_json(&text).unwrap();
+        assert_eq!(config, reloaded);
+        let job = reloaded.build().unwrap();
+        assert_eq!(job.photon.caustics_object_id, None);
+        let ray = Ray::new(Vector3::new(0.0, 0.0, 1.3), Vector3::x()).unwrap();
+        let actual_region = job.scene.initial_medium_region(ray.origin, None).unwrap();
+        assert_eq!(actual_region, region);
+        let tr = job
+            .scene
+            .active_medium(actual_region)
+            .unwrap()
+            .map_or(1.0, |medium| medium.transmittance_ray(&ray, 0.25));
+        assert!((tr - (-sigma_t * 0.25).exp()).abs() < 1e-14);
+    }
+}
+
+#[test]
+fn json_medium_interface_binds_mixed_scene_object_indices_and_prism_shapes() {
+    let ordinary = serde_json::to_value(Config::default()).unwrap();
+    let vertical = json!({
+        "type": "vertical_prism",
+        "cross_section_m": [[-1.0, -1.0], [1.0, -1.0], [0.0, 1.0]],
+        "z_min_m": 0.5, "z_max_m": 1.5
+    });
+    for (mut prism, interior_point) in [
+        (
+            ordinary["scene"]["objects"][0].clone(),
+            Vector3::new(0.0, 0.0, 0.3),
+        ),
+        (vertical, Vector3::new(0.0, 0.0, 1.0)),
+    ] {
+        let mut scene = interface_example_json();
+        prism["medium_interface"] = json!({"interior": null});
+        let objects = scene["scene"]["objects"].as_array_mut().unwrap();
+        objects[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("medium_interface");
+        objects[0]["caustics"] = json!(false);
+        objects.push(prism);
+        let config = Config::from_json(&scene.to_string()).unwrap();
+        config.validate().unwrap();
+        let job = config.build().unwrap();
+        let region = job
+            .scene
+            .initial_medium_region(interior_point, None)
+            .unwrap();
+        assert_eq!(region, Interior(2));
+        assert!(job.scene.active_medium(region).unwrap().is_none());
+    }
+}
+
+#[test]
+fn json_medium_interface_rejects_invalid_bindings_in_validate_and_build() {
+    let mut non_glass = interface_example_json();
+    non_glass["scene"]["objects"][0]["material"] =
+        json!({"type": "lambertian", "albedo": [0.5, 0.5, 0.5]});
+    let mut duplicate = interface_example_json();
+    let mut second = duplicate["scene"]["objects"][0].clone();
+    second["caustics"] = json!(false);
+    duplicate["scene"]["objects"]
+        .as_array_mut()
+        .unwrap()
+        .push(second);
+    let mut bad_grid = interface_example_json();
+    bad_grid["scene"]["objects"][0]["medium_interface"]["interior"] = json!({
+        "min_m": [-1.0, -1.0, 0.0], "max_m": [1.0, 1.0, 3.0],
+        "resolution": [1, 1, 2], "densities": [2.0],
+        "sigma_a_base": 0.75, "sigma_s_base": 0.0, "g": 0.0
+    });
+    for (cfg, field) in [
+        (non_glass, "scene.objects[0].medium_interface"),
+        (duplicate, "scene.objects[2].medium_interface"),
+        (bad_grid, "scene.objects[0].medium_interface.interior"),
+    ] {
+        let cfg = Config::from_json(&cfg.to_string()).unwrap();
+        let validate = cfg.validate().unwrap_err();
+        let build = cfg.build().err().expect("invalid scene built").to_string();
+        assert!(validate.contains(field), "{validate}");
+        assert!(build.contains(field), "{build}");
+    }
+
+    let mut unknown = interface_example_json();
+    unknown["scene"]["objects"][0]["medium_interface"]["exterior"] = Value::Null;
+    assert!(Config::from_json(&unknown.to_string()).is_err());
+    let mut open = interface_example_json();
+    open["scene"]["objects"][1]["medium_interface"] = json!({"interior": null});
+    assert!(Config::from_json(&open.to_string()).is_err());
+    let mut beveled: Value =
+        serde_json::from_str(include_str!("../configs/beveled_prism.json")).unwrap();
+    beveled["scene"]["objects"][0]["medium_interface"] = json!({"interior": null});
+    assert!(Config::from_json(&beveled.to_string()).is_err());
+}
 
 fn glass() -> Box<Dielectric> {
     Box::new(Dielectric::new(1.5).unwrap())

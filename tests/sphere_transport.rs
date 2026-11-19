@@ -404,6 +404,7 @@ fn adding_a_distant_sphere_preserves_prism_spectral_caustics() {
     assert!(expected.caustics.pixels().iter().any(|p| p.norm() > 0.0));
     config.scene.objects.push(ObjectConfig::Sphere {
         caustics: false,
+        medium_interface: None,
         center_m: [100.0, 100.0, 1.0],
         radius_m: 0.8,
         material: materials()[0].clone(),

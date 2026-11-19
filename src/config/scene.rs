@@ -4,6 +4,7 @@ use super::camera::CameraConfig;
 pub use super::light::DiskAreaLightConfig;
 pub use super::light::LightConfig;
 use super::material::MaterialConfig;
+use crate::{medium::MediumConfig, scene::MediumInterface};
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -41,7 +42,7 @@ pub struct SceneConfig {
     pub environment: Option<EnvironmentConfig>,
     /// 单个有界均匀/网格介质；省略/null 为真空，系数单位 m⁻¹。
     #[serde(default)]
-    pub medium: Option<crate::medium::MediumConfig>,
+    pub medium: Option<MediumConfig>,
     /// 每条相机路径在漫反射终点采样的环境方向数，默认 1。
     #[serde(default = "default_environment_samples")]
     pub environment_samples: usize,
@@ -170,6 +171,24 @@ impl EnvironmentConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediumInterfaceConfig {
+    /// 绑定边界后的内部介质。None 表示内部真空。
+    pub interior: Option<MediumConfig>,
+}
+
+impl MediumInterfaceConfig {
+    pub(super) fn build(&self) -> Result<MediumInterface, String> {
+        let interior = self
+            .interior
+            .as_ref()
+            .map(crate::medium::from_config)
+            .transpose()?;
+        Ok(MediumInterface { interior })
+    }
+}
+
 /// 这里只描述物体类型和原始参数，不包含求交函数、法线缓存或 trait object。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -183,6 +202,8 @@ pub enum ObjectConfig {
         caustics: bool,
         #[serde(default = "MaterialConfig::default_glass")]
         material: MaterialConfig,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium_interface: Option<MediumInterfaceConfig>,
     },
     /// 与 Prism 当前默认顶点顺序一致，长度单位为米；面连接方式由运行时 Prism 定义。
     Prism {
@@ -192,6 +213,8 @@ pub enum ObjectConfig {
         caustics: bool,
         #[serde(default = "MaterialConfig::default_glass")]
         material: MaterialConfig,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium_interface: Option<MediumInterfaceConfig>,
     },
     /// 仅对三条 y 方向长棱做固定 8 段圆角；不进入现有三棱镜光谱焦散算法。
     BeveledPrism {
@@ -212,12 +235,37 @@ pub enum ObjectConfig {
         caustics: bool,
         #[serde(default = "MaterialConfig::default_glass")]
         material: MaterialConfig,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium_interface: Option<MediumInterfaceConfig>,
     },
     Ground {
         height_m: f64,
         #[serde(default)]
         material: MaterialConfig,
     },
+}
+
+impl ObjectConfig {
+    pub(super) fn medium_interface(&self) -> Option<(&MediumInterfaceConfig, &MaterialConfig)> {
+        match self {
+            Self::Sphere {
+                medium_interface: Some(interface),
+                material,
+                ..
+            }
+            | Self::Prism {
+                medium_interface: Some(interface),
+                material,
+                ..
+            }
+            | Self::VerticalPrism {
+                medium_interface: Some(interface),
+                material,
+                ..
+            } => Some((interface, material)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -261,6 +309,7 @@ impl Default for SceneConfig {
             objects: vec![
                 ObjectConfig::Prism {
                     caustics: true,
+                    medium_interface: None,
                     vertices_m: [
                         [-0.5, -1.0, 0.03],
                         [0.5, -1.0, 0.03],
@@ -337,7 +386,7 @@ impl SceneConfig {
     /// 检查场景描述能否用于运行时构建，供 JSON 加载和 RenderJob::from_config 使用。
     ///
     /// 输入：self 中的相机、材质、几何参数、采样预算、光源和接收区域；输出：有效时 Ok(())，否则 Err。
-    /// 检查焦散目标唯一性；部分几何直接试构建，六顶点 Prism 的凸性/绕序由运行时构建继续检查。
+    /// 检查焦散目标和介质界面的唯一性。未绑定界面的 Prism 在运行时进一步检查凸性与绕序。
     pub fn validate(&self) -> Result<(), String> {
         self.camera.validate()?;
         if let Some(medium) = &self.medium {
@@ -365,7 +414,21 @@ impl SceneConfig {
             return Err("scene.background_linear_rgb 必须有限且非负".into());
         }
         let mut caustics_count = 0;
+        let mut has_medium_interface = false;
         for (index, object) in self.objects.iter().enumerate() {
+            if let Some((interface, material)) = object.medium_interface() {
+                let field = format!("scene.objects[{index}].medium_interface");
+                if has_medium_interface {
+                    return Err(format!("{field} 一个场景仅支持一个介质界面"));
+                }
+                if !matches!(material, MaterialConfig::Dielectric { .. }) {
+                    return Err(format!("{field} 要求理想 Dielectric 材质"));
+                }
+                interface
+                    .build()
+                    .map_err(|error| format!("{field}.interior {error}"))?;
+                has_medium_interface = true;
+            }
             let selected_material = match object {
                 ObjectConfig::Sphere {
                     caustics: true,
@@ -425,6 +488,7 @@ impl SceneConfig {
                 ObjectConfig::Prism {
                     vertices_m,
                     material,
+                    medium_interface,
                     ..
                 } => {
                     material
@@ -432,6 +496,14 @@ impl SceneConfig {
                         .map_err(|message| format!("scene.objects[{index}].{message}"))?;
                     if vertices_m.iter().flatten().any(|v| !v.is_finite()) {
                         return Err("scene 三棱镜顶点必须为有限坐标".into());
+                    }
+                    if medium_interface.is_some()
+                        && crate::geometry::prism::Prism::from_vertices(vertices_m.map(Into::into))
+                            .is_none()
+                    {
+                        return Err(format!(
+                            "scene.objects[{index}].medium_interface 要求有效的封闭凸三棱镜"
+                        ));
                     }
                 }
                 ObjectConfig::Ground { height_m, material } => {
