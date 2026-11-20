@@ -1,12 +1,14 @@
 //! Piecewise constant density on a world-space axis-aligned grid. No interpolation.
 use super::{
-    GridMediumConfig, Medium, MediumCoefficients, MediumSample,
+    GridMediumConfig, Medium, MediumCoefficients, MediumSample, ProceduralMediumConfig,
     bounds::{box_interval, contains, valid_bounds},
     phase::HenyeyGreenstein,
+    procedural,
 };
 use crate::geometry::ray::Ray;
 use nalgebra::Vector3;
 use rand::{Rng, RngCore, distr::Open01};
+use std::borrow::Cow;
 
 mod dda;
 #[cfg(test)]
@@ -89,64 +91,96 @@ pub struct GridMedium {
 impl TryFrom<&GridMediumConfig> for GridMedium {
     type Error = String;
     fn try_from(c: &GridMediumConfig) -> Result<Self, String> {
-        if !valid_bounds(c.min_m, c.max_m) {
-            return Err("grid medium requires finite bounds min < max".into());
-        }
-        let count = c
-            .resolution
-            .iter()
-            .try_fold(1usize, |n, &r| if r == 0 { None } else { n.checked_mul(r) });
-        if count != Some(c.densities.len()) {
-            return Err(
-                "grid resolution must be positive, not overflow, and match densities length".into(),
-            );
-        }
-        if c.densities.iter().any(|d| !d.is_finite() || *d < 0.0)
-            || [
-                c.sigma_a_base,
-                c.sigma_s_base,
-                c.sigma_a_base + c.sigma_s_base,
-            ]
-            .iter()
-            .any(|s| !s.is_finite() || *s < 0.0)
-        {
-            return Err(
-                "grid densities and base coefficients must be nonnegative and finite".into(),
-            );
-        }
-        let max_density = c.densities.iter().copied().fold(0.0, f64::max);
-        // Same operations as coefficients_at().sigma_t(): monotonic products/sum
-        // at the maximum density cover every voxel, including roundoff.
-        let sigma_t_majorant = max_density * c.sigma_a_base + max_density * c.sigma_s_base;
-        if !sigma_t_majorant.is_finite() {
-            return Err("grid density-scaled extinction overflows".into());
-        }
-        let mut densities = Vec::new();
-        densities
-            .try_reserve_exact(c.densities.len())
-            .map_err(|_| "cannot allocate grid densities")?;
-        densities.extend_from_slice(&c.densities);
-        let m = Self {
-            min: c.min_m.into(),
-            max: c.max_m.into(),
-            resolution: c.resolution,
-            densities,
-            base: MediumCoefficients {
+        Self::build(
+            c.min_m,
+            c.max_m,
+            c.resolution,
+            MediumCoefficients {
                 sigma_a: c.sigma_a_base,
                 sigma_s: c.sigma_s_base,
             },
+            c.g,
+            |_| Ok(Cow::Borrowed(&c.densities)),
+        )
+    }
+}
+
+impl TryFrom<&ProceduralMediumConfig> for GridMedium {
+    type Error = String;
+    fn try_from(c: &ProceduralMediumConfig) -> Result<Self, String> {
+        Self::build(
+            c.min_m,
+            c.max_m,
+            c.resolution,
+            MediumCoefficients {
+                sigma_a: c.sigma_a_base,
+                sigma_s: c.sigma_s_base,
+            },
+            c.g,
+            |count| procedural::generate(c.resolution, count, c.procedural.seed).map(Cow::Owned),
+        )
+    }
+}
+
+impl GridMedium {
+    fn build<'a>(
+        min: [f64; 3],
+        max: [f64; 3],
+        resolution: [usize; 3],
+        base: MediumCoefficients,
+        g: f64,
+        density_source: impl FnOnce(usize) -> Result<Cow<'a, [f64]>, String>,
+    ) -> Result<Self, String> {
+        if !valid_bounds(min, max) {
+            return Err("grid medium requires finite bounds min < max".into());
+        }
+        let count = resolution
+            .iter()
+            .try_fold(1usize, |n, &r| if r == 0 { None } else { n.checked_mul(r) })
+            .ok_or("grid resolution must be positive and not overflow")?;
+        if [base.sigma_a, base.sigma_s, base.sigma_t()]
+            .iter()
+            .any(|s| !s.is_finite() || *s < 0.0)
+        {
+            return Err("grid base coefficients must be nonnegative and finite".into());
+        }
+        let phase = HenyeyGreenstein::new(g)?;
+        let densities = density_source(count)?;
+        if count != densities.len() {
+            return Err("grid resolution must match densities length".into());
+        }
+        if densities.iter().any(|d| !d.is_finite() || *d < 0.0) {
+            return Err("grid densities must be nonnegative and finite".into());
+        }
+        let max_density = densities.iter().copied().fold(0.0, f64::max);
+        // Same operations as coefficients_at().sigma_t(): monotonic products/sum
+        // at the maximum density cover every voxel, including roundoff.
+        let sigma_t_majorant = max_density * base.sigma_a + max_density * base.sigma_s;
+        if !sigma_t_majorant.is_finite() {
+            return Err("grid density-scaled extinction overflows".into());
+        }
+        let densities = match densities {
+            Cow::Owned(densities) => densities,
+            Cow::Borrowed(source) => {
+                let mut densities = Vec::new();
+                densities
+                    .try_reserve_exact(count)
+                    .map_err(|_| "cannot allocate grid densities")?;
+                densities.extend_from_slice(source);
+                densities
+            }
+        };
+        let majorants = MajorantGrid::new(resolution, &densities, base, MAJORANT_BLOCK_EDGE)?;
+        let m = Self {
+            min: min.into(),
+            max: max.into(),
+            resolution,
+            densities,
+            base,
             max_density,
             sigma_t_majorant,
-            majorants: MajorantGrid::new(
-                c.resolution,
-                &c.densities,
-                MediumCoefficients {
-                    sigma_a: c.sigma_a_base,
-                    sigma_s: c.sigma_s_base,
-                },
-                MAJORANT_BLOCK_EDGE,
-            )?,
-            phase: HenyeyGreenstein::new(c.g)?,
+            majorants,
+            phase,
         };
         // Reject cells collapsed by world-coordinate rounding. DDA must always
         // advance a voxel index, and each configured cell must have positive width.
@@ -162,9 +196,6 @@ impl TryFrom<&GridMediumConfig> for GridMedium {
         }
         Ok(m)
     }
-}
-
-impl GridMedium {
     fn face(&self, axis: usize, i: usize) -> f64 {
         if i == self.resolution[axis] {
             self.max[axis]

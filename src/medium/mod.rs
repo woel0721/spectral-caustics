@@ -6,9 +6,13 @@ mod config;
 mod grid;
 mod homogeneous;
 pub mod phase;
+mod procedural;
 mod types;
 
-pub use config::{GridMediumConfig, HomogeneousMediumConfig, MediumConfig, from_config};
+pub use config::{
+    GridMediumConfig, HomogeneousMediumConfig, MediumConfig, ProceduralDensityConfig,
+    ProceduralMediumConfig, from_config,
+};
 pub use grid::GridMedium;
 pub use homogeneous::HomogeneousMedium;
 pub use types::{MediumCoefficients, MediumSample};
