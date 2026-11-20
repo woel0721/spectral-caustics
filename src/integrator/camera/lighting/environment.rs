@@ -194,7 +194,15 @@ fn environment_direction_contribution<T: CameraTransport>(
     if !transport.finite(contribution) {
         return Err("环境采样贡献计算溢出".into());
     }
-    Ok(contribution * transmittance_to_light(scene, hit.coords, normal, wi, medium)?)
+    Ok(contribution
+        * transmittance_to_light(
+            scene,
+            hit.coords,
+            normal,
+            wi,
+            medium,
+            transport.wavelength_nm(),
+        )?)
 }
 
 /// 计算 Power MIS 的策略权重及其除采样密度后的值，供 RGB/光谱环境共用。

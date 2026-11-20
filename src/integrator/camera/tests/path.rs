@@ -30,14 +30,14 @@ fn volume_scatter_near_sphere_enters_before_crossing_the_interior() {
     let fog = HomogeneousMediumConfig {
         min_m: [-3.0; 3],
         max_m: [3.0; 3],
-        sigma_a: 0.0,
-        sigma_s: 1.0,
+        sigma_a: 0.0.into(),
+        sigma_s: 1.0.into(),
         g: -0.5,
     };
     job.scene.medium = Some(Box::new(HomogeneousMedium::try_from(&fog).unwrap()));
     let absorption = HomogeneousMediumConfig {
-        sigma_a: 0.7,
-        sigma_s: 0.0,
+        sigma_a: 0.7.into(),
+        sigma_s: 0.0.into(),
         ..fog
     };
     job.scene
@@ -107,8 +107,8 @@ fn volume_scatter_near_prism_cap_sees_exit_and_opaque_shadow() {
     let medium = HomogeneousMedium::try_from(&HomogeneousMediumConfig {
         min_m: [-3.0; 3],
         max_m: [3.0; 3],
-        sigma_a: 0.0,
-        sigma_s: 100_000.0,
+        sigma_a: 0.0.into(),
+        sigma_s: 100_000.0.into(),
         g: -0.5,
     })
     .unwrap();

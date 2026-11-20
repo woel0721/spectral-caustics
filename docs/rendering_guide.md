@@ -64,9 +64,11 @@ Delta 预算为 32 次，相机漫反射预算为 0..1024。第三次连续表�
 
 Forward 光子只追踪选中的一个理想介质和接收地面。其他物体阻断路径。每条光子的初始通量为 Φ/N，地面辐照度除以像素面积，四邻域沉积保持区域内能量。`photon_max_events=1..1024`，默认 32；到达上限后仍可落地 / 逃逸，遇到下一个界面才截断。从真实界面交点继续追踪，避免棱边法线偏移跨入错误介质。
 
-发射阶段缓存命中选中玻璃的光子的起射区域、首交点和首段 Tr，供各波长复用。XYZ 与 Eλ 共用同一发射、Forward 和沉积内核。Constant 追踪一次几何，Dispersion 从首交点逐波长续追。所有并行结果按固定索引顺序归约。
+XYZ 与 Eλ 共用发射、Forward 和沉积内核。发射阶段缓存起射区域和首交点，波长无关的首段 Tr 也可复用。Constant 在有光谱介质时缓存落点和参与光谱消光的线段，按节点重算通量。波长无关的介质允许 Constant 直接复用整张标量辐照度图。Dispersion 从同一首交点逐波长续追。所有并行结果按固定索引顺序归约。
 
-Forward 对每个有限命中段用活跃介质的 `Medium::transmittance_ray` 计算 Tr，并乘入通量。截取范围是当前射线起点到下一命中，覆盖发射、玻璃内续追和落地。未绑定介质界面时，`Scene.medium` 在其空间盒内覆盖空气段和玻璃段。独立光子 Direct 预览使用起射区域计算光源到地面的 Tr。透射率须在 `[0,1]` 内，非法值返回错误，零值或浮点下溢对应零通量。消光无需随机抽样，沉积沿用发射归一化 Φ/N。
+Forward 对每个有限命中段用活跃介质的 `Medium::transmittance_ray` 计算当前波长的 Tr，通量乘各段 Tr 的积。截取范围是当前射线起点到下一命中，覆盖发射、玻璃内续追和落地。未绑定介质界面时，`Scene.medium` 在其空间盒内覆盖空气段和玻璃段。透射率须在 `[0,1]` 内，非法值返回错误，零值或浮点下溢对应零通量。光子消光无需随机抽样。
+
+独立光子 Direct 预览用起射区域计算光源到地面的逐波长 Tr，支持无焦散目标的场景。XYZ 焦散和 Direct 都在消光后乘 D65 光谱密度、CMF 和梯形 Δλ。Eλ 图集保存含 Tr 与 D65 的每 nm 辐照度，相机查询后自行积分。源光谱按发射光归一化，介质损失的通量保留在衰减结果中。
 
 平行光总通量定义在水平发射窗口上。窗口面积为 A、单位传播方向为 d 时，光束法向辐照度为 `Φ/(A·|d_z|)`，水平地面收到 `Φ/A`。窗口限制光子发射位置，不裁切解析太阳。圆盘按面积均匀、方向余弦分布发射；相机使用面积 NEE 和有限距离阴影线段。光子 Direct 只用于独立地面预览，不能和解析直射重复相加。
 
@@ -146,9 +148,17 @@ git diff --check
 }
 ```
 
-边界是世界坐标轴对齐盒，距离单位为米，`sigma_a`、`sigma_s` 单位为 m⁻¹，`sigma_t = sigma_a + sigma_s`；`-1 < g < 1`。这些系数目前与波长无关；RGB 和 Spectral 在各自 Transport 中乘同一个标量权重，没有 RGB 插值介质光谱。盒边界没有可见表面、不折射。省略物体的介质界面绑定时，`scene.medium` 的空间盒也覆盖盒内玻璃的内部。
+边界是世界坐标轴对齐盒，距离单位为米，`sigma_a`、`sigma_s` 单位为 m⁻¹，`sigma_t = sigma_a + sigma_s`，且 `-1 < g < 1`。光线直穿盒边界。省略物体的介质界面绑定时，`scene.medium` 的空间盒也覆盖盒内玻璃的内部。
 
-每条当前射线先求最近表面，再把盒交区间裁到该距离（miss 则裁到盒出口）。体散射次数尚未达到 `scene.max_volume_scatters` 时，用 `s = -ln(1-u)/sigma_t` 抽取区间入口后的自由程。如果 `s < L`，距离 PDF 是 `sigma_t exp(-sigma_t s)`，因此 `sigma_s Tr(s) / pdf = sigma_s/sigma_t`，把这项乘入 throughput；这是隐式吸收，每次散射均按单次散射反照率缩权。若自由程越过区间，离散生存概率为 `Tr(L)`，其权重 `Tr(L)/Tr(L)=1`，不能再乘衰减。达到预算后使用解析 `exp(-sigma_t L)`，不再采样自由程；`sigma_s=0` 时无论预算多少都使用解析 `exp(-sigma_a L)`。解析分支不消费介质 RNG。
+均匀介质的 `sigma_a` 和 `sigma_s` 各自接受数字或分段线性曲线。例如，可用下面的散射系数表示短波更容易散射的介质。
+
+```json
+"sigma_s": { "samples": [[380, 0.8], [450, 0.55], [550, 0.24], [650, 0.12], [780, 0.06]] }
+```
+
+每个节点是 `[波长 nm, 系数 m⁻¹]`。节点须按正的有限波长严格递增，覆盖 380–780 nm，系数须非负有限。曲线的总消光须给插值和密度缩放的舍入留出有限浮点范围。Hero 和 Packet 使用各自路径的波长计算自由程、隐式吸收权重、表面阴影及体照明阴影。体散射改变方向，沿用入射波长和配置中的 HG 参数 `g`。同一写法也可用于 `medium_interface.interior`。配置非恒定曲线时，相机使用 `render.camera_mode: "spectral"`。光子焦散和独立光子预览按发射波长节点计算消光。
+
+每条当前射线先求最近表面，再把盒交区间裁到该距离（miss 则裁到盒出口）。以下系数均在当前波长求值。体散射次数尚未达到 `scene.max_volume_scatters` 且 `sigma_s > 0` 时，用 `s = -ln(1-u)/sigma_t` 抽取区间入口后的自由程。如果 `s < L`，距离 PDF 是 `sigma_t exp(-sigma_t s)`，因此 `sigma_s Tr(s) / pdf = sigma_s/sigma_t`，把这项乘入 throughput；这是隐式吸收，每次散射均按单次散射反照率缩权。若自由程越过区间，离散生存概率为 `Tr(L)`，其权重 `Tr(L)/Tr(L)=1`，不能再乘衰减。达到预算后使用解析 `exp(-sigma_t L)`，不再采样自由程；`sigma_s=0` 时无论预算多少都使用解析 `exp(-sigma_a L)`。解析分支不消费介质 RNG。
 
 介质点的 `wo=-ray.direction`、`wi` 都远离交点，HG 为
 `p(wo,wi)=(1-g²)/[4π(1+g²+2g wo·wi)^(3/2)]`。`g=0` 为 `1/(4π)`；正 g 的峰在 `wi=-wo`，表示前向散射。采样通过逆 CDF 绕 `-wo` 生成方向，返回 `p=pdf`，续追 throughput 乘 `p/pdf=1`，没有表面余弦。方向约定及公式参考 [PBRT Phase Functions](https://pbr-book.org/4ed/Volume_Scattering/Phase_Functions)。
@@ -173,7 +183,7 @@ cargo test --locked --test volume
 
 每个对照子目录包含三个分量 PNG 和可独立重跑的 `config.json`。纯吸收组把相同总消光全部设为 `sigma_a`；两个散射组保持相同 `sigma_a/sigma_s`，只改变 g。密度倍率同时缩放两个系数，0 等价于无介质。
 
-相机预算截断后丢弃更高阶散射。焦散图记录未发生体散射的源端通量，由相机在符合条件的地面交点读取。Ratio Tracking、介质发光和波长相关系数仍未实现。平行光沿用无限解析太阳模型，发射窗口只裁剪光子发射位置。
+相机预算截断后丢弃更高阶散射。焦散图记录未发生体散射的源端通量，由相机在符合条件的地面交点读取。平行光沿用无限解析太阳模型，发射窗口只裁剪光子发射位置。
 
 ### 玻璃介质界面
 
@@ -205,7 +215,7 @@ Photon Path 在发射点分类。位于选中的已绑定玻璃内部时，以 `
 
 运行时接口为 `Medium: Send + Sync` trait，`HomogeneousMedium` 与 `GridMedium` 各自实现它，`Scene.medium` 保存 `Option<Box<dyn Medium>>`。这与 `Material` 的接口和所有权方式一致，自定义介质可以直接 `Some(Box::new(medium))` 放入 Scene，无需修改内置类型列表。
 
-相机传输只使用三个关键接口：`sample_segment(...)` 返回 `Result<MediumSample, String>`，包含真实散射点（可缺省）和已补偿权重；`transmittance_ray(ray, max_distance)` 返回段透射率；`phase()` 返回相函数。内部算法的封装原则见 [架构职责边界](../.agents/architecture.md#当前物理范围)。另有只读的 `density_at(position)`、`coefficients_at(position)`、`sigma_t_majorant()` 供检查介质数据；直接在具体类型上调用 trait 方法需导入 `medium::Medium`。局部系数由 `MediumCoefficients` 返回，其 `sigma_t()` 为吸收与散射系数之和。
+相机通过 `sample_segment(ray, max_distance, wavelength_nm, allow_scattering, rng)` 取得可选的真实散射点和已补偿权重，通过 `transmittance_ray(ray, max_distance, wavelength_nm)` 查询段透射率，通过 `phase()` 取得相函数。内部算法的封装原则见 [架构职责边界](../.agents/architecture.md#当前物理范围)。检查介质数据可用 `density_at(position)`、`coefficients_at(position, wavelength_nm)` 和 `sigma_t_majorant(wavelength_nm)`。直接在具体类型上调用 trait 方法需导入 `medium::Medium`。局部系数由 `MediumCoefficients` 返回，其 `sigma_t()` 为吸收与散射系数之和。
 
 JSON 的 `scene.medium` 根据互斥字段区分均匀、显式网格和程序化网格配置，由 `medium::from_config` 构造 `Box<dyn Medium>`。均匀配置使用 `sigma_a/sigma_s`，显式网格使用 `resolution/densities/sigma_a_base/sigma_s_base`，程序化网格将 `densities` 换成 `procedural` 对象。最小双层网格配置如下。
 
@@ -224,18 +234,20 @@ JSON 的 `scene.medium` 根据互斥字段区分均匀、显式网格和程序�
 
 `resolution=[nx,ny,nz]` 表示世界 AABB 内各轴等分的体素数，全部为正，数组长度必须是 `nx*ny*nz`。密度无量纲，非负且有限，按 **x 最快、其次 y、最后 z** 排列：`index=x+nx*(y+ny*z)`。第 i 个轴向分界面是 `min+(max-min)*i/n`；位置映射相当于 `floor((p-min)/(max-min)*n)`，并对分界面的浮点舍入与遍历保持一致。内部面归较大下标，外部 max 面归最后一格，闭合外边界与原均匀盒一致；盒外为真空。构造时拒绝尺寸溢出、无效系数、密度缩放溢出及世界坐标精度下塌缩的体素。
 
-每格满足 `sigma_a=density*sigma_a_base`、`sigma_s=density*sigma_s_base`。`sigma_t_majorant()` 仍返回全局最大消光，供数据检查；采样使用 Phase 3.3 的私有粗块 Majorant 缓存。每块覆盖 **8×8×8 个细体素**（不足八格的尾块按实际范围覆盖），保存块内最大的 `sigma_a+sigma_s`。用与系数查询相同的乘加顺序计算，不能用平均密度代替上界。块边界直接使用原细网格的分界面，尾块不会重新等分或拉伸。数据构造后只读，缓存不会失效。若所有块的上界相同，内部合并成一个段，避免无收益的粗块遍历。
+显式网格和程序化雾的 `sigma_a_base`、`sigma_s_base` 各自接受数字或与均匀介质相同的 `{"samples": [[380, 0.8], [780, 0.06]]}` 曲线。细体素的密度与波长无关。每格在当前波长的系数分别为 `sigma_a=density*sigma_a_base(λ)` 和 `sigma_s=density*sigma_s_base(λ)`。Hero、Packet 和光子均按当前波长查询。程序化雾按形状 seed 烘焙密度后走同一网格路径。 [均匀介质](#均匀介质与多次体散射)
 
-透射率先将射线裁到 `[0,max_distance]` 与 AABB 的交集，再用 3D DDA 遍历体素，计算 `tau=Σ(sigma_a,i+sigma_s,i)*length_i`、`Tr=exp(-tau)`。这是分块常数模型的精确积分（受浮点舍入限制），不使用固定步长。每次跨面至少推进一个体素下标，边/角处同时推进所有相交轴；零方向轴不跨面，面上反向起步通过零长度跨面处理，不用 epsilon 丢弃薄层。相机路径的确定性消光分支和太阳/圆盘/环境阴影共用此透射率。
+每个粗块覆盖 **8×8×8 个细体素**，不足八格的尾块按实际范围覆盖。缓存保存块内最大密度 `d_max`，采样时计算 `M_b(λ)=d_max*sigma_a_base(λ)+d_max*sigma_s_base(λ)`。块上界和体素消光使用相同的乘加顺序。`sigma_t_majorant(wavelength_nm)` 用全网格的最大密度计算同一波长的全局上界。所有块的最大密度相同时，内部合并成一个段。块边界直接使用原细网格的分界面，尾块按原体素宽度遍历。
 
-`GridMedium::sample_segment` 内使用分段局部 Majorant `M_b >= sigma_t(x)` 进行 [Delta Tracking](https://pbr-book.org/4ed/Volume_Scattering/Transmittance)。粗块 DDA 按前后顺序给出射线段与其局部上界，迭代器只在介质模块内部使用，不暴露给 Camera Integrator：
+透射率先将射线裁到 `[0,max_distance]` 与 AABB 的交集，再用 3D DDA 遍历体素，按路径波长计算 `tau=Σ(sigma_a,i(λ)+sigma_s,i(λ))*length_i` 和 `Tr=exp(-tau)`。这是分块常数模型的精确积分，误差来自浮点舍入。每次跨面至少推进一个体素下标，边角处同时推进所有相交轴。零方向轴不跨面，面上反向起步通过零长度跨面处理。相机路径的确定性消光分支和太阳、圆盘、环境阴影共用此透射率。
+
+`GridMedium::sample_segment` 内使用分段局部 Majorant `M_b(λ) >= sigma_t(x, λ)` 进行 Delta Tracking。粗块 DDA 按前后顺序给出射线段，介质用对应粗块与当前波长计算上界。 [Delta Tracking](https://pbr-book.org/4ed/Volume_Scattering/Transmittance)
 
 1. 延迟抽取单位指数光学深度 `tau=-ln(1-u)`，`u` 取开区间 `(0,1)`。`M_b=0` 的块直接跳过，不消费 RNG。
 2. 当前段剩余长度为 L。若 `tau >= M_b*L`，扣除 `M_b*L`，携带剩余光学深度进入下一块；否则候选点在当前起点后 `tau/M_b` 米处。跨块携带的是光学深度，不能直接复用米制自由程。
 3. 候选点 x 以 `sigma_t(x)/M_b` 接受为真实消光碰撞；空碰撞后重新抽取光学深度，继续内部循环。跨块不额外乘 Tr，也不产生物理路径顶点。
 4. 真实碰撞的边缘距离密度仍为 `sigma_t(x) Tr(x)`，隐式吸收权重为 `sigma_s(x)/sigma_t(x)`。存活至段尾的概率已是 Tr，因此返回无碰撞、权重 1。
 
-空碰撞不返回给相机、不调用 HG/NEE，也不占 `max_volume_scatters`；没有任意候选次数截断。真实散射继续复用现有多次体散射循环，支持 RGB/Hero/Packet。纯吸收、全零有效散射或预算耗尽时返回精确细体素 DDA 消光；不相交或空区间返回权重 1，这些分支不消费介质 RNG。即使全局上界非零，仅穿过零上界块的射线也不消费 RNG。随机采样仅使用介质流，Packet 各 lane 持有各自的 CRN 副本。
+只有真实散射才返回给相机，调用 HG 和 NEE，并占用 `max_volume_scatters`。当前波长在全网格的有效散射系数为零，或预算耗尽时，返回精确细体素 DDA 消光。空区间返回权重 1。这些分支和只穿过零上界块的路径均无需抽样。Packet 各 lane 持有各自的介质 RNG 副本。
 
 构造保证每块 Majorant 覆盖其局部消光；碰撞距离无法以 f64 表达在段内、区间/位置溢出或舍入后查询到的消光超出当前局部上界时返回错误，不推进 epsilon、夹紧接受概率或静默截断。细体素与粗块复用私有 DDA 步进，阴影与确定性分支仍使用精确 Tr，未引入 Ratio Tracking。改变分块布局会改变随机数消耗，版本间比较统计分布；同一设置/seed 在 1/2/4 线程下仍逐位一致。
 

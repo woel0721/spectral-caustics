@@ -12,7 +12,7 @@ use spectral_caustics::{
     material::lambertian::Lambertian,
     medium::{
         GridMedium, GridMediumConfig, HomogeneousMedium, HomogeneousMediumConfig, Medium,
-        MediumCoefficients, MediumConfig, MediumSample, phase::HenyeyGreenstein,
+        MediumCoefficient, MediumCoefficients, MediumConfig, MediumSample, phase::HenyeyGreenstein,
     },
     optics::dispersion::IorMode,
     renderer::Renderer,
@@ -29,22 +29,24 @@ impl Medium for CustomMedium {
     fn density_at(&self, position: Vector3<f64>) -> f64 {
         self.inner.density_at(position)
     }
-    fn coefficients_at(&self, position: Vector3<f64>) -> MediumCoefficients {
-        self.inner.coefficients_at(position)
+    fn coefficients_at(&self, position: Vector3<f64>, wavelength_nm: f64) -> MediumCoefficients {
+        self.inner.coefficients_at(position, wavelength_nm)
     }
-    fn sigma_t_majorant(&self) -> f64 {
-        self.inner.sigma_t_majorant()
+    fn sigma_t_majorant(&self, wavelength_nm: f64) -> f64 {
+        self.inner.sigma_t_majorant(wavelength_nm)
     }
     fn phase(&self) -> HenyeyGreenstein {
         self.inner.phase()
     }
-    fn transmittance_ray(&self, ray: &Ray, max_distance: f64) -> f64 {
-        self.inner.transmittance_ray(ray, max_distance)
+    fn transmittance_ray(&self, ray: &Ray, max_distance: f64, wavelength_nm: f64) -> f64 {
+        self.inner
+            .transmittance_ray(ray, max_distance, wavelength_nm)
     }
     fn sample_segment(
         &self,
         ray: &Ray,
         max_distance: f64,
+        wavelength_nm: f64,
         allow_scattering: bool,
         rng: &mut dyn RngCore,
     ) -> Result<MediumSample, String> {
@@ -52,7 +54,7 @@ impl Medium for CustomMedium {
             return Ok(sample);
         }
         self.inner
-            .sample_segment(ray, max_distance, allow_scattering, rng)
+            .sample_segment(ray, max_distance, wavelength_nm, allow_scattering, rng)
     }
 }
 
@@ -66,9 +68,9 @@ fn custom_medium_runs_rgb_hero_packet_in_parallel_without_a_config_variant() {
     let Some(MediumConfig::Homogeneous(m)) = &mut c.scene.medium else {
         panic!("expected homogeneous medium");
     };
-    m.sigma_a = 0.5;
-    m.sigma_s = 0.0;
-    let coefficients = *m;
+    m.sigma_a = 0.5.into();
+    m.sigma_s = 0.0.into();
+    let coefficients = m.clone();
     for (mode, packet) in [
         (CameraMode::Rgb, 1),
         (CameraMode::Spectral, 1),
@@ -95,8 +97,8 @@ fn camera_rejects_invalid_custom_medium_samples_before_accumulating_radiance() {
     let inner = HomogeneousMedium::try_from(&HomogeneousMediumConfig {
         min_m: [-1.0; 3],
         max_m: [1.0; 3],
-        sigma_a: 0.5,
-        sigma_s: 0.0,
+        sigma_a: 0.5.into(),
+        sigma_s: 0.0.into(),
         g: 0.0,
     })
     .unwrap();
@@ -110,7 +112,7 @@ fn camera_rejects_invalid_custom_medium_samples_before_accumulating_radiance() {
     ] {
         job.camera_options.max_volume_scatters = budget;
         job.scene.medium = Some(Box::new(CustomMedium {
-            inner,
+            inner: inner.clone(),
             sample_override: Some(MediumSample { position, weight }),
         }));
         let mut rgb = CameraPathState::new(Ray::new(Vector3::z() * 2.0, -Vector3::z()).unwrap(), 0);
@@ -141,8 +143,8 @@ fn layers(a: f64, s: f64) -> GridMediumConfig {
         max_m: [100.0, 100.0, 3.0],
         resolution: [1, 1, 2],
         densities: vec![1.0, 3.0],
-        sigma_a_base: a,
-        sigma_s_base: s,
+        sigma_a_base: a.into(),
+        sigma_s_base: s.into(),
         g: 0.7,
     }
 }
@@ -328,36 +330,56 @@ fn uniform_grid_and_homogeneous_render_the_same_extinction_in_rgb_hero_and_packe
     c.render.height = 8;
     c.render.camera_spp = 16;
     c.scene.max_volume_scatters = 0;
-    let Some(MediumConfig::Grid(m)) = &mut c.scene.medium else {
-        panic!("expected grid")
-    };
-    m.densities.fill(1.0);
-    let homogeneous = HomogeneousMediumConfig {
-        min_m: m.min_m,
-        max_m: m.max_m,
-        sigma_a: m.sigma_a_base,
-        sigma_s: m.sigma_s_base,
-        g: m.g,
-    };
-    for (mode, packet) in [
-        (CameraMode::Rgb, 1),
-        (CameraMode::Spectral, 1),
-        (CameraMode::Spectral, 4),
-    ] {
-        c.render.camera_mode = mode;
-        c.render.spectral_packet_size = packet;
-        let grid = Renderer::new(c.render.clone())
-            .unwrap()
-            .render(&c.build().unwrap())
-            .unwrap();
-        let mut h = c.clone();
-        h.scene.medium = Some(MediumConfig::Homogeneous(homogeneous));
-        let uniform = Renderer::new(h.render.clone())
-            .unwrap()
-            .render(&h.build().unwrap())
-            .unwrap();
-        for (actual, expected) in grid.combined.pixels().iter().zip(uniform.combined.pixels()) {
-            assert!((actual - expected).norm() < 1e-12);
+    for chromatic in [false, true] {
+        let Some(MediumConfig::Grid(m)) = &mut c.scene.medium else {
+            panic!("expected grid")
+        };
+        m.densities.fill(1.0);
+        if chromatic {
+            m.sigma_a_base = MediumCoefficient::Curve {
+                samples: vec![[380.0, 0.2], [780.0, 0.7]],
+            };
+            m.sigma_s_base = MediumCoefficient::Curve {
+                samples: vec![[380.0, 0.9], [580.0, 0.3], [780.0, 0.0]],
+            };
+        }
+        let homogeneous = HomogeneousMediumConfig {
+            min_m: m.min_m,
+            max_m: m.max_m,
+            sigma_a: m.sigma_a_base.clone(),
+            sigma_s: m.sigma_s_base.clone(),
+            g: m.g,
+        };
+        for (mode, packet) in [
+            (CameraMode::Rgb, 1),
+            (CameraMode::Spectral, 1),
+            (CameraMode::Spectral, 4),
+        ] {
+            c.render.camera_mode = mode;
+            c.render.spectral_packet_size = packet;
+            let renderer = Renderer::new(c.render.clone()).unwrap();
+            let grid = renderer.render(&c.build().unwrap());
+            if chromatic && mode == CameraMode::Rgb {
+                assert!(
+                    grid.err()
+                        .expect("expected RGB rejection")
+                        .to_string()
+                        .contains("camera_mode")
+                );
+                continue;
+            }
+            let mut h = c.clone();
+            h.scene.medium = Some(MediumConfig::Homogeneous(homogeneous.clone()));
+            let uniform = renderer.render(&h.build().unwrap()).unwrap();
+            for (actual, expected) in grid
+                .unwrap()
+                .combined
+                .pixels()
+                .iter()
+                .zip(uniform.combined.pixels())
+            {
+                assert!((actual - expected).norm() < 1e-12);
+            }
         }
     }
 }

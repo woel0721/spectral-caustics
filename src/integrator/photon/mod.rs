@@ -3,7 +3,9 @@ mod generation;
 mod path;
 use crate::config::RenderJob;
 use crate::geometry::ray::Ray;
+use crate::medium::ACHROMATIC_QUERY_NM;
 use crate::optics::dispersion::IorMode;
+use crate::spectrum::emission::{WAVELENGTH_MAX_NM, WAVELENGTH_MIN_NM};
 pub(crate) use generation::integrate_camera_xyz;
 pub use generation::{integrate_spectral, integrate_xyz};
 use nalgebra::Vector3;
@@ -26,6 +28,15 @@ pub fn trace_photon(
     max_events: usize,
     rng: &mut dyn rand::RngCore,
 ) -> Result<PhotonPathResult, &'static str> {
+    let medium_wavelength_nm = if job.scene.has_wavelength_dependent_medium() {
+        let nm = wavelength_nm.ok_or("wavelength-dependent photon media require a wavelength")?;
+        if !(WAVELENGTH_MIN_NM..=WAVELENGTH_MAX_NM).contains(&nm) {
+            return Err("photon medium wavelength must be in 380–780 nm");
+        }
+        nm
+    } else {
+        ACHROMATIC_QUERY_NM
+    };
     let object_id = job.photon.caustics_object_id.ok_or("未选择焦散物体")?;
     let tracer = PhotonTracer::new(
         job,
@@ -35,5 +46,11 @@ pub fn trace_photon(
             .ok_or("光子 IOR 无效")?,
         max_events,
     )?;
-    tracer.trace(job, ray, job.scene.intersect(&ray), rng)
+    tracer.trace(
+        job,
+        ray,
+        job.scene.intersect(&ray),
+        medium_wavelength_nm,
+        rng,
+    )
 }

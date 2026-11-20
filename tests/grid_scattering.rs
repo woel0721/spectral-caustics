@@ -75,8 +75,8 @@ fn layered_grid_single_scattering_matches_independent_slab_integrals() {
         max_m: [100.0, 100.0, 3.0],
         resolution: [1, 1, 16],
         densities: (0..16).map(|i| if i < 8 { 1.0 } else { 3.0 }).collect(),
-        sigma_a_base: 0.2,
-        sigma_s_base: 0.3,
+        sigma_a_base: 0.2.into(),
+        sigma_s_base: 0.3.into(),
         g: 0.0,
     });
     job.camera_options.max_volume_scatters = 1;
@@ -89,8 +89,8 @@ fn layered_grid_single_scattering_matches_independent_slab_integrals() {
                 max_m: [100.0, 100.0, 3.0],
                 resolution: [1, 1, 16],
                 densities: (0..16).map(|i| if i < 8 { 1.0 } else { 3.0 }).collect(),
-                sigma_a_base: 0.2,
-                sigma_s_base: 0.3,
+                sigma_a_base: 0.2.into(),
+                sigma_s_base: 0.3.into(),
                 g,
             })
             .unwrap(),
@@ -137,8 +137,8 @@ fn heterogeneous_multiple_scattering_preserves_albedo_geometry_budgets_and_scala
         max_m: [1.0; 3],
         resolution: [16; 3],
         densities: octants([0.2, 2.0, 1.0, 3.0, 2.0, 0.5, 4.0, 1.5]),
-        sigma_a_base: 0.8,
-        sigma_s_base: 3.2,
+        sigma_a_base: 0.8.into(),
+        sigma_s_base: 3.2.into(),
         g: 0.4,
     });
     let ray = Ray::new(Vector3::z() * 3.0, -Vector3::z()).unwrap();
@@ -161,12 +161,11 @@ fn heterogeneous_multiple_scattering_preserves_albedo_geometry_budgets_and_scala
             assert_eq!(a.next_u64(), b.next_u64());
             let mut expected = 0.8_f64.powi(rgb.volume_scatters as i32);
             if rgb.volume_scatters == budget {
-                expected *= job
-                    .scene
-                    .medium
-                    .as_ref()
-                    .unwrap()
-                    .transmittance_ray(&rgb.ray, f64::INFINITY);
+                expected *= job.scene.medium.as_ref().unwrap().transmittance_ray(
+                    &rgb.ray,
+                    f64::INFINITY,
+                    550.0,
+                );
             }
             assert!((rgb.throughput - Vector3::repeat(expected)).norm() < 1e-13);
             assert!((scalar.throughput - expected).abs() < 1e-13);
@@ -186,8 +185,8 @@ fn conservative_heterogeneous_fog_recovers_unit_environment_with_multiple_scatte
         max_m: [1.0; 3],
         resolution: [16; 3],
         densities: octants([0.0, 0.2, 1.3, 2.0, 0.7, 1.8, 0.3, 1.1]),
-        sigma_a_base: 0.0,
-        sigma_s_base: 0.7,
+        sigma_a_base: 0.0.into(),
+        sigma_s_base: 0.7.into(),
         g: 0.4,
     });
     job.scene.environment = Some(
@@ -229,7 +228,7 @@ fn conservative_heterogeneous_fog_recovers_unit_environment_with_multiple_scatte
             .medium
             .as_ref()
             .unwrap()
-            .transmittance_ray(&ray, f64::INFINITY);
+            .transmittance_ray(&ray, f64::INFINITY, 550.0);
         assert!((means[0] - tr).abs() < 1e-12);
         assert!(means[1] > means[0] && means[2] > means[1] && means[3] > means[2]);
         assert!((means[4] - 1.0).abs() < 0.025, "{mis:?}: {means:?}");

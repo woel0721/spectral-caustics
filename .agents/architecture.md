@@ -25,7 +25,7 @@ RGB 相机传输 `Vector3<f64>`，使用材质的常数 IOR，支持 Lambertian�
 
 Hero 与四波长 Packet 使用同一个标量路径循环。Packet 共享主射线和路径 RNG 的副本，不共享可变路径游标，也不强制各波长发生相同事件。不要再建立一套 SpectralPathState、独立 RR 或独立环境估计器。
 
-源端 XYZ/Eλ 共用 Forward 内核；Constant 复用几何结果，Dispersion 逐波长追踪。RGB 相机也可接收经过光谱积分的色散焦散图，因此 `camera_mode=rgb` 不代表源端必须使用 Constant。权重及波长积分区别见 [transport.md](transport.md)。
+源端 XYZ/Eλ 共用 Forward 内核。Constant 复用落点和线段几何，Dispersion 从首交点逐波长续追。波长无关介质下，RGB 相机也可接收经过光谱积分的色散焦散图。权重及波长积分区别见 [transport.md](transport.md)。
 
 ## 当前物理范围
 
@@ -34,7 +34,7 @@ Hero 与四波长 Packet 使用同一个标量路径循环。Packet 共享主射
 - [Dielectric](../src/material/dielectric.rs) 按几何法线和方向判断空气/玻璃两侧，外部 IOR 固定为 1；光子有显式 Air/Glass 状态。绑定介质界面的焦散目标支持从玻璃内部发射光子。没有嵌套介质栈。
 - `Scene.medium` 持有 `Option<Box<dyn Medium>>`。[Medium](../src/medium/mod.rs) 要求 `Send + Sync`，内置实现为 [HomogeneousMedium](../src/medium/homogeneous.rs) 和 [GridMedium](../src/medium/grid.rs)。内置介质在单个轴对齐盒内作用于空间。光线穿过盒边界时方向不变。JSON 和 Rust API 可为一个封闭理想玻璃绑定 [MediumInterface](../src/scene/medium_interface.rs)。共享的 Camera Path 在起射时分类，接受透射后切换区域，路径与二值可见的局部阴影段均使用活跃介质。
 - 相机只通过 `sample_segment` 取得可选的真实散射位置和已补偿权重，通过 `phase()` 取得 Henyey–Greenstein 相函数，通过 `transmittance_ray` 查询确定性阴影透射率（接口无 RNG 参数）。密度遍历、Majorant、空碰撞与权重补偿由介质实现负责。密度、系数和全局 Majorant 的只读查询供数据检查使用。相机按真实事件管理独立于表面的[体散射预算](transport.md#相函数与体散射预算)。网格采样权重见[传输契约](transport.md#非均匀网格介质)，遍历和分块选择见[私有 DDA 实现](../src/medium/grid/dda.rs)和[基准记录](../docs/medium_majorant_benchmark.md#分块选择与内存)。
-- Forward 光子跟踪参与介质区域与 Air/Glass 折射率侧别，通过活跃介质的 `transmittance_ray` 累积各有限命中段的消光。起射区域与首段 Tr 随首交点缓存。XYZ、Eλ 与独立光子 Direct 预览均记录未发生体散射的通量。层次化空块跳跃、Ratio Tracking、波长相关介质和介质发光未实现。
+- Forward 光子跟踪参与介质区域与 Air/Glass 折射率侧别，通过活跃介质的 `transmittance_ray` 累积当前波长各有限命中段的消光。首交缓存保存起射区域与几何，波长无关的首段 Tr 可跨波长复用。XYZ、Eλ 与独立光子 Direct 预览均记录未发生体散射的通量。
 
 ## Diagnostics
 

@@ -63,8 +63,8 @@ fn field(n: usize, name: &str) -> GridMediumConfig {
         max_m: [1.0; 3],
         resolution: [n; 3],
         densities,
-        sigma_a_base: 0.05,
-        sigma_s_base: 0.95,
+        sigma_a_base: 0.05.into(),
+        sigma_s_base: 0.95.into(),
         g: 0.7,
     }
 }
@@ -123,7 +123,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         // Warm code/data without affecting measured stream states.
         let mut warmup = StdRng::seed_from_u64(7);
         for ray in &rays {
-            black_box(grid.sample_segment(ray, 3.0, true, &mut warmup)?);
+            black_box(grid.sample_segment(ray, 3.0, 550.0, true, &mut warmup)?);
         }
         let mut seconds = Vec::new();
         let (mut candidates, mut draws, mut events, mut weight) = (0_u64, 0_u64, 0_usize, 0.0);
@@ -135,7 +135,8 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             let start = Instant::now();
             for i in 0..samples {
                 let before = rng.draws;
-                let sample = grid.sample_segment(&rays[i % rays.len()], 3.0, true, &mut rng)?;
+                let sample =
+                    grid.sample_segment(&rays[i % rays.len()], 3.0, 550.0, true, &mut rng)?;
                 // Both samplers use one u64 exponential draw and one u64 accept
                 // draw per candidate; a final unused exponential is the odd tail.
                 candidates += (rng.draws - before) / 2;

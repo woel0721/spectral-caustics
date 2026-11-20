@@ -15,7 +15,7 @@ use spectral_caustics::{
     },
     light::{DiskAreaLight, Light},
     material::lambertian::Lambertian,
-    medium::{HomogeneousMedium, HomogeneousMediumConfig, Medium, MediumConfig},
+    medium::{HomogeneousMedium, HomogeneousMediumConfig, Medium, MediumCoefficient, MediumConfig},
     optics::dispersion::IorMode,
     renderer::Renderer,
 };
@@ -25,8 +25,8 @@ fn slab(a: f64, s: f64, g: f64) -> Box<dyn Medium> {
         HomogeneousMedium::try_from(&HomogeneousMediumConfig {
             min_m: [-100.0, -100.0, 1.0],
             max_m: [100.0, 100.0, 2.0],
-            sigma_a: a,
-            sigma_s: s,
+            sigma_a: a.into(),
+            sigma_s: s.into(),
             g,
         })
         .unwrap(),
@@ -82,6 +82,65 @@ fn rgb(j: &RenderJob, r: Ray, sun: (Vector3<f64>, f64), seed: u64) -> Vector3<f6
     let mut state = CameraPathState::new(r, 0);
     trace(j, &mut state, sun, &mut StdRng::seed_from_u64(seed));
     state.combined_radiance()
+}
+
+#[test]
+fn spectral_slab_matches_beer_lambert_and_single_scattering() {
+    use spectral_caustics::spectrum::emission::d65_spectrum;
+
+    let mut job = empty();
+    job.scene.background_color = Vector3::repeat(1.0);
+    job.camera_options.max_volume_scatters = 1;
+    let mut slab = HomogeneousMediumConfig {
+        min_m: [-10.0, -10.0, 1.0],
+        max_m: [10.0, 10.0, 2.0],
+        sigma_a: MediumCoefficient::Curve {
+            samples: vec![[380.0, 0.1], [580.0, 0.5], [780.0, 0.2]],
+        },
+        sigma_s: 0.0.into(),
+        g: 0.0,
+    };
+    for (nm, sigma_a) in [(480.0, 0.3_f64), (580.0, 0.5), (680.0, 0.35)] {
+        let mut vacuum = CameraPathState::spectral(ray(3.0), nm, 0).unwrap();
+        let mut rng = StdRng::seed_from_u64(123);
+        let mut untouched = rng.clone();
+        job.scene.medium = None;
+        trace(&job, &mut vacuum, (Vector3::z(), 0.0), &mut rng);
+        job.scene.medium = Some(Box::new(HomogeneousMedium::try_from(&slab).unwrap()));
+        let mut attenuated = CameraPathState::spectral(ray(3.0), nm, 0).unwrap();
+        trace(&job, &mut attenuated, (Vector3::z(), 0.0), &mut rng);
+        let tr = attenuated.radiance.direct / vacuum.radiance.direct;
+        assert!((tr - (-sigma_a).exp()).abs() < 1e-14);
+        assert_eq!(attenuated.volume_scatters, 0);
+        assert_eq!(rng.next_u64(), untouched.next_u64());
+    }
+
+    job.scene.background_color = Vector3::zeros();
+    slab.sigma_s = MediumCoefficient::Curve {
+        samples: vec![[380.0, 0.6], [580.0, 0.2], [680.0, 0.05], [780.0, 0.0]],
+    };
+    job.scene.medium = Some(Box::new(HomogeneousMedium::try_from(&slab).unwrap()));
+    // Two wavelengths have the same total extinction but different albedo.
+    // The third exercises wavelength-dependent Tr on the shadow ray as well.
+    for (nm, sigma_t, sigma_s) in [(480.0, 0.7_f64, 0.4), (580.0, 0.7, 0.2), (680.0, 0.4, 0.05)] {
+        let sun = (Vector3::z(), 1.0);
+        let sample_count = 30_000;
+        let mut sum = 0.0;
+        let mut rng = StdRng::seed_from_u64(120);
+        for _ in 0..sample_count {
+            let mut state = CameraPathState::spectral(ray(3.0), nm, 0).unwrap();
+            trace(&job, &mut state, sun, &mut rng);
+            sum += state.radiance.direct;
+        }
+        // Camera and sunlight both traverse distance t before reaching the event.
+        let expected = d65_spectrum(nm).unwrap() * sigma_s * (1.0 - (-2.0 * sigma_t).exp())
+            / (2.0 * sigma_t * 4.0 * std::f64::consts::PI);
+        let mean = sum / sample_count as f64;
+        assert!(
+            (mean / expected - 1.0).abs() < 0.025,
+            "{nm} nm: {mean}/{expected}"
+        );
+    }
 }
 
 #[test]
@@ -193,8 +252,8 @@ fn uniform_environment_multiple_scattering_recovers_energy_without_counting_phas
         HomogeneousMedium::try_from(&HomogeneousMediumConfig {
             min_m: [-1.0; 3],
             max_m: [1.0; 3],
-            sigma_a: 0.0,
-            sigma_s: 0.7,
+            sigma_a: 0.0.into(),
+            sigma_s: 0.7.into(),
             g: 0.0,
         })
         .unwrap(),
@@ -289,8 +348,8 @@ fn repeated_volume_events_keep_albedo_weights_rgb_spectral_geometry_and_surface_
             assert_eq!(a.next_u64(), b.next_u64());
             if rgb.volume_scatters == budget {
                 reached_budget = true;
-                let expected =
-                    0.8_f64.powi(budget as i32) * medium.transmittance_ray(&rgb.ray, f64::INFINITY);
+                let expected = 0.8_f64.powi(budget as i32)
+                    * medium.transmittance_ray(&rgb.ray, f64::INFINITY, 550.0);
                 assert!((spectral.throughput - expected).abs() < 1e-14);
                 assert!(rgb.radiance.direct.x > 0.0);
             }
@@ -395,8 +454,8 @@ fn volume_light_visibility_includes_geometry_and_finite_disk_distance() {
         HomogeneousMedium::try_from(&HomogeneousMediumConfig {
             min_m: [-1.0, -1.0, 4.0],
             max_m: [1.0, 1.0, 5.0],
-            sigma_a: 10.0,
-            sigma_s: 0.0,
+            sigma_a: 10.0.into(),
+            sigma_s: 0.0.into(),
             g: 0.0,
         })
         .unwrap(),
@@ -436,7 +495,7 @@ fn configured_fog_repeats_across_rgb_hero_packet_mis_threads_and_zero_density() 
     c.render.height = 8;
     c.render.camera_spp = 16;
     c.render.samples_per_pixel_axis = 1;
-    homogeneous_config(&mut c).sigma_s = 0.8;
+    homogeneous_config(&mut c).sigma_s = 0.8.into();
     for budget in [0, 1, 8] {
         c.scene.max_volume_scatters = budget;
         for (mode, packet) in [
@@ -484,8 +543,8 @@ fn configured_fog_repeats_across_rgb_hero_packet_mis_threads_and_zero_density() 
                 vacuum.scene.medium = None;
                 let mut zero = c.clone();
                 let m = homogeneous_config(&mut zero);
-                m.sigma_a = 0.0;
-                m.sigma_s = 0.0;
+                m.sigma_a = 0.0.into();
+                m.sigma_s = 0.0.into();
                 let render = |config: &Config| {
                     Renderer::new(config.render.clone())
                         .unwrap()
@@ -510,6 +569,68 @@ fn medium_json_defaults_roundtrip_and_invalid_values_fail_building() {
     assert!(c.build().is_err());
     let old = Config::load("configs/default.json").unwrap();
     assert!(old.scene.medium.is_none());
+}
+
+#[test]
+fn spectral_medium_json_renders_in_hero_and_packet_and_rejects_rgb() {
+    use serde_json::json;
+
+    let mut input =
+        serde_json::to_value(Config::load("configs/homogeneous_fog.json").unwrap()).unwrap();
+    input["render"]["camera_mode"] = json!("spectral");
+    input["scene"]["medium"]["sigma_a"] = json!({"samples": [[380, 0.05], [780, 0.3]]});
+    input["scene"]["medium"]["sigma_s"] = json!({"samples": [[380, 0.9], [580, 0.2], [780, 0.05]]});
+    let mut config = Config::from_json(&input.to_string()).unwrap();
+    assert_eq!(
+        Config::from_json(&config.to_json().unwrap()).unwrap(),
+        config
+    );
+    config.render.width = 12;
+    config.render.height = 8;
+    config.render.camera_spp = 32;
+    let job = config.build().unwrap();
+    let render = |config: &Config| Renderer::new(config.render.clone()).unwrap().render(&job);
+    for packet in [1, 4] {
+        config.render.spectral_packet_size = packet;
+        for budget in [0, 1] {
+            config.scene.max_volume_scatters = budget;
+            let job = config.build().unwrap();
+            let mut reference = None;
+            for n in [1, 2, 4] {
+                config.render.thread_count = Some(n);
+                let image = Renderer::new(config.render.clone())
+                    .unwrap()
+                    .render(&job)
+                    .unwrap();
+                let xyz = |frame: &spectral_caustics::film::Framebuffer| {
+                    frame
+                        .pixels()
+                        .iter()
+                        .map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()])
+                        .collect::<Vec<_>>()
+                };
+                let direct = xyz(&image.direct);
+                assert_eq!(xyz(&image.combined), direct);
+                assert!(
+                    image
+                        .caustics
+                        .pixels()
+                        .iter()
+                        .all(|p| *p == Vector3::zeros())
+                );
+                if let Some(expected) = &reference {
+                    assert_eq!(&direct, expected);
+                } else {
+                    reference = Some(direct);
+                }
+            }
+        }
+    }
+    config.render.camera_mode = CameraMode::Rgb;
+    let rgb_error = render(&config)
+        .err()
+        .expect("RGB must require a spectral camera");
+    assert!(rgb_error.to_string().contains("camera_mode"));
 }
 
 #[test]

@@ -403,6 +403,7 @@ mod tests {
             config::camera::CameraConfig,
             medium::{
                 GridMedium, GridMediumConfig, HomogeneousMedium, HomogeneousMediumConfig, Medium,
+                MediumCoefficient,
             },
         };
         let mut job = RenderJob::new();
@@ -420,12 +421,24 @@ mod tests {
                 HomogeneousMedium::try_from(&HomogeneousMediumConfig {
                     min_m: [-2.0; 3],
                     max_m: [2.0; 3],
-                    sigma_a: 0.1,
-                    sigma_s: 0.9,
+                    sigma_a: 0.1.into(),
+                    sigma_s: 0.9.into(),
                     g: 0.3,
                 })
                 .unwrap(),
             ) as Box<dyn Medium>,
+            Box::new(
+                HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+                    min_m: [-2.0; 3],
+                    max_m: [2.0; 3],
+                    sigma_a: 0.1.into(),
+                    sigma_s: MediumCoefficient::Curve {
+                        samples: vec![[380.0, 4.0], [600.0, 0.0], [780.0, 0.0]],
+                    },
+                    g: 0.3,
+                })
+                .unwrap(),
+            ),
             Box::new(
                 GridMedium::try_from(&GridMediumConfig {
                     min_m: [-2.0; 3],
@@ -437,13 +450,14 @@ mod tests {
                                 [(i % 16) / 8 + 2 * ((i / 16) % 16 / 8) + 4 * (i / 256 / 8)]
                         })
                         .collect(),
-                    sigma_a_base: 0.1,
-                    sigma_s_base: 0.9,
+                    sigma_a_base: 0.1.into(),
+                    sigma_s_base: 0.9.into(),
                     g: 0.3,
                 })
                 .unwrap(),
             ),
         ] {
+            let chromatic = medium.is_wavelength_dependent();
             job.scene.medium = Some(medium);
             job.camera_options.max_volume_scatters = 4;
             let settings = RenderSetting {
@@ -457,6 +471,7 @@ mod tests {
             let (sun_wi, sun) = job.scene.light.analytic_sun().unwrap().unwrap();
             let mut expected = Vector3::zeros();
             let mut seen_multiple = false;
+            let mut seen_divergent_lanes = false;
             for i in 0..4 {
                 let mut jitter = packet_rng(settings.seed, 0, i, 0, CAMERA_STREAM);
                 let ray = job
@@ -469,7 +484,7 @@ mod tests {
                         Vector2::new(jitter.random(), jitter.random()),
                     )
                     .unwrap();
-                let mut reference = None;
+                let mut reference = None::<(usize, _, _, _, _)>;
                 for lane in 0..4 {
                     let mut wavelength = packet_rng(settings.seed, 0, i, lane, WAVELENGTH_STREAM);
                     let nm = packet_wavelength_nm(i, 4, lane, wavelength.random());
@@ -508,7 +523,11 @@ mod tests {
                         medium.next_u64(),
                     );
                     if let Some(r) = reference {
-                        assert_eq!(geometry, r);
+                        if chromatic {
+                            seen_divergent_lanes |= geometry.0 != r.0;
+                        } else {
+                            assert_eq!(geometry, r);
+                        }
                     } else {
                         reference = Some(geometry);
                     }
@@ -518,6 +537,7 @@ mod tests {
                 }
             }
             assert!(seen_multiple);
+            assert_eq!(seen_divergent_lanes, chromatic);
             let actual = integrate_spectral(&job, &settings, None).unwrap();
             assert_eq!(actual.direct.pixels(), &[expected]);
             assert_eq!(actual.caustics.pixels(), &[Vector3::zeros()]);

@@ -28,6 +28,7 @@ pub(in crate::integrator::camera) fn volume_lighting<T: CameraTransport>(
             ray,
             distance,
             Some(medium),
+            transport.wavelength_nm(),
         )
     };
     let mut result = T::Value::default();

@@ -11,6 +11,7 @@ use crate::{
     config::RenderJob,
     geometry::{hit::Hit, ray::Ray},
     material::{Material, unit_vector},
+    medium::{ACHROMATIC_QUERY_NM, SPECTRAL_CAMERA_REQUIRED},
     optics::dispersion::IorMode,
 };
 use nalgebra::Vector3;
@@ -126,6 +127,7 @@ pub fn trace_camera_path<T: CameraTransport>(
         .initial_medium_region(state.ray.origin, state.medium_region)?;
     state.medium_region = Some(region);
     let transport = state.transport;
+    let wavelength_nm = transport.wavelength_nm();
     let (sun_wi, sun) = transport.sunlight(light_wi, light, map)?;
     let mut area = AreaLightSampler::new(job, rngs.camera);
     let mut from_volume = false;
@@ -140,10 +142,14 @@ pub fn trace_camera_path<T: CameraTransport>(
         };
         let medium = job.scene.active_medium(region)?;
         if let Some(medium) = medium {
+            if wavelength_nm.is_none() && medium.is_wavelength_dependent() {
+                return Err(SPECTRAL_CAMERA_REQUIRED.into());
+            }
             let allow_scattering = state.volume_scatters < job.camera_options.max_volume_scatters;
             let sample = medium.sample_segment(
                 &state.ray,
                 hit.as_ref().map_or(f64::INFINITY, |h| h.distance),
+                wavelength_nm.unwrap_or(ACHROMATIC_QUERY_NM),
                 allow_scattering,
                 rngs.medium,
             )?;
@@ -252,7 +258,15 @@ pub fn trace_camera_path<T: CameraTransport>(
             let mut direct = T::Value::default();
             if !disable && cosine > 0.0 && f != T::Value::default() && sun != T::Value::default() {
                 direct = transport.multiply(f, sun)
-                    * (cosine * transmittance_to_light(job, hit.coords, normal, sun_wi, medium)?);
+                    * (cosine
+                        * transmittance_to_light(
+                            job,
+                            hit.coords,
+                            normal,
+                            sun_wi,
+                            medium,
+                            wavelength_nm,
+                        )?);
             }
             let env_rng = if state.has_non_delta_vertex || state.non_delta_bounces > 0 {
                 &mut *rngs.diffuse

@@ -40,6 +40,9 @@ impl Renderer {
             }
             CameraMode::Rgb => {
                 if let Some(target) = job.photon.caustics_object_id {
+                    if job.scene.has_wavelength_dependent_medium() {
+                        return Err(crate::medium::SPECTRAL_CAMERA_REQUIRED.into());
+                    }
                     let lighting = crate::integrator::photon::integrate_camera_xyz(
                         job,
                         target,

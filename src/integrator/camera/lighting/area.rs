@@ -43,7 +43,14 @@ impl AreaLightSampler {
             if cosine == 0.0 || sample.incident_weight == 0.0 {
                 continue;
             }
-            let tr = transmittance_to_point(job, hit.coords, normal, sample.position, medium)?;
+            let tr = transmittance_to_point(
+                job,
+                hit.coords,
+                normal,
+                sample.position,
+                medium,
+                transport.wavelength_nm(),
+            )?;
             if tr == 0.0 {
                 continue;
             }
@@ -67,6 +74,7 @@ fn transmittance_to_point(
     normal: Vector3<f64>,
     target: Vector3<f64>,
     medium: Option<&dyn Medium>,
+    wavelength_nm: Option<f64>,
 ) -> Result<f64, Box<dyn Error + Send + Sync>> {
     let origin = surface_ray_origin(&job.scene, position, normal, 1.0);
     let delta = target - origin;
@@ -77,5 +85,6 @@ fn transmittance_to_point(
         &ray,
         distance,
         medium,
+        wavelength_nm,
     ))
 }

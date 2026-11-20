@@ -1220,6 +1220,7 @@ mod stratified {
                     Vector3::z(),
                     wi,
                     scene.scene.medium.as_deref(),
+                    None,
                 )
                 .unwrap()
                     > 0.0

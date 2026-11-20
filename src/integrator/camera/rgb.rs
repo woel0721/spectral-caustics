@@ -22,6 +22,9 @@ pub fn integrate_rgb(
     settings: &crate::config::render::RenderSetting,
     lighting: Option<&SpectralLighting>,
 ) -> Result<CameraLightingImages, Box<dyn Error + Send + Sync>> {
+    if job.scene.has_wavelength_dependent_medium() {
+        return Err(crate::medium::SPECTRAL_CAMERA_REQUIRED.into());
+    }
     let (width, height, spp, seed) = (
         settings.width,
         settings.height,
