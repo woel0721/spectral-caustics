@@ -77,8 +77,8 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let homogeneous = MediumConfig::Homogeneous(HomogeneousMediumConfig {
         min_m: base.min_m,
         max_m: base.max_m,
-        sigma_a: base.sigma_a_base,
-        sigma_s: base.sigma_s_base,
+        sigma_a: base.sigma_a_base.clone(),
+        sigma_s: base.sigma_s_base.clone(),
         g: base.g,
     });
     let layered = MediumConfig::Grid(density_field(&base, false));

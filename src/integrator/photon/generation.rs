@@ -2,14 +2,15 @@ use crate::caustics::map::ground_splat_weights;
 use crate::geometry::hit::Hit;
 // Shared forward emission and scalar irradiance kernel for XYZ and wavelength atlases.
 use super::{
-    PhotonTracer,
-    path::{PhotonPathState, segment_transmittance},
+    PhotonLanding, PhotonTracer,
+    path::{PhotonPathState, PhotonSegment},
 };
 use crate::{
-    caustics::{SpectralCausticsMap, SpectralLighting},
+    caustics::{GroundReceiver, SpectralCausticsMap, SpectralLighting},
     config::{RenderJob, render::RenderSetting},
     film::Framebuffer,
     geometry::ray::Ray,
+    medium::ACHROMATIC_QUERY_NM,
     optics::dispersion::IorMode,
     scene::MediumRegion,
     spectrum::{cie_xyz, d65_spd},
@@ -20,17 +21,62 @@ use rand_chacha::ChaCha12Rng;
 use rayon::prelude::*;
 use std::ops::Range;
 type PhotonError = Box<dyn std::error::Error + Send + Sync>;
-// Wavelength-independent data for a photon that hit the caustics target.
 struct EmissionHit {
     index: usize,
-    ray: Ray,
+    segment: PhotonSegment,
     hit: Hit,
-    region: MediumRegion,
-    tr: f64,
+    // Only achromatic first segments have a cached transmittance.
+    tr: Option<f64>,
+}
+struct DirectBlock {
+    fixed: Vec<f64>,
+    spectral: Vec<(PhotonSegment, Vector3<f64>)>,
+}
+#[derive(Default)]
+struct CachedPaths {
+    landings: Vec<(PhotonLanding, Range<usize>)>,
+    segments: Vec<PhotonSegment>,
+}
+impl CachedPaths {
+    fn trace(
+        &mut self,
+        job: &RenderJob,
+        tracer: &PhotonTracer,
+        segment: PhotonSegment,
+        hit: Hit,
+        rng: &mut ChaCha12Rng,
+    ) -> Result<(), &'static str> {
+        let start = self.segments.len();
+        let mut record = |segment: PhotonSegment| {
+            if let Some(tr) = fixed_transmittance(job, segment)? {
+                return Ok(tr);
+            }
+            self.segments
+                .try_reserve(1)
+                .map_err(|_| "cannot allocate spectral photon segments")?;
+            self.segments.push(segment);
+            Ok(1.0)
+        };
+        let tr = record(segment)?;
+        let state = PhotonPathState::new(segment.ray, segment.region, tracer.object_id, tr);
+        if let Some(landing) = tracer
+            .trace_state(job, state, Some(hit), rng, record)?
+            .landing()
+        {
+            self.landings
+                .try_reserve(1)
+                .map_err(|_| "cannot allocate cached photon landings")?;
+            self.landings.push((landing, start..self.segments.len()));
+        } else {
+            self.segments.truncate(start);
+        }
+        Ok(())
+    }
 }
 struct EmissionBlock {
     hits: Vec<EmissionHit>,
-    direct: Option<Vec<f64>>,
+    paths: CachedPaths,
+    direct: Option<DirectBlock>,
 }
 struct PhotonPlan {
     blocks: Vec<EmissionBlock>,
@@ -39,8 +85,13 @@ struct PhotonPlan {
     weight: f64,
     nodes: Vec<(f64, f64)>,
     normalization: f64,
+    spectral_extinction: bool,
 }
 impl PhotonPlan {
+    fn source_density(&self, nm: f64) -> f64 {
+        self.normalization * d65_spd(nm).expect("embedded spectrum")
+    }
+
     fn new(
         job: &RenderJob,
         settings: &RenderSetting,
@@ -94,6 +145,12 @@ impl PhotonPlan {
             .light
             .spectral_normalization(&nodes)
             .ok_or("invalid source spectrum")?;
+        let spectral_extinction = job.scene.has_wavelength_dependent_medium();
+        let fixed_tracer = if spectral_extinction && settings.mode == IorMode::Constant {
+            photon_tracer(job, settings, target, ground, nodes[0].0)?
+        } else {
+            None
+        };
         let blocks: Result<Vec<_>, &'static str> = spectral_sample_blocks(
             nx,
             ny,
@@ -105,31 +162,53 @@ impl PhotonPlan {
         .map(|(rows, mut rng)| {
             let mut block = EmissionBlock {
                 hits: Vec::new(),
-                direct: direct.then(|| vec![0.0; pixels]),
+                paths: CachedPaths::default(),
+                direct: direct.then(|| DirectBlock {
+                    fixed: vec![0.0; pixels],
+                    spectral: Vec::new(),
+                }),
             };
             for_each_emitted_hit(job, nx, ny, rows, &mut rng, |index, ray, hit, region| {
+                let segment = PhotonSegment {
+                    ray,
+                    region,
+                    distance: hit.distance,
+                };
                 if hit.object_id == ground {
-                    if let Some(values) = &mut block.direct {
-                        let irradiance =
-                            weight * segment_transmittance(&job.scene, region, &ray, hit.distance)?;
-                        for (x, y, w) in ground_splat_weights(
-                            hit.coords,
-                            settings.width,
-                            settings.height,
-                            &job.photon.receiver,
-                        )? {
-                            values[y * settings.width + x] += irradiance * w;
+                    if let Some(direct) = &mut block.direct {
+                        if let Some(tr) = fixed_transmittance(job, segment)? {
+                            deposit(
+                                &mut direct.fixed,
+                                hit.coords,
+                                weight * tr,
+                                [settings.width, settings.height],
+                                &job.photon.receiver,
+                            )?;
+                        } else {
+                            direct
+                                .spectral
+                                .try_reserve(1)
+                                .map_err(|_| "cannot allocate spectral direct hits")?;
+                            direct.spectral.push((segment, hit.coords));
                         }
                     }
                 } else if Some(hit.object_id) == target {
-                    let tr = segment_transmittance(&job.scene, region, &ray, hit.distance)?;
-                    block.hits.push(EmissionHit {
-                        index,
-                        ray,
-                        hit,
-                        region,
-                        tr,
-                    });
+                    if let Some(tracer) = &fixed_tracer {
+                        block.paths.trace(
+                            job,
+                            tracer,
+                            segment,
+                            hit,
+                            &mut event_rng(settings.seed, index),
+                        )?;
+                    } else {
+                        block.hits.push(EmissionHit {
+                            index,
+                            segment,
+                            hit,
+                            tr: fixed_transmittance(job, segment)?,
+                        });
+                    }
                 }
                 Ok(())
             })?;
@@ -142,16 +221,70 @@ impl PhotonPlan {
             weight,
             nodes,
             normalization,
+            spectral_extinction,
             blocks: blocks?,
         })
     }
 }
-struct GeometryLayer {
+
+fn fixed_transmittance(
+    job: &RenderJob,
+    segment: PhotonSegment,
+) -> Result<Option<f64>, &'static str> {
+    match segment.medium(&job.scene)? {
+        None => Ok(Some(1.0)),
+        Some(medium) if medium.is_wavelength_dependent() => Ok(None),
+        Some(medium) => segment
+            .transmittance_in(medium, ACHROMATIC_QUERY_NM)
+            .map(Some),
+    }
+}
+
+fn photon_tracer(
+    job: &RenderJob,
+    settings: &RenderSetting,
+    target: Option<usize>,
+    ground: usize,
+    nm: f64,
+) -> Result<Option<PhotonTracer>, &'static str> {
+    target
+        .map(|id| {
+            let ior = job
+                .photon_ior(id, Some(nm), settings.mode)
+                .ok_or("invalid dielectric IOR")?;
+            PhotonTracer::new(job, id, ground, ior, settings.photon_max_events)
+        })
+        .transpose()
+}
+
+fn event_rng(seed: u64, index: usize) -> ChaCha12Rng {
+    let mut events = ChaCha12Rng::seed_from_u64(seed);
+    events.set_stream((index as u64) ^ 0x7068_6f74_6f6e_0001);
+    events
+}
+
+fn deposit(
+    values: &mut [f64],
+    position: Vector3<f64>,
+    irradiance: f64,
+    [width, height]: [usize; 2],
+    receiver: &GroundReceiver,
+) -> Result<(), &'static str> {
+    for (x, y, w) in ground_splat_weights(position, width, height, receiver)? {
+        let value = &mut values[y * width + x];
+        *value += irradiance * w;
+        if !value.is_finite() {
+            return Err("irradiance accumulation overflow");
+        }
+    }
+    Ok(())
+}
+struct IrradianceLayer {
     direct: Option<Vec<f64>>,
     caustics: Vec<f64>,
 }
 #[allow(clippy::too_many_arguments)]
-fn geometry_layer(
+fn irradiance_layer(
     job: &RenderJob,
     settings: &RenderSetting,
     plan: &PhotonPlan,
@@ -160,61 +293,87 @@ fn geometry_layer(
     nm: f64,
     direct: bool,
     parallel: bool,
-) -> Result<GeometryLayer, PhotonError> {
-    let tracer = target
-        .map(|id| {
-            let ior = job
-                .photon_ior(id, Some(nm), settings.mode)
-                .ok_or("invalid dielectric IOR")?;
-            PhotonTracer::new(job, id, ground, ior, settings.photon_max_events)
-        })
-        .transpose()?;
-    let block = |source: &EmissionBlock| -> Result<GeometryLayer, &'static str> {
+) -> Result<IrradianceLayer, PhotonError> {
+    let tracer = if plan.spectral_extinction && settings.mode == IorMode::Constant {
+        None // Landings and spectral segments are already cached.
+    } else {
+        photon_tracer(job, settings, target, ground, nm)?
+    };
+    let transmittance = |segment: PhotonSegment| segment.transmittance(&job.scene, nm);
+    let dimensions = [plan.width, plan.height];
+    let receiver = &job.photon.receiver;
+    let block = |source: &EmissionBlock| -> Result<IrradianceLayer, &'static str> {
         let count = plan.width * plan.height;
-        let mut layer = GeometryLayer {
-            direct: if direct { source.direct.clone() } else { None },
-            caustics: vec![0.0; count],
-        };
+        let mut caustics = vec![0.0; count];
+        for (landing, segments) in &source.paths.landings {
+            let mut weight = landing.weight;
+            for &segment in &source.paths.segments[segments.clone()] {
+                weight *= transmittance(segment)?;
+            }
+            deposit(
+                &mut caustics,
+                landing.position,
+                plan.weight * weight,
+                dimensions,
+                receiver,
+            )?;
+        }
         if let Some(tracer) = &tracer {
             for &EmissionHit {
                 index,
-                ray,
+                segment,
                 hit,
-                region,
                 tr,
             } in &source.hits
             {
-                let mut events = ChaCha12Rng::seed_from_u64(settings.seed);
-                events.set_stream((index as u64) ^ 0x7068_6f74_6f6e_0001);
-                let state = PhotonPathState::new(ray, region, tracer.object_id, tr);
-                let Some(landing) = tracer
-                    .trace_state(job, state, Some(hit), &mut events)?
-                    .landing()
-                else {
-                    continue;
+                let tr = match tr {
+                    Some(tr) => tr,
+                    None => transmittance(segment)?,
                 };
-                for (x, y, w) in ground_splat_weights(
-                    landing.position,
-                    plan.width,
-                    plan.height,
-                    &job.photon.receiver,
-                )? {
-                    let p = &mut layer.caustics[y * plan.width + x];
-                    *p += plan.weight * landing.weight * w;
-                    if !p.is_finite() {
-                        return Err("irradiance accumulation overflow");
-                    }
+                let state = PhotonPathState::new(segment.ray, segment.region, tracer.object_id, tr);
+                if let Some(landing) = tracer
+                    .trace_state(
+                        job,
+                        state,
+                        Some(hit),
+                        &mut event_rng(settings.seed, index),
+                        transmittance,
+                    )?
+                    .landing()
+                {
+                    deposit(
+                        &mut caustics,
+                        landing.position,
+                        plan.weight * landing.weight,
+                        dimensions,
+                        receiver,
+                    )?;
                 }
             }
         }
-        Ok(layer)
+        let direct = if let Some(source) = source.direct.as_ref().filter(|_| direct) {
+            let mut values = source.fixed.clone();
+            for &(segment, position) in &source.spectral {
+                deposit(
+                    &mut values,
+                    position,
+                    plan.weight * transmittance(segment)?,
+                    dimensions,
+                    receiver,
+                )?;
+            }
+            Some(values)
+        } else {
+            None
+        };
+        Ok(IrradianceLayer { direct, caustics })
     };
     // Indexed collection fixes the reduction order independently of worker count.
-    let mut result = GeometryLayer {
+    let mut result = IrradianceLayer {
         direct: direct.then(|| vec![0.0; plan.width * plan.height]),
         caustics: vec![0.0; plan.width * plan.height],
     };
-    let mut merge = |part: Result<GeometryLayer, &'static str>| -> Result<(), PhotonError> {
+    let mut merge = |part: Result<IrradianceLayer, &'static str>| -> Result<(), PhotonError> {
         let part = part?;
         for (a, b) in result.caustics.iter_mut().zip(part.caustics) {
             *a += b;
@@ -237,6 +396,20 @@ fn geometry_layer(
     }
     Ok(result)
 }
+fn accumulate_xyz(
+    frame: &mut Framebuffer,
+    values: Vec<f64>,
+    xyz_per_unit: Vector3<f64>,
+) -> Result<(), PhotonError> {
+    for (pixel, value) in frame.pixels.iter_mut().zip(values) {
+        *pixel += xyz_per_unit * value;
+        if !pixel.iter().all(|v| v.is_finite()) {
+            return Err("photon XYZ accumulation overflow".into());
+        }
+    }
+    Ok(())
+}
+
 pub fn integrate_xyz(
     job: &RenderJob,
     target: Option<usize>,
@@ -263,51 +436,41 @@ fn integrate_xyz_impl(
     let plan = PhotonPlan::new(job, settings, target, ground, direct)?;
     let target = target.filter(|&id| job.supports_ideal_caustics(id));
     let mut caustics = Framebuffer::new(plan.width, plan.height)?;
-    let base = geometry_layer(
-        job,
-        settings,
-        &plan,
-        target,
-        ground,
-        plan.nodes[0].0,
-        direct,
-        true,
-    )?;
+    let mut direct_frame = direct
+        .then(|| Framebuffer::new(plan.width, plan.height))
+        .transpose()?;
     let white = job
         .scene
         .light
         .white_xyz(&plan.nodes)
         .ok_or("source XYZ overflow")?;
-    let direct = if let Some(values) = base.direct {
-        Some({
-            let mut frame = Framebuffer::new(plan.width, plan.height)?;
-            for (p, v) in frame.pixels.iter_mut().zip(values) {
-                *p = white * v;
-            }
-            frame
-        })
-    } else {
-        None
-    };
-    if settings.mode == IorMode::Constant || target.is_none() {
-        for (p, v) in caustics.pixels.iter_mut().zip(base.caustics) {
-            *p = white * v;
+    let spectral_caustics =
+        target.is_some() && (settings.mode == IorMode::Dispersion || plan.spectral_extinction);
+    let spectral_direct = direct && plan.spectral_extinction;
+    for (i, &(nm, width)) in plan.nodes.iter().enumerate() {
+        if i > 0 && !spectral_caustics && !spectral_direct {
+            break;
         }
-    } else {
-        for (index, &(nm, width)) in plan.nodes.iter().enumerate() {
-            let layer = if index == 0 {
-                None
-            } else {
-                Some(geometry_layer(
-                    job, settings, &plan, target, ground, nm, false, true,
-                )?)
-            };
-            let values = layer.as_ref().map_or(&base.caustics, |l| &l.caustics);
-            let xyz = cie_xyz(nm).expect("validated wavelength")
-                * (plan.normalization * d65_spd(nm).expect("embedded spectrum") * width);
-            for (p, v) in caustics.pixels.iter_mut().zip(values) {
-                *p += xyz * *v;
-            }
+        let layer = irradiance_layer(
+            job,
+            settings,
+            &plan,
+            target,
+            ground,
+            nm,
+            direct && (i == 0 || spectral_direct),
+            true,
+        )?;
+        let xyz = cie_xyz(nm).expect("validated wavelength") * (plan.source_density(nm) * width);
+        if i == 0 || spectral_caustics {
+            accumulate_xyz(
+                &mut caustics,
+                layer.caustics,
+                if spectral_caustics { xyz } else { white },
+            )?;
+        }
+        if let (Some(frame), Some(values)) = (&mut direct_frame, layer.direct) {
+            accumulate_xyz(frame, values, if spectral_direct { xyz } else { white })?;
         }
     }
     let (light_wi, strength) = job
@@ -316,7 +479,7 @@ fn integrate_xyz_impl(
         .analytic_sun()?
         .unwrap_or((Vector3::z(), 0.0));
     Ok(SpectralLighting {
-        direct,
+        direct: direct_frame,
         caustics,
         receiver: job.photon.receiver,
         light_wi,
@@ -348,9 +511,9 @@ pub fn integrate_spectral(
         .and_then(|n| n.checked_mul(size_of::<f64>()))
         .filter(|&n| n <= isize::MAX as usize)
         .ok_or("atlas size overflow")?;
-    let constant = if settings.mode == IorMode::Constant {
+    let constant = if settings.mode == IorMode::Constant && !plan.spectral_extinction {
         Some(
-            geometry_layer(
+            irradiance_layer(
                 job,
                 settings,
                 &plan,
@@ -372,11 +535,11 @@ pub fn integrate_spectral(
             let mut layer = if let Some(g) = &constant {
                 g.clone()
             } else {
-                geometry_layer(job, settings, &plan, Some(target), ground, nm, false, false)
+                irradiance_layer(job, settings, &plan, Some(target), ground, nm, false, false)
                     .map_err(|e| e.to_string())?
                     .caustics
             };
-            let density = plan.normalization * d65_spd(nm).expect("embedded spectrum");
+            let density = plan.source_density(nm);
             for value in &mut layer {
                 *value *= density;
                 if !value.is_finite() {
@@ -519,6 +682,78 @@ mod tests {
         fn intersect(&self, ray: &Ray) -> Option<crate::geometry::hit::GeometryHit> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.ground.intersect(ray)
+        }
+    }
+
+    #[test]
+    fn constant_ior_spectral_absorption_reuses_geometry_for_xyz_and_atlas() {
+        use crate::geometry::sphere::Sphere;
+        use crate::material::{dielectric::Dielectric, lambertian::Lambertian};
+        use crate::medium::{HomogeneousMedium, HomogeneousMediumConfig, MediumCoefficient};
+
+        let mut job = vertical_light_scene();
+        let target = job.scene.add(
+            Box::new(Sphere::new(Vector3::z(), 0.8).unwrap()),
+            Box::new(Dielectric::new(1.5).unwrap()),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ground = job.scene.add(
+            Box::new(CountedGround {
+                ground: Ground::new(0.0).unwrap(),
+                calls: calls.clone(),
+            }),
+            Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()),
+        );
+        job.photon.ground_id = Some(ground);
+        job.select_caustics_object(target).unwrap();
+        let mut settings = RenderSetting {
+            width: 10,
+            height: 8,
+            samples_per_pixel_axis: 2,
+            mode: IorMode::Constant,
+            wavelength_step_nm: 100.0,
+            ..Default::default()
+        };
+        let clear = integrate_xyz(&job, Some(target), ground, &settings).unwrap();
+        assert!(clear.caustics.pixels().iter().any(|p| p.y > 0.0));
+        let spatial_samples =
+            settings.width * settings.height * settings.samples_per_pixel_axis.pow(2);
+        let clear_queries = calls.swap(0, Ordering::Relaxed);
+        assert!(clear_queries > spatial_samples);
+
+        job.scene.medium = Some(Box::new(
+            HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+                min_m: [-10.0; 3],
+                max_m: [10.0; 3],
+                sigma_a: MediumCoefficient::Curve {
+                    samples: vec![[380.0, 1.0], [780.0, 0.1]],
+                },
+                sigma_s: 0.0.into(),
+                g: 0.0,
+            })
+            .unwrap(),
+        ));
+        for step in [100.0, 10.0] {
+            settings.wavelength_step_nm = step;
+            let xyz = integrate_xyz(&job, Some(target), ground, &settings).unwrap();
+            assert!(xyz.caustics.pixels().iter().any(|p| p.y > 0.0));
+            assert_eq!(calls.swap(0, Ordering::Relaxed), clear_queries);
+            let atlas = integrate_spectral(&job, &settings).unwrap().unwrap();
+            assert_eq!(
+                atlas.wavelength_samples().len(),
+                (400.0 / step) as usize + 1
+            );
+            assert_eq!(calls.swap(0, Ordering::Relaxed), clear_queries);
+            let direct_only = integrate_xyz(&job, None, ground, &settings).unwrap();
+            assert!(
+                direct_only
+                    .direct
+                    .unwrap()
+                    .pixels()
+                    .iter()
+                    .any(|p| p.y > 0.0)
+            );
+            assert_eq!(calls.swap(0, Ordering::Relaxed), spatial_samples);
         }
     }
 

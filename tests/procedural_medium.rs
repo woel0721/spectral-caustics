@@ -1,4 +1,5 @@
 use nalgebra::Vector3;
+use serde_json::json;
 use spectral_caustics::{
     config::{Config, render::CameraMode},
     geometry::ray::Ray,
@@ -24,8 +25,8 @@ fn configured_fog_has_local_support_and_an_independent_shape_seed() {
     assert_eq!(fog.density_at(Vector3::new(0.79, 0.49, 1.39)), 0.0);
     let through = Ray::new(Vector3::new(0.0, -2.0, 0.8), Vector3::y()).unwrap();
     let outside = Ray::new(Vector3::new(0.81, -2.0, 0.8), Vector3::y()).unwrap();
-    assert!((0.0..1.0).contains(&fog.transmittance_ray(&through, 4.0)));
-    assert_eq!(fog.transmittance_ray(&outside, 4.0), 1.0);
+    assert!((0.0..1.0).contains(&fog.transmittance_ray(&through, 4.0, 550.0)));
+    assert_eq!(fog.transmittance_ray(&outside, 4.0, 550.0), 1.0);
 
     config.render.seed += 1;
     let repeat = config.build().unwrap().scene.medium.unwrap();
@@ -57,11 +58,37 @@ fn procedural_medium_rejects_conflicting_or_invalid_grid_inputs() {
 
 #[test]
 fn disk_lights_local_fog_and_parallel_renders_agree() {
-    let mut config = Config::load("configs/local_procedural_fog.json").unwrap();
-    config.render.width = 24;
-    config.render.height = 16;
-    config.render.camera_spp = 32;
-    config.scene.light_samples = 1;
+    let mut base = Config::load("configs/local_procedural_fog.json").unwrap();
+    base.render.width = 24;
+    base.render.height = 16;
+    base.render.camera_spp = 32;
+    base.scene.light_samples = 1;
+    let mut spectral_json = serde_json::to_value(&base).unwrap();
+    spectral_json["render"]["camera_mode"] = json!("spectral");
+    spectral_json["scene"]["medium"]["sigma_a_base"] = json!({"samples": [[380, 0.1], [780, 0.3]]});
+    spectral_json["scene"]["medium"]["sigma_s_base"] =
+        json!({"samples": [[380, 2.5], [550, 1.2], [780, 0.0]]});
+    let spectral = Config::from_json(&spectral_json.to_string()).unwrap();
+    assert_eq!(
+        Config::from_json(&spectral.to_json().unwrap()).unwrap(),
+        spectral
+    );
+
+    let Some(MediumConfig::Procedural(c)) = &spectral.scene.medium else {
+        panic!("expected a procedural grid");
+    };
+    let fog = spectral.build().unwrap().scene.medium.unwrap();
+    let dy = (c.max_m[1] - c.min_m[1]) / c.resolution[1] as f64;
+    let column_density = (0..c.resolution[1])
+        .map(|i| fog.density_at(Vector3::new(0.0, c.min_m[1] + (i as f64 + 0.5) * dy, 0.81)) * dy)
+        .sum::<f64>();
+    assert!(column_density > 0.0);
+    let through = Ray::new(Vector3::new(0.0, -2.0, 0.81), Vector3::y()).unwrap();
+    for (nm, sigma_t) in [(380.0, 2.6), (550.0, 1.385), (780.0, 0.3)] {
+        let actual = fog.transmittance_ray(&through, 4.0, nm);
+        assert!((actual - (-sigma_t * column_density).exp()).abs() < 1e-13);
+    }
+
     let render = |c: &Config| {
         Renderer::new(c.render.clone())
             .unwrap()
@@ -69,15 +96,26 @@ fn disk_lights_local_fog_and_parallel_renders_agree() {
             .unwrap()
     };
 
-    for (mode, packet) in [
-        (CameraMode::Rgb, 1),
-        (CameraMode::Spectral, 1),
-        (CameraMode::Spectral, 4),
+    for (mut config, mode, packet) in [
+        (base.clone(), CameraMode::Rgb, 1),
+        (base.clone(), CameraMode::Spectral, 1),
+        (base, CameraMode::Spectral, 4),
+        (spectral.clone(), CameraMode::Spectral, 1),
+        (spectral, CameraMode::Spectral, 4),
     ] {
         config.render.camera_mode = mode;
         config.render.spectral_packet_size = packet;
         config.render.thread_count = Some(1);
         let reference = render(&config);
+        for (d, (c, combined)) in reference.direct.pixels().iter().zip(
+            reference
+                .caustics
+                .pixels()
+                .iter()
+                .zip(reference.combined.pixels()),
+        ) {
+            assert_eq!((d + c).map(f64::to_bits), combined.map(f64::to_bits));
+        }
         for threads in [2, 4] {
             config.render.thread_count = Some(threads);
             let parallel = render(&config);

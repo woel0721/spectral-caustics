@@ -21,7 +21,7 @@ use spectral_caustics::{
     material::{
         Material, ScatterType, dielectric::Dielectric, lambertian::Lambertian, mirror::Mirror,
     },
-    medium::{HomogeneousMedium, HomogeneousMediumConfig, Medium},
+    medium::{HomogeneousMedium, HomogeneousMediumConfig, Medium, MediumCoefficient},
     optics::{
         dispersion::IorMode,
         interface::{DielectricEvent, sample_dielectric},
@@ -92,7 +92,7 @@ fn json_medium_interface_roundtrip_preserves_binding_and_interior_extinction() {
             .scene
             .active_medium(actual_region)
             .unwrap()
-            .map_or(1.0, |medium| medium.transmittance_ray(&ray, 0.25));
+            .map_or(1.0, |medium| medium.transmittance_ray(&ray, 0.25, 550.0));
         assert!((tr - (-sigma_t * 0.25).exp()).abs() < 1e-14);
     }
 }
@@ -201,8 +201,8 @@ fn absorption(sigma: f64) -> Box<dyn Medium> {
         HomogeneousMedium::try_from(&HomogeneousMediumConfig {
             min_m: [-10.0; 3],
             max_m: [10.0; 3],
-            sigma_a: sigma,
-            sigma_s: 0.0,
+            sigma_a: sigma.into(),
+            sigma_s: 0.0.into(),
             g: 0.0,
         })
         .unwrap(),
@@ -268,6 +268,41 @@ fn camera_sphere_launches_inside_and_outside_and_attenuates_each_segment() {
         assert_eq!(spectral.delta_events(), events);
         assert_eq!(spectral.medium_region, Some(Exterior));
         assert!((spectral.throughput - expected).abs() < 1e-14);
+    }
+}
+
+#[test]
+fn camera_sphere_uses_the_path_wavelength_in_the_bound_interior() {
+    let mut job = RenderJob::new();
+    job.scene.environment = None;
+    job.scene.background_color = Vector3::repeat(1.0);
+    let id = job.scene.add(sphere(), glass());
+    let interior = HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+        min_m: [-2.0; 3],
+        max_m: [2.0; 3],
+        sigma_a: MediumCoefficient::Curve {
+            samples: vec![[380.0, 0.2], [780.0, 1.0]],
+        },
+        sigma_s: 0.0.into(),
+        g: 0.0,
+    })
+    .unwrap();
+    job.scene
+        .bind_medium_interface(
+            id,
+            MediumInterface {
+                interior: Some(Box::new(interior)),
+            },
+        )
+        .unwrap();
+
+    let ray = Ray::new(-3.0 * Vector3::z(), Vector3::z()).unwrap();
+    for (nm, sigma_a) in [(480.0, 0.4_f64), (680.0, 0.8)] {
+        let mut state = CameraPathState::spectral(ray, nm, 0).unwrap();
+        trace(&job, &mut state, 0.0);
+        assert_eq!(state.delta_events(), 2);
+        assert_eq!(state.medium_region, Some(Exterior));
+        assert!((state.throughput - (-2.0 * sigma_a).exp()).abs() < 1e-14);
     }
 }
 
@@ -515,7 +550,7 @@ fn sphere_classifies_launch_before_any_intersection_and_resolves_vacuum() {
             .active_medium(Exterior)
             .unwrap()
             .unwrap()
-            .transmittance_ray(&ray, 1.0),
+            .transmittance_ray(&ray, 1.0, 550.0),
         (-0.5_f64).exp()
     );
     assert_eq!(
@@ -637,7 +672,7 @@ fn finite_plate_uses_current_medium_until_transmission() {
             .active_medium(region)
             .unwrap()
             .unwrap()
-            .transmittance_ray(&ray, hit.distance);
+            .transmittance_ray(&ray, hit.distance, 550.0);
         region = scene
             .region_after_event(region, &hit, ray.direction, event)
             .unwrap();
@@ -655,7 +690,7 @@ fn finite_plate_uses_current_medium_until_transmission() {
         .active_medium(region)
         .unwrap()
         .unwrap()
-        .transmittance_ray(&ray, hit.distance);
+        .transmittance_ray(&ray, hit.distance, 550.0);
     assert!((weight - (-2.5_f64).exp()).abs() < 1e-14); // 2 m exterior + 3 m interior
 }
 

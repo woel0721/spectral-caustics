@@ -1,6 +1,7 @@
 //! Fixed-seed vacuum / absorption / isotropic / forward fog comparison.
 use spectral_caustics::{
     config::{Config, render::CameraMode},
+    medium::{HomogeneousMediumConfig, MediumCoefficient::Constant, MediumConfig},
     output,
     renderer::Renderer,
 };
@@ -33,25 +34,32 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if !density.is_finite() || density < 0.0 {
         return Err("density_scale must be finite and nonnegative".into());
     }
-    let Some(spectral_caustics::medium::MediumConfig::Homogeneous(base)) = c.scene.medium.take()
+    let Some(MediumConfig::Homogeneous(HomogeneousMediumConfig {
+        sigma_a: Constant(sigma_a),
+        sigma_s: Constant(sigma_s),
+        min_m,
+        max_m,
+        ..
+    })) = c.scene.medium.take()
     else {
-        return Err("fog configuration must contain a homogeneous medium".into());
+        return Err(
+            "fog configuration must contain a homogeneous medium with constant coefficients".into(),
+        );
     };
     for (name, coefficients) in [
         ("vacuum", None),
-        ("absorption", Some((base.sigma_a + base.sigma_s, 0.0, 0.0))),
-        ("isotropic", Some((base.sigma_a, base.sigma_s, 0.0))),
-        ("forward", Some((base.sigma_a, base.sigma_s, 0.7))),
+        ("absorption", Some((sigma_a + sigma_s, 0.0, 0.0))),
+        ("isotropic", Some((sigma_a, sigma_s, 0.0))),
+        ("forward", Some((sigma_a, sigma_s, 0.7))),
     ] {
         c.scene.medium = coefficients.map(|(a, s, g)| {
-            spectral_caustics::medium::MediumConfig::Homogeneous(
-                spectral_caustics::medium::HomogeneousMediumConfig {
-                    sigma_a: a * density,
-                    sigma_s: s * density,
-                    g,
-                    ..base
-                },
-            )
+            MediumConfig::Homogeneous(HomogeneousMediumConfig {
+                min_m,
+                max_m,
+                sigma_a: (a * density).into(),
+                sigma_s: (s * density).into(),
+                g,
+            })
         });
         c.render.output_path = directory.join(name).join("camera_combined.png");
         let job = c.build()?;

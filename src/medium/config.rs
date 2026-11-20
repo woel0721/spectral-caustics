@@ -11,14 +11,28 @@ pub enum MediumConfig {
     Procedural(ProceduralMediumConfig),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HomogeneousMediumConfig {
     pub min_m: [f64; 3],
     pub max_m: [f64; 3],
-    pub sigma_a: f64,
-    pub sigma_s: f64,
+    pub sigma_a: MediumCoefficient,
+    pub sigma_s: MediumCoefficient,
     pub g: f64,
+}
+
+/// A constant coefficient or piecewise linear samples in [nm, m⁻¹].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum MediumCoefficient {
+    Constant(f64),
+    Curve { samples: Vec<[f64; 2]> },
+}
+
+impl From<f64> for MediumCoefficient {
+    fn from(value: f64) -> Self {
+        Self::Constant(value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -30,20 +44,20 @@ pub struct GridMediumConfig {
     pub resolution: [usize; 3],
     /// x varies fastest: index = x + nx * (y + ny * z).
     pub densities: Vec<f64>,
-    pub sigma_a_base: f64,
-    pub sigma_s_base: f64,
+    pub sigma_a_base: MediumCoefficient,
+    pub sigma_s_base: MediumCoefficient,
     pub g: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProceduralMediumConfig {
     pub min_m: [f64; 3],
     pub max_m: [f64; 3],
     pub resolution: [usize; 3],
     pub procedural: ProceduralDensityConfig,
-    pub sigma_a_base: f64,
-    pub sigma_s_base: f64,
+    pub sigma_a_base: MediumCoefficient,
+    pub sigma_s_base: MediumCoefficient,
     pub g: f64,
 }
 

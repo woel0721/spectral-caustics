@@ -5,11 +5,12 @@ use spectral_caustics::config::RenderJob;
 use spectral_caustics::config::render::{CameraMode, RenderSetting};
 use spectral_caustics::config::scene::{EnvironmentMisHeuristic, ObjectConfig};
 use spectral_caustics::film::Framebuffer;
-use spectral_caustics::geometry::{ground::Ground, vertical_prism::VerticalPrism};
-use spectral_caustics::integrator::photon::integrate_xyz;
+use spectral_caustics::geometry::{ground::Ground, ray::Ray, vertical_prism::VerticalPrism};
+use spectral_caustics::integrator::photon::{integrate_xyz, trace_photon};
 use spectral_caustics::material::{dielectric::Dielectric, lambertian::Lambertian};
 use spectral_caustics::medium::{
-    GridMediumConfig, HomogeneousMedium, HomogeneousMediumConfig, Medium, MediumConfig,
+    GridMediumConfig, HomogeneousMedium, HomogeneousMediumConfig, Medium, MediumCoefficient,
+    MediumConfig,
 };
 use spectral_caustics::optics::dispersion::{Cauchy, IorMode};
 use spectral_caustics::renderer::Renderer;
@@ -18,6 +19,7 @@ use spectral_caustics::spectrum::cie_xyz;
 use spectral_caustics::spectrum::d65_normalization;
 use spectral_caustics::spectrum::d65_spd;
 use spectral_caustics::spectrum::emission::d65_normalization_continuous;
+mod support;
 
 fn config(source: &str) -> Config {
     let mut c = Config::from_json(source).unwrap();
@@ -143,8 +145,8 @@ fn two_layer_photon_scene() -> (Config, GridMediumConfig, f64) {
         max_m: [10.0, 10.0, 2.9],
         resolution: [1, 1, 2],
         densities: vec![1.0, 3.0],
-        sigma_a_base: 0.2,
-        sigma_s_base: 0.3,
+        sigma_a_base: 0.2.into(),
+        sigma_s_base: 0.3.into(),
         g: 0.7,
     };
     let tr = (-0.5 * (0.1 + 0.3) * 1.0_f64.hypot(0.45)).exp();
@@ -204,6 +206,24 @@ fn photon_xyz_atlas_and_direct_preview_apply_the_same_analytic_extinction() {
                 assert!((a * tr - e).abs() <= 2e-12 * a);
             }
         }
+        let mut spectral_grid = grid.clone();
+        spectral_grid.sigma_a_base = MediumCoefficient::Curve {
+            samples: vec![[380.0, 0.9], [780.0, 0.1]],
+        };
+        c.scene.medium = Some(MediumConfig::Grid(spectral_grid));
+        let filtered = map(&c.build().unwrap(), &c.render, 2);
+        for (i, &(nm, _)) in filtered.wavelength_samples().iter().enumerate() {
+            let sigma_t = 1.2 - 0.8 * ((nm - 380.0) / 400.0);
+            let tr = (-sigma_t * 0.4 * 1.0_f64.hypot(0.45)).exp();
+            for (&clear, &filtered) in clear_atlas
+                .layer_irradiance(i)
+                .unwrap()
+                .iter()
+                .zip(filtered.layer_irradiance(i).unwrap())
+            {
+                assert!((clear * tr - filtered).abs() <= 2e-12 * clear);
+            }
+        }
     }
 }
 
@@ -213,13 +233,13 @@ fn bound_five_micron_plate_attenuates_xyz_atlas_and_direct_from_each_launch_side
     let top = bottom + 5e-6;
     let sigma_exterior = 0.2;
     let sigma_interior = 140_000.0;
-    let absorption = |sigma_a| -> Box<dyn Medium> {
+    let absorption = |sigma_a: f64| -> Box<dyn Medium> {
         Box::new(
             HomogeneousMedium::try_from(&HomogeneousMediumConfig {
                 min_m: [-10.0; 3],
                 max_m: [10.0; 3],
-                sigma_a,
-                sigma_s: 0.0,
+                sigma_a: sigma_a.into(),
+                sigma_s: 0.0.into(),
                 g: 0.0,
             })
             .unwrap(),
@@ -349,6 +369,197 @@ fn bound_five_micron_plate_attenuates_xyz_atlas_and_direct_from_each_launch_side
     };
     let interior_tr = (-sigma_interior * (height - ground_height)).exp();
     assert_frame_attenuated(&direct(false), &direct(true), interior_tr, 1e-10);
+}
+
+#[test]
+fn constant_ior_spectral_absorption_preserves_landings_and_filters_xyz_and_atlas() {
+    let mut job = RenderJob::new();
+    let light = job.scene.light.as_parallel_mut().unwrap();
+    light.direction = -Vector3::z();
+    light.height_m = 3.0;
+    light.aperture_min_m = Vector2::repeat(-2.0);
+    light.aperture_max_m = Vector2::repeat(2.0);
+    let plate = VerticalPrism::new(
+        [
+            Vector2::new(-1.0, -1.0),
+            Vector2::new(1.0, -1.0),
+            Vector2::new(0.0, 1.0),
+        ],
+        1.0,
+        2.0,
+    )
+    .unwrap();
+    let ground = job.scene.add(
+        Box::new(Ground::new(0.0).unwrap()),
+        Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()),
+    );
+    let target = job
+        .scene
+        .add(Box::new(plate), Box::new(Dielectric::new(1.5).unwrap()));
+    job.photon.ground_id = Some(ground);
+    job.select_caustics_object(target).unwrap();
+    let settings = RenderSetting {
+        width: 12,
+        height: 8,
+        samples_per_pixel_axis: 2,
+        mode: IorMode::Constant,
+        wavelength_step_nm: 5.0,
+        photon_max_events: 2,
+        ..Default::default()
+    };
+    let xyz = |job: &RenderJob, target, threads| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| integrate_xyz(job, target, ground, &settings).unwrap())
+    };
+    let clear_atlas = map(&job, &settings, 1);
+    let clear_xyz = xyz(&job, Some(target), 1);
+    let clear_direct_only = xyz(&job, None, 1);
+    let absorption = |blue, red| -> Box<dyn Medium> {
+        Box::new(
+            HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+                min_m: [-4.0; 3],
+                max_m: [4.0; 3],
+                sigma_a: MediumCoefficient::Curve {
+                    samples: vec![[380.0, blue], [780.0, red]],
+                },
+                sigma_s: 0.0.into(),
+                g: 0.0,
+            })
+            .unwrap(),
+        )
+    };
+    job.scene.medium = Some(absorption(0.3, 0.05));
+    job.scene
+        .bind_medium_interface(
+            target,
+            MediumInterface {
+                interior: Some(absorption(1.2, 0.1)),
+            },
+        )
+        .unwrap();
+    let sigma_exterior = |nm: f64| 0.3 - 0.25 * ((nm - 380.0) / 400.0);
+    let sigma_interior = |nm: f64| 1.2 - 1.1 * ((nm - 380.0) / 400.0);
+    let direct_tr = |nm| (-3.0 * sigma_exterior(nm)).exp();
+    let caustic_tr = |nm| (-2.0 * sigma_exterior(nm) - sigma_interior(nm)).exp();
+    for nm in [450.0, 550.0, 650.0] {
+        for (height, exterior, interior) in [(3.0, 2.0, 1.0), (1.5, 1.0, 0.5)] {
+            let ray = Ray::new(Vector3::z() * height, -Vector3::z()).unwrap();
+            let landing = trace_photon(
+                &job,
+                ray,
+                Some(nm),
+                IorMode::Constant,
+                2,
+                &mut support::TransmissionRng,
+            )
+            .unwrap()
+            .landing()
+            .unwrap();
+            assert_eq!(landing.position, Vector3::zeros());
+            let expected = (-exterior * sigma_exterior(nm) - interior * sigma_interior(nm)).exp();
+            assert!((landing.weight - expected).abs() < 1e-14);
+        }
+    }
+    let ray = Ray::new(Vector3::z() * 3.0, -Vector3::z()).unwrap();
+    for wavelength in [None, Some(f64::NAN), Some(800.0)] {
+        assert!(
+            trace_photon(
+                &job,
+                ray,
+                wavelength,
+                IorMode::Constant,
+                2,
+                &mut support::TransmissionRng,
+            )
+            .is_err()
+        );
+    }
+
+    let filtered_xyz = xyz(&job, Some(target), 1);
+    for threads in [2, 4] {
+        let parallel = xyz(&job, Some(target), threads);
+        same(&filtered_xyz.caustics, &parallel.caustics);
+        same(
+            filtered_xyz.direct.as_ref().unwrap(),
+            parallel.direct.as_ref().unwrap(),
+        );
+    }
+    let direct_only = xyz(&job, None, 4);
+    same(
+        filtered_xyz.direct.as_ref().unwrap(),
+        direct_only.direct.as_ref().unwrap(),
+    );
+    assert!(
+        direct_only
+            .caustics
+            .pixels()
+            .iter()
+            .all(|v| *v == Vector3::zeros())
+    );
+    assert_eq!(
+        clear_xyz.sun_irradiance_xyz,
+        filtered_xyz.sun_irradiance_xyz
+    );
+    // Integrate the analytic filtered spectrum on an independent 1 nm grid.
+    let reference_xyz = |tr: &dyn Fn(f64) -> f64| {
+        let mut xyz = Vector3::zeros();
+        let mut y = 0.0;
+        for nm in 380..=780 {
+            let width = if nm == 380 || nm == 780 { 0.5 } else { 1.0 };
+            let nm = f64::from(nm);
+            let source = cie_xyz(nm).unwrap() * (d65_spd(nm).unwrap() * width);
+            xyz += source * tr(nm);
+            y += source.y;
+        }
+        xyz / y
+    };
+    for (clear, filtered, expected) in [
+        (
+            &clear_xyz.caustics,
+            &filtered_xyz.caustics,
+            reference_xyz(&caustic_tr),
+        ),
+        (
+            clear_direct_only.direct.as_ref().unwrap(),
+            direct_only.direct.as_ref().unwrap(),
+            reference_xyz(&direct_tr),
+        ),
+    ] {
+        assert!(clear.pixels().iter().any(|p| p.y > 0.0));
+        for (a, b) in clear.pixels().iter().zip(filtered.pixels()) {
+            assert!((a.y * expected - b).norm() <= 8e-4 * a.y);
+        }
+    }
+    let filtered_atlas = map(&job, &settings, 1);
+    let mut reintegrated = vec![Vector3::zeros(); filtered_xyz.caustics.pixels().len()];
+    for (i, &(nm, width)) in filtered_atlas.wavelength_samples().iter().enumerate() {
+        let cie = cie_xyz(nm).unwrap() * width;
+        let clear = clear_atlas.layer_irradiance(i).unwrap();
+        let filtered = filtered_atlas.layer_irradiance(i).unwrap();
+        for ((&clear, &filtered), xyz) in clear.iter().zip(filtered).zip(&mut reintegrated) {
+            assert!((clear * caustic_tr(nm) - filtered).abs() <= 2e-12 * clear);
+            *xyz += cie * filtered;
+        }
+    }
+    for (xyz, expected) in reintegrated.iter().zip(filtered_xyz.caustics.pixels()) {
+        assert!((xyz - expected).norm() <= 2e-12 * expected.norm());
+    }
+    for threads in [2, 4] {
+        let parallel = map(&job, &settings, threads);
+        for i in 0..filtered_atlas.wavelength_samples().len() {
+            assert!(
+                filtered_atlas
+                    .layer_irradiance(i)
+                    .unwrap()
+                    .iter()
+                    .zip(parallel.layer_irradiance(i).unwrap())
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
+        }
+    }
 }
 
 #[test]

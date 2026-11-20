@@ -1,6 +1,6 @@
 use super::dda::MajorantDda as GridDda;
 use super::*;
-use crate::medium::bounds::box_interval;
+use crate::medium::{MediumCoefficient, bounds::box_interval};
 use rand::{SeedableRng, rngs::StdRng};
 
 fn config(resolution: [usize; 3], densities: Vec<f64>) -> GridMediumConfig {
@@ -9,8 +9,8 @@ fn config(resolution: [usize; 3], densities: Vec<f64>) -> GridMediumConfig {
         max_m: resolution.map(|v| v as f64),
         resolution,
         densities,
-        sigma_a_base: 0.25,
-        sigma_s_base: 0.75,
+        sigma_a_base: 0.25.into(),
+        sigma_s_base: 0.75.into(),
         g: 0.0,
     }
 }
@@ -25,32 +25,40 @@ fn close(a: f64, b: f64) {
 
 #[test]
 fn local_bounds_cover_every_fine_voxel_including_partial_blocks() {
-    let c = config([9, 7, 5], (0..315).map(|i| i as f64 / 7.0).collect());
+    let mut c = config([9, 7, 5], (0..315).map(|i| i as f64 / 7.0).collect());
+    c.sigma_a_base = MediumCoefficient::Curve {
+        samples: vec![[380.0, 0.18], [530.0, 0.02], [780.0, 0.3]],
+    };
+    c.sigma_s_base = MediumCoefficient::Curve {
+        samples: vec![[380.0, 1.2], [480.0, 0.7], [780.0, 0.0]],
+    };
     let grid = GridMedium::try_from(&c).unwrap();
     for stride in [2, 4, 8] {
-        let bounds = MajorantGrid::new(c.resolution, &c.densities, grid.base, stride).unwrap();
+        let bounds = MajorantGrid::new(c.resolution, &c.densities, stride).unwrap();
         assert_eq!(bounds.resolution, c.resolution.map(|n| n.div_ceil(stride)));
-        for z in 0..5 {
-            for y in 0..7 {
-                for x in 0..9 {
-                    let p = Vector3::new(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5);
-                    assert!(
-                        grid.coefficients_at(p).sigma_t()
-                            <= bounds.at([x / stride, y / stride, z / stride])
-                    );
+        for nm in [380.0, 450.0, 480.0, 550.0, 690.0, 780.0] {
+            let base = grid.base.at(nm);
+            let extinction = |density| base.scaled_by_density(density).sigma_t();
+            for z in 0..5 {
+                for y in 0..7 {
+                    for x in 0..9 {
+                        let p = Vector3::new(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5);
+                        let max_density =
+                            bounds.max_density_at([x / stride, y / stride, z / stride]);
+                        assert!(grid.coefficients_at(p, nm).sigma_t() <= extinction(max_density));
+                    }
                 }
             }
+            let max_density = bounds.max_densities.iter().copied().fold(0.0, f64::max);
+            assert_eq!(extinction(max_density), grid.sigma_t_majorant(nm));
         }
-        assert_eq!(
-            bounds.values.iter().copied().fold(0.0, f64::max),
-            grid.sigma_t_majorant()
-        );
     }
     let c = config([9, 7, 5], vec![1.7; 315]);
     let uniform = GridMedium::try_from(&c).unwrap();
-    assert_eq!(uniform.majorants.values.len(), 1);
+    assert_eq!(uniform.majorants.max_densities.len(), 1);
     assert_eq!(uniform.majorants.resolution, [1; 3]);
-    assert_eq!(uniform.majorants.values[0], uniform.sigma_t_majorant());
+    assert_eq!(uniform.majorants.max_density_at([0; 3]), 1.7);
+    assert_eq!(uniform.sigma_t_majorant(550.0), 1.7 * 0.25 + 1.7 * 0.75);
 }
 
 #[test]
@@ -141,71 +149,84 @@ fn fine_and_coarse_dda_match_independent_block_slab_intersections() {
     }
 }
 
-fn layered() -> GridMedium {
-    let mut grid = GridMedium::try_from(&config(
-        [9, 1, 1],
-        vec![0.1, 0.1, 0.1, 0.1, 0.0, 0.0, 0.0, 0.0, 3.0],
-    ))
-    .unwrap();
-    // Exact blockwise coefficients make deterministic optical-depth inversion
-    // possible in the next test; statistical tests also cover other block sizes.
-    grid.majorants = MajorantGrid::new(grid.resolution, &grid.densities, grid.base, 4).unwrap();
-    grid
+fn layered() -> GridMediumConfig {
+    config([9, 1, 1], vec![0.1, 0.1, 0.1, 0.1, 0.0, 0.0, 0.0, 0.0, 3.0])
 }
 
 #[test]
-fn optical_depth_crosses_nonzero_and_vacuum_blocks_without_redrawing() {
-    let grid = layered();
-    let mut crossed = false;
-    for reverse in [false, true] {
-        let r = if reverse {
-            ray([10.0, 0.5, 0.5], [-1.0, 0.0, 0.0])
-        } else {
-            ray([-1.0, 0.5, 0.5], [1.0, 0.0, 0.0])
-        };
-        for seed in 0..256 {
-            let mut rng = StdRng::seed_from_u64(seed);
-            let mut reference = rng.clone();
-            let u: f64 = reference.sample(Open01);
-            let tau = -(-u).ln_1p();
-            let expected = if reverse {
-                if tau < 3.0 {
-                    Some(9.0 - tau / 3.0)
+fn spectral_optical_depth_crosses_nonzero_and_vacuum_blocks_without_redrawing() {
+    let mut c = layered();
+    c.sigma_a_base = MediumCoefficient::Curve {
+        samples: vec![[380.0, 0.2], [580.0, 0.6], [780.0, 0.8]],
+    };
+    c.sigma_s_base = MediumCoefficient::Curve {
+        samples: vec![[380.0, 1.4], [480.0, 0.9], [580.0, 0.4], [780.0, 0.0]],
+    };
+    let mut grid = GridMedium::try_from(&c).unwrap();
+    // Each block has uniform density, so the sampled optical depth can be
+    // inverted independently without any null collisions.
+    grid.majorants = MajorantGrid::new(grid.resolution, &grid.densities, 4).unwrap();
+    for (nm, sigma_t, albedo) in [(480.0, 1.3, 0.9 / 1.3), (580.0, 1.0, 0.4)] {
+        let mut crossed = false;
+        for reverse in [false, true] {
+            let r = if reverse {
+                ray([10.0, 0.5, 0.5], [-1.0, 0.0, 0.0])
+            } else {
+                ray([-1.0, 0.5, 0.5], [1.0, 0.0, 0.0])
+            };
+            for seed in 0..256 {
+                let mut rng = StdRng::seed_from_u64(seed);
+                let mut reference = rng.clone();
+                let u: f64 = reference.sample(Open01);
+                let tau = -(-u).ln_1p() / sigma_t;
+                let expected = if reverse {
+                    if tau < 3.0 {
+                        Some(9.0 - tau / 3.0)
+                    } else if tau < 3.4 {
+                        Some(4.0 - (tau - 3.0) / 0.1)
+                    } else {
+                        None
+                    }
+                } else if tau < 0.4 {
+                    Some(tau / 0.1)
                 } else if tau < 3.4 {
-                    Some(4.0 - (tau - 3.0) / 0.1)
+                    crossed = true;
+                    Some(8.0 + (tau - 0.4) / 3.0)
                 } else {
                     None
+                };
+                let sample = grid.sample_segment(&r, 20.0, nm, true, &mut rng).unwrap();
+                if let Some(x) = expected {
+                    close(sample.position.unwrap().x, x);
+                    close(sample.weight, albedo);
+                    let _: f64 = reference.random(); // One acceptance draw, no boundary draws.
+                } else {
+                    assert!(sample.position.is_none());
+                    assert_eq!(sample.weight, 1.0);
                 }
-            } else if tau < 0.4 {
-                Some(tau / 0.1)
-            } else if tau < 3.4 {
-                crossed = true;
-                Some(8.0 + (tau - 0.4) / 3.0)
-            } else {
-                None
-            };
-            let sample = grid.sample_segment(&r, 20.0, true, &mut rng).unwrap();
-            if let Some(x) = expected {
-                close(sample.position.unwrap().x, x);
-                close(sample.weight, 0.75);
-                let _: f64 = reference.random(); // One acceptance draw, no boundary draws.
-            } else {
-                assert!(sample.position.is_none());
-                assert_eq!(sample.weight, 1.0);
+                assert_eq!(rng.next_u64(), reference.next_u64());
             }
-            assert_eq!(rng.next_u64(), reference.next_u64());
         }
+        assert!(crossed);
     }
-    assert!(crossed);
+    // The red end of the same spectrum is pure absorption.
+    let mut rng = StdRng::seed_from_u64(37);
+    let mut untouched = rng.clone();
+    let r = ray([-1.0, 0.5, 0.5], [1.0, 0.0, 0.0]);
+    let sample = grid
+        .sample_segment(&r, 20.0, 780.0, true, &mut rng)
+        .unwrap();
+    assert!(sample.position.is_none());
+    close(sample.weight, (-0.8_f64 * 3.4).exp());
+    assert_eq!(rng.next_u64(), untouched.next_u64());
 }
 
 #[test]
 fn local_collision_cdf_matches_analytic_layers_across_multiple_blocks_and_clips() {
-    let base = layered();
+    let base = GridMedium::try_from(&layered()).unwrap();
     for stride in [2, 4, 8] {
         let mut grid = base.clone();
-        grid.majorants =
-            MajorantGrid::new(grid.resolution, &grid.densities, grid.base, stride).unwrap();
+        grid.majorants = MajorantGrid::new(grid.resolution, &grid.densities, stride).unwrap();
         for (r, limit, references) in [
             (
                 ray([-1.0, 0.5, 0.5], [1.0, 0.0, 0.0]),
@@ -234,7 +255,9 @@ fn local_collision_cdf_matches_analytic_layers_across_multiple_blocks_and_clips(
             let n = 40_000;
             let (enter, exit) = grid.interval(&r, limit).unwrap();
             for _ in 0..n {
-                let sample = grid.sample_segment(&r, limit, true, &mut rng).unwrap();
+                let sample = grid
+                    .sample_segment(&r, limit, 550.0, true, &mut rng)
+                    .unwrap();
                 if let Some(p) = sample.position {
                     let t = (p - r.origin).dot(&r.direction);
                     assert!(t >= enter && t < exit);
@@ -264,14 +287,16 @@ fn ray_crossing_only_empty_blocks_does_not_consume_rng_despite_nonzero_global_bo
     let mut c = config([24, 16, 16], vec![0.0; 6144]);
     c.densities[12 + 24 * (12 + 16 * 12)] = 100.0;
     let grid = GridMedium::try_from(&c).unwrap();
-    assert_eq!(grid.sigma_t_majorant(), 100.0);
+    assert_eq!(grid.sigma_t_majorant(550.0), 100.0);
     let mut rng = StdRng::seed_from_u64(2);
     let mut untouched = rng.clone();
     for r in [
         ray([-1.0, 0.5, 0.5], [1.0, 0.0, 0.0]),
         ray([25.0, 0.5, 0.5], [-1.0, 0.0, 0.0]),
     ] {
-        let sample = grid.sample_segment(&r, 40.0, true, &mut rng).unwrap();
+        let sample = grid
+            .sample_segment(&r, 40.0, 550.0, true, &mut rng)
+            .unwrap();
         assert!(sample.position.is_none());
         assert_eq!(sample.weight, 1.0);
     }
@@ -291,8 +316,8 @@ fn benchmark_block_sizes() -> Result<(), Box<dyn std::error::Error + Send + Sync
     // of the fog scene's world scale used for whole-render timing.
     c.min_m = [-1.0; 3];
     c.max_m = [1.0; 3];
-    c.sigma_a_base = 0.05;
-    c.sigma_s_base = 0.95;
+    c.sigma_a_base = 0.05.into();
+    c.sigma_s_base = 0.95.into();
     let mut rays_rng = StdRng::seed_from_u64(42);
     let rays: Vec<_> = (0..4096)
         .map(|i| {
@@ -315,18 +340,24 @@ fn benchmark_block_sizes() -> Result<(), Box<dyn std::error::Error + Send + Sync
     for stride in [2, 4, 8] {
         let mut grid = GridMedium::try_from(&c)?;
         let start = Instant::now();
-        grid.majorants = MajorantGrid::new(c.resolution, &c.densities, grid.base, stride)?;
+        grid.majorants = MajorantGrid::new(c.resolution, &c.densities, stride)?;
         let cache_build_seconds = start.elapsed().as_secs_f64();
         let mut warmup = StdRng::seed_from_u64(7);
         for ray in &rays {
-            black_box(grid.sample_segment(ray, 3.0, true, &mut warmup)?);
+            black_box(grid.sample_segment(ray, 3.0, 550.0, true, &mut warmup)?);
         }
         let mut seconds = Vec::new();
         for repeat in 0..5 {
             let mut rng = StdRng::seed_from_u64(17 + repeat);
             let start = Instant::now();
             for i in 0..100_000 {
-                black_box(grid.sample_segment(&rays[i % rays.len()], 3.0, true, &mut rng)?);
+                black_box(grid.sample_segment(
+                    &rays[i % rays.len()],
+                    3.0,
+                    550.0,
+                    true,
+                    &mut rng,
+                )?);
             }
             seconds.push(start.elapsed().as_secs_f64());
         }
@@ -334,7 +365,7 @@ fn benchmark_block_sizes() -> Result<(), Box<dyn std::error::Error + Send + Sync
         println!(
             "{}",
             serde_json::json!({"resolution": c.resolution, "requested_block_edge": stride,
-            "effective_block_edge": grid.majorants.stride, "cache_bytes": grid.majorants.values.capacity() * size_of::<f64>(),
+            "effective_block_edge": grid.majorants.stride, "cache_bytes": grid.majorants.max_densities.capacity() * size_of::<f64>(),
             "cache_build_seconds": cache_build_seconds, "sampling_median_seconds": seconds[2],
             "sampling_seconds": seconds, "rays": 100_000, "repeats": 5, "ray_seed": 42, "sampling_seed": 17})
         );

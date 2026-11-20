@@ -6,7 +6,7 @@ use super::surface_ray_origin;
 use crate::{
     config::RenderJob,
     geometry::{hit::Hit, ray::Ray},
-    medium::Medium,
+    medium::{ACHROMATIC_QUERY_NM, Medium},
 };
 use nalgebra::Vector3;
 use std::error::Error;
@@ -17,6 +17,7 @@ pub(in crate::integrator::camera) fn transmittance_to_light(
     normal: Vector3<f64>,
     wi: Vector3<f64>,
     medium: Option<&dyn Medium>,
+    wavelength_nm: Option<f64>,
 ) -> Result<f64, Box<dyn Error + Send + Sync>> {
     let origin = surface_ray_origin(&scene.scene, position, normal, 1.0);
     let shadow_ray = Ray::new(origin, wi).ok_or("阴影光线起点或方向无效")?;
@@ -25,6 +26,7 @@ pub(in crate::integrator::camera) fn transmittance_to_light(
         &shadow_ray,
         f64::INFINITY,
         medium,
+        wavelength_nm,
     ))
 }
 
@@ -34,11 +36,14 @@ pub(in crate::integrator::camera) fn shadow_transmittance(
     ray: &Ray,
     distance: f64,
     medium: Option<&dyn Medium>,
+    wavelength_nm: Option<f64>,
 ) -> f64 {
     if hit.is_some_and(|h| h.distance < distance) {
         return 0.0;
     }
-    medium.map_or(1.0, |m| m.transmittance_ray(ray, distance))
+    medium.map_or(1.0, |m| {
+        m.transmittance_ray(ray, distance, wavelength_nm.unwrap_or(ACHROMATIC_QUERY_NM))
+    })
 }
 
 pub(in crate::integrator::camera) fn camera_lighting_setup(

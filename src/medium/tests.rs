@@ -6,8 +6,8 @@ fn medium(a: f64, s: f64) -> HomogeneousMedium {
     HomogeneousMedium::try_from(&HomogeneousMediumConfig {
         min_m: [-1.0; 3],
         max_m: [1.0; 3],
-        sigma_a: a,
-        sigma_s: s,
+        sigma_a: a.into(),
+        sigma_s: s.into(),
         g: 0.0,
     })
     .unwrap()
@@ -37,42 +37,51 @@ fn intervals_clip_inside_outside_parallel_tangent_and_surface_segments() {
     let diagonal = ray(Vector3::repeat(-2.0), Vector3::repeat(1.0));
     let (a, b) = m.interval(&diagonal, 20.0).unwrap();
     assert!((b - a - 2.0 * 3.0_f64.sqrt()).abs() < 1e-12);
-    assert!((m.transmittance_ray(&r, 3.0) - (-0.5_f64).exp()).abs() < 1e-15);
+    assert!((m.transmittance_ray(&r, 3.0, 550.0) - (-0.5_f64).exp()).abs() < 1e-15);
 }
 
 #[test]
 fn beer_lambert_and_configuration_validate_physical_parameters() {
     let m = medium(0.2, 0.3);
-    assert_eq!(m.sigma_a(), 0.2);
-    assert_eq!(m.sigma_s(), 0.3);
-    assert_eq!(m.sigma_t(), 0.5);
-    assert_eq!(m.transmittance(0.0), 1.0);
-    assert_eq!(m.transmittance(2.0), (-1.0_f64).exp());
-    assert_eq!(m.transmittance(f64::INFINITY), 0.0);
-    assert_eq!(medium(0.0, 0.0).transmittance(f64::INFINITY), 1.0);
+    assert_eq!(m.coefficients(550.0).sigma_a, 0.2);
+    assert_eq!(m.coefficients(550.0).sigma_s, 0.3);
+    assert_eq!(m.sigma_t_majorant(550.0), 0.5);
+    assert_eq!(m.transmittance(0.0, 550.0), 1.0);
+    assert_eq!(m.transmittance(2.0, 550.0), (-1.0_f64).exp());
+    assert_eq!(m.transmittance(f64::INFINITY, 550.0), 0.0);
+    assert_eq!(medium(0.0, 0.0).transmittance(f64::INFINITY, 550.0), 1.0);
     let c = HomogeneousMediumConfig {
         min_m: [-1.0; 3],
         max_m: [1.0; 3],
-        sigma_a: 0.0,
-        sigma_s: 0.1,
+        sigma_a: 0.0.into(),
+        sigma_s: 0.1.into(),
         g: 0.7,
     };
     for bad in [
-        HomogeneousMediumConfig { sigma_a: -0.1, ..c },
         HomogeneousMediumConfig {
-            sigma_s: f64::NAN,
-            ..c
+            sigma_a: (-0.1).into(),
+            ..c.clone()
         },
         HomogeneousMediumConfig {
-            sigma_a: f64::MAX,
-            sigma_s: f64::MAX,
-            ..c
+            sigma_s: f64::NAN.into(),
+            ..c.clone()
         },
-        HomogeneousMediumConfig { g: 1.0, ..c },
-        HomogeneousMediumConfig { g: -1.0, ..c },
+        HomogeneousMediumConfig {
+            sigma_a: f64::MAX.into(),
+            sigma_s: f64::MAX.into(),
+            ..c.clone()
+        },
+        HomogeneousMediumConfig {
+            g: 1.0,
+            ..c.clone()
+        },
+        HomogeneousMediumConfig {
+            g: -1.0,
+            ..c.clone()
+        },
         HomogeneousMediumConfig {
             min_m: [1.0; 3],
-            ..c
+            ..c.clone()
         },
         HomogeneousMediumConfig {
             max_m: [f64::INFINITY; 3],
@@ -84,6 +93,46 @@ fn beer_lambert_and_configuration_validate_physical_parameters() {
 }
 
 #[test]
+fn homogeneous_curves_reject_bad_knots_and_combined_overflow() {
+    let mut config = HomogeneousMediumConfig {
+        min_m: [-1.0; 3],
+        max_m: [1.0; 3],
+        sigma_a: 0.2.into(),
+        sigma_s: 0.1.into(),
+        g: 0.0,
+    };
+    for samples in [
+        vec![],
+        vec![[381.0, 0.5], [780.0, 0.6]],
+        vec![[380.0, 0.5], [779.0, 0.6]],
+        vec![[380.0, 0.5], [380.0, 0.6], [780.0, 0.8]],
+        vec![[380.0, 0.5], [510.0, 0.9], [480.0, 0.6], [780.0, 0.8]],
+        vec![[380.0, 0.5], [f64::NAN, 0.6], [780.0, 0.8]],
+        vec![[380.0, 0.5], [780.0, -0.1]],
+        vec![[380.0, 0.5], [780.0, f64::INFINITY]],
+    ] {
+        config.sigma_a = MediumCoefficient::Curve { samples };
+        assert!(HomogeneousMedium::try_from(&config).is_err());
+    }
+    config.sigma_a = MediumCoefficient::Curve {
+        samples: vec![[380.0, 0.0], [500.0, f64::MAX], [780.0, 0.0]],
+    };
+    config.sigma_s = MediumCoefficient::Curve {
+        samples: vec![[380.0, 0.0], [600.0, f64::MAX], [780.0, 0.0]],
+    };
+    assert!(HomogeneousMedium::try_from(&config).is_err());
+
+    config.sigma_a = MediumCoefficient::Curve {
+        samples: vec![[380.0, 0.5], [610.0, 0.5], [780.0, 0.5]],
+    };
+    config.sigma_s = 0.0.into();
+    let flat = HomogeneousMedium::try_from(&config).unwrap();
+    assert!(!flat.is_wavelength_dependent());
+    assert_eq!(flat.sigma_t_majorant(380.0), 0.5);
+    assert_eq!(flat.sigma_t_majorant(780.0), 0.5);
+}
+
+#[test]
 fn free_flight_survival_density_and_implicit_absorption_conserve_probability() {
     let m = medium(0.2, 0.3);
     let r = Ray::new(Vector3::new(0.0, 0.0, 2.0), -Vector3::z()).unwrap();
@@ -91,7 +140,7 @@ fn free_flight_survival_density_and_implicit_absorption_conserve_probability() {
     let n = 150_000;
     let (mut escaped, mut scatter_weight, mut distance) = (0, 0.0, 0.0);
     for _ in 0..n {
-        let s = m.sample_segment(&r, 3.0, true, &mut rng).unwrap();
+        let s = m.sample_segment(&r, 3.0, 550.0, true, &mut rng).unwrap();
         if let Some(p) = s.position {
             scatter_weight += s.weight;
             distance += 1.0 - p.z;
@@ -100,22 +149,22 @@ fn free_flight_survival_density_and_implicit_absorption_conserve_probability() {
             assert_eq!(s.weight, 1.0);
         }
     }
-    let tr = m.transmittance(2.0);
+    let tr = m.transmittance(2.0, 550.0);
     assert!((escaped as f64 / n as f64 - tr).abs() < 0.004);
     assert!((scatter_weight / n as f64 - 0.6 * (1.0 - tr)).abs() < 0.003);
-    let conditional_mean = 1.0 / m.sigma_t() - 2.0 * tr / (1.0 - tr);
+    let conditional_mean = 1.0 / m.sigma_t_majorant(550.0) - 2.0 * tr / (1.0 - tr);
     assert!((distance / (n - escaped) as f64 - conditional_mean).abs() < 0.008);
     let mut untouched = rng.clone();
-    let capped = m.sample_segment(&r, 3.0, false, &mut rng).unwrap();
+    let capped = m.sample_segment(&r, 3.0, 550.0, false, &mut rng).unwrap();
     assert!(capped.position.is_none());
     assert_eq!(capped.weight, tr);
     let absorption = medium(0.5, 0.0)
-        .sample_segment(&r, 3.0, true, &mut rng)
+        .sample_segment(&r, 3.0, 550.0, true, &mut rng)
         .unwrap();
     assert!(absorption.position.is_none());
     assert_eq!(absorption.weight, tr);
     let vacuum = medium(0.0, 0.0)
-        .sample_segment(&r, 3.0, true, &mut rng)
+        .sample_segment(&r, 3.0, 550.0, true, &mut rng)
         .unwrap();
     assert!(vacuum.position.is_none());
     assert_eq!(vacuum.weight, 1.0);
@@ -216,8 +265,8 @@ fn config(resolution: [usize; 3], densities: Vec<f64>) -> GridMediumConfig {
         max_m: [2.0; 3],
         resolution,
         densities,
-        sigma_a_base: 0.2,
-        sigma_s_base: 0.3,
+        sigma_a_base: 0.2.into(),
+        sigma_s_base: 0.3.into(),
         g: 0.4,
     }
 }
@@ -242,10 +291,10 @@ fn grid_queries_use_world_coordinates_x_fastest_and_closed_outer_bounds() {
                 let p = Vector3::new(-1.0 + 2.0 * x as f64, 2.0 + 2.0 * y as f64, 4.5 + z as f64);
                 let density = (x + 2 * (y + 3 * z)) as f64;
                 assert_eq!(grid.density_at(p), density);
-                let s = grid.coefficients_at(p);
-                assert_eq!(s.sigma_a, density * c.sigma_a_base);
-                assert_eq!(s.sigma_s, density * c.sigma_s_base);
-                assert!(s.sigma_t() <= grid.sigma_t_majorant());
+                let s = grid.coefficients_at(p, 550.0);
+                assert_eq!(s.sigma_a, density * 0.2);
+                assert_eq!(s.sigma_s, density * 0.3);
+                assert!(s.sigma_t() <= grid.sigma_t_majorant(550.0));
             }
         }
     }
@@ -258,16 +307,46 @@ fn grid_queries_use_world_coordinates_x_fastest_and_closed_outer_bounds() {
         Vector3::repeat(f64::NAN),
     ] {
         assert_eq!(grid.density_at(p), 0.0);
-        assert_eq!(grid.coefficients_at(p), MediumCoefficients::default());
+        assert_eq!(
+            grid.coefficients_at(p, 550.0),
+            MediumCoefficients::default()
+        );
     }
-    assert_eq!(grid.sigma_t_majorant(), 11.0 * 0.2 + 11.0 * 0.3);
+    assert_eq!(grid.sigma_t_majorant(550.0), 11.0 * 0.2 + 11.0 * 0.3);
     let m: Box<dyn Medium> = Box::new(grid);
     assert_eq!(m.density_at(c.max_m.into()), 11.0);
     assert_eq!(
-        m.coefficients_at(c.max_m.into()).sigma_t(),
-        m.sigma_t_majorant()
+        m.coefficients_at(c.max_m.into(), 550.0).sigma_t(),
+        m.sigma_t_majorant(550.0)
     );
     assert_eq!(m.phase().g(), 0.4);
+}
+
+#[test]
+fn spectral_validation_rejects_rounding_overflow_between_finite_knots() {
+    let curve = |a, b| MediumCoefficient::Curve {
+        samples: vec![[380.0, a], [780.0, b]],
+    };
+    let near_max = f64::MAX * (17.0 / 32.0);
+    let complement = f64::MAX - near_max;
+    // Both knot extinctions are finite, but independent interpolation of these
+    // curves makes their sum overflow at 449 nm.
+    assert_eq!(near_max + complement, f64::MAX);
+    let homogeneous = HomogeneousMediumConfig {
+        min_m: [0.0; 3],
+        max_m: [1.0; 3],
+        sigma_a: curve(0.0, near_max),
+        sigma_s: curve(f64::MAX, complement),
+        g: 0.0,
+    };
+    let grid = GridMediumConfig {
+        sigma_a_base: curve(0.0, near_max * 0.5),
+        sigma_s_base: curve(f64::MAX * 0.5, complement * 0.5),
+        ..config([1; 3], vec![2.0])
+    };
+    assert!(HomogeneousMedium::try_from(&homogeneous).is_err());
+    assert!(GridMedium::try_from(&grid).is_err());
+    assert_eq!(medium(f64::MAX, 0.0).sigma_t_majorant(449.0), f64::MAX);
 }
 
 #[test]
@@ -295,16 +374,16 @@ fn grid_validation_rejects_invalid_density_shape_bounds_and_scaled_overflow() {
             ..c.clone()
         },
         GridMediumConfig {
-            sigma_a_base: -1.0,
+            sigma_a_base: (-1.0).into(),
             ..c.clone()
         },
         GridMediumConfig {
-            sigma_s_base: f64::NAN,
+            sigma_s_base: f64::NAN.into(),
             ..c.clone()
         },
         GridMediumConfig {
-            sigma_a_base: f64::MAX,
-            sigma_s_base: f64::MAX,
+            sigma_a_base: f64::MAX.into(),
+            sigma_s_base: f64::MAX.into(),
             ..c.clone()
         },
         GridMediumConfig {
@@ -318,8 +397,15 @@ fn grid_validation_rejects_invalid_density_shape_bounds_and_scaled_overflow() {
         },
         GridMediumConfig {
             densities: vec![0.0, f64::MAX],
-            sigma_a_base: 1.0,
-            sigma_s_base: 1.0,
+            sigma_a_base: 1.0.into(),
+            sigma_s_base: 1.0.into(),
+            ..c.clone()
+        },
+        GridMediumConfig {
+            densities: vec![0.0, 3.0],
+            sigma_a_base: MediumCoefficient::Curve {
+                samples: vec![[380.0, 0.1], [490.0, f64::MAX / 2.0], [780.0, 0.1]],
+            },
             ..c.clone()
         },
     ];
@@ -361,19 +447,20 @@ fn nonbinary_voxel_faces_and_their_adjacent_floats_have_consistent_density() {
 fn vacuum_cells_do_not_produce_nan_when_ray_exit_distance_overflows() {
     let mut c = config([2, 1, 1], vec![1.0, 0.0]);
     c.max_m[0] = f64::MAX;
-    c.sigma_a_base = 1.0 / f64::MAX;
-    c.sigma_s_base = 0.0;
+    let sigma_a = 1.0 / f64::MAX;
+    c.sigma_a_base = sigma_a.into();
+    c.sigma_s_base = 0.0.into();
     let r = ray([-f64::MAX / 2.0, 1.0, 1.0], [1.0, 0.0, 0.0]);
     let grid = GridMedium::try_from(&c).unwrap();
     close(
-        grid.transmittance_ray(&r, f64::INFINITY),
-        (-c.sigma_a_base * (f64::MAX / 2.0)).exp(),
+        grid.transmittance_ray(&r, f64::INFINITY, 550.0),
+        (-sigma_a * (f64::MAX / 2.0)).exp(),
     );
     c.densities.fill(0.0);
     assert_eq!(
         GridMedium::try_from(&c)
             .unwrap()
-            .transmittance_ray(&r, f64::INFINITY),
+            .transmittance_ray(&r, f64::INFINITY, 550.0),
         1.0
     );
 }
@@ -384,25 +471,61 @@ fn two_layer_transmittance_matches_analytic_depth_in_both_directions_and_partial
     let forward = ray([-1.0, 1.0, 1.0], [1.0, 0.0, 0.0]);
     let reverse = ray([3.0, 1.0, 1.0], [-1.0, 0.0, 0.0]);
     close(
-        grid.transmittance_ray(&forward, f64::INFINITY),
+        grid.transmittance_ray(&forward, f64::INFINITY, 550.0),
         (-2.0_f64).exp(),
     );
     close(
-        grid.transmittance_ray(&reverse, f64::INFINITY),
+        grid.transmittance_ray(&reverse, f64::INFINITY, 550.0),
         (-2.0_f64).exp(),
     );
-    close(grid.transmittance_ray(&forward, 2.5), (-1.25_f64).exp());
-    close(grid.transmittance_ray(&reverse, 1.5), (-0.75_f64).exp());
+    close(
+        grid.transmittance_ray(&forward, 2.5, 550.0),
+        (-1.25_f64).exp(),
+    );
+    close(
+        grid.transmittance_ray(&reverse, 1.5, 550.0),
+        (-0.75_f64).exp(),
+    );
     for (d, tau) in [(1.0, 1.5_f64), (-1.0, 0.5_f64)] {
         close(
-            grid.transmittance_ray(&ray([1.0; 3], [d, 0.0, 0.0]), 10.0),
+            grid.transmittance_ray(&ray([1.0; 3], [d, 0.0, 0.0]), 10.0, 550.0),
             (-tau).exp(),
         );
     }
     close(
-        grid.transmittance_ray(&ray([0.5; 3], [1.0, 0.0, 0.0]), 0.25),
+        grid.transmittance_ray(&ray([0.5; 3], [1.0, 0.0, 0.0]), 0.25, 550.0),
         (-0.125_f64).exp(),
     );
+}
+
+#[test]
+fn two_layer_spectral_transmittance_uses_both_curves_at_the_path_wavelength() {
+    let mut c = config([2, 1, 1], vec![1.0, 3.0]);
+    c.sigma_a_base = MediumCoefficient::Curve {
+        samples: vec![[380.0, 0.2], [580.0, 0.6], [780.0, 0.2]],
+    };
+    c.sigma_s_base = MediumCoefficient::Curve {
+        samples: vec![[380.0, 0.8], [480.0, 0.5], [680.0, 0.1], [780.0, 0.0]],
+    };
+    let grid = GridMedium::try_from(&c).unwrap();
+    let forward = ray([-1.0, 1.0, 1.0], [1.0, 0.0, 0.0]);
+    let reverse = ray([3.0, 1.0, 1.0], [-1.0, 0.0, 0.0]);
+    for (nm, extinction) in [(480.0, 0.9_f64), (580.0, 0.9), (680.0, 0.5), (780.0, 0.2)] {
+        for r in [forward, reverse] {
+            close(
+                grid.transmittance_ray(&r, f64::INFINITY, nm),
+                (-4.0 * extinction).exp(),
+            );
+        }
+        close(
+            grid.transmittance_ray(&forward, 2.5, nm),
+            (-2.5 * extinction).exp(),
+        );
+        close(
+            grid.transmittance_ray(&reverse, 2.5, nm),
+            (-3.5 * extinction).exp(),
+        );
+    }
 }
 
 #[test]
@@ -412,18 +535,18 @@ fn clipping_handles_misses_inside_parallel_boundary_tangent_and_zero_length() {
     assert_eq!(grid.interval(&r, 10.0), Some((1.0, 3.0)));
     assert_eq!(grid.interval(&r, 2.0), Some((1.0, 2.0)));
     for distance in [0.0, 0.5, 1.0] {
-        assert_eq!(grid.transmittance_ray(&r, distance), 1.0);
+        assert_eq!(grid.transmittance_ray(&r, distance, 550.0), 1.0);
     }
     for r in [
         ray([-1.0, 3.0, 1.0], [1.0, 0.0, 0.0]),
         ray([2.0, 1.0, 1.0], [1.0, 0.0, 0.0]),
         ray([-1.0, 1.0, 1.0], [1.0, 1.0, 0.0]), // corner touch only
     ] {
-        assert_eq!(grid.transmittance_ray(&r, 10.0), 1.0);
+        assert_eq!(grid.transmittance_ray(&r, 10.0, 550.0), 1.0);
     }
     // On max x face, parallel to it: last cell, same closed-box convention as homogeneous.
     close(
-        grid.transmittance_ray(&ray([2.0, -1.0, 1.0], [0.0, 1.0, 0.0]), 10.0),
+        grid.transmittance_ray(&ray([2.0, -1.0, 1.0], [0.0, 1.0, 0.0]), 10.0, 550.0),
         (-3.0_f64).exp(),
     );
 }
@@ -439,8 +562,8 @@ fn uniform_grid_degenerates_to_homogeneous_for_axes_edges_corners_and_oblique_ra
         let homogeneous = HomogeneousMedium::try_from(&HomogeneousMediumConfig {
             min_m: c.min_m,
             max_m: c.max_m,
-            sigma_a: density * c.sigma_a_base,
-            sigma_s: density * c.sigma_s_base,
+            sigma_a: (density * 0.2).into(),
+            sigma_s: (density * 0.3).into(),
             g: c.g,
         })
         .unwrap();
@@ -457,8 +580,8 @@ fn uniform_grid_degenerates_to_homogeneous_for_axes_edges_corners_and_oblique_ra
         ] {
             for distance in [0.0, 0.2, 2.0, 9.0, f64::INFINITY] {
                 close(
-                    grid.transmittance_ray(&r, distance),
-                    homogeneous.transmittance_ray(&r, distance),
+                    grid.transmittance_ray(&r, distance, 550.0),
+                    homogeneous.transmittance_ray(&r, distance, 550.0),
                 );
             }
         }
@@ -472,7 +595,7 @@ fn uniform_grid_degenerates_to_homogeneous_for_axes_edges_corners_and_oblique_ra
     .unwrap();
     for r in [ray([-1.0; 3], [1.0; 3]), ray([3.0; 3], [-1.0; 3])] {
         close(
-            grid.transmittance_ray(&r, 20.0),
+            grid.transmittance_ray(&r, 20.0, 550.0),
             (-2.0 * 3.0_f64.sqrt()).exp(),
         );
     }
@@ -511,64 +634,64 @@ fn dda_matches_independent_sum_of_individual_voxel_slab_integrals() {
                     let voxel = HomogeneousMedium::try_from(&HomogeneousMediumConfig {
                         min_m: bounds(0),
                         max_m: bounds(1),
-                        sigma_a: density * c.sigma_a_base,
-                        sigma_s: density * c.sigma_s_base,
+                        sigma_a: (density * 0.2).into(),
+                        sigma_s: (density * 0.3).into(),
                         g: c.g,
                     })
                     .unwrap();
                     if let Some((a, b)) = voxel.interval(&r, distance) {
-                        tau += voxel.sigma_t() * (b - a);
+                        tau += voxel.sigma_t_majorant(550.0) * (b - a);
                     }
                 }
             }
         }
-        close(grid.transmittance_ray(&r, distance), (-tau).exp());
+        close(grid.transmittance_ray(&r, distance, 550.0), (-tau).exp());
     }
 }
 
 #[test]
 fn absorption_vacuum_and_budget_zero_use_exact_tr_without_rng() {
     let mut c = config([2, 1, 1], vec![1.0, 3.0]);
-    c.sigma_a_base = 0.5;
-    c.sigma_s_base = 0.0;
+    c.sigma_a_base = 0.5.into();
+    c.sigma_s_base = 0.0.into();
     let r = ray([-1.0, 1.0, 1.0], [1.0, 0.0, 0.0]);
     let mut rng = StdRng::seed_from_u64(42);
     let mut untouched = rng.clone();
     let absorption: Box<dyn Medium> = Box::new(GridMedium::try_from(&c).unwrap());
     for allow in [false, true] {
         let s = absorption
-            .sample_segment(&r, 10.0, allow, &mut rng)
+            .sample_segment(&r, 10.0, 550.0, allow, &mut rng)
             .unwrap();
         assert!(s.position.is_none());
         close(s.weight, (-2.0_f64).exp());
     }
-    c.sigma_a_base = 0.2;
-    c.sigma_s_base = 0.3;
+    c.sigma_a_base = 0.2.into();
+    c.sigma_s_base = 0.3.into();
     let scattering: Box<dyn Medium> = Box::new(GridMedium::try_from(&c).unwrap());
     close(
         scattering
-            .sample_segment(&r, 10.0, false, &mut rng)
+            .sample_segment(&r, 10.0, 550.0, false, &mut rng)
             .unwrap()
             .weight,
         (-2.0_f64).exp(),
     );
     c.densities.fill(0.0);
     let vacuum: Box<dyn Medium> = Box::new(GridMedium::try_from(&c).unwrap());
-    assert_eq!(vacuum.sigma_t_majorant(), 0.0);
+    assert_eq!(vacuum.sigma_t_majorant(550.0), 0.0);
     assert_eq!(
         vacuum
-            .sample_segment(&r, f64::INFINITY, true, &mut rng)
+            .sample_segment(&r, f64::INFINITY, 550.0, true, &mut rng)
             .unwrap()
             .weight,
         1.0
     );
-    c.sigma_a_base = 0.0;
-    c.sigma_s_base = 0.0;
+    c.sigma_a_base = 0.0.into();
+    c.sigma_s_base = 0.0.into();
     c.densities.fill(3.0);
     assert_eq!(
         GridMedium::try_from(&c)
             .unwrap()
-            .transmittance_ray(&r, f64::INFINITY),
+            .transmittance_ray(&r, f64::INFINITY, 550.0),
         1.0
     );
     assert_eq!(rng.next_u64(), untouched.next_u64());
@@ -578,8 +701,8 @@ fn absorption_vacuum_and_budget_zero_use_exact_tr_without_rng() {
 fn delta_tracking_collision_cdf_and_weights_match_piecewise_optical_depth() {
     let mut c = config([3, 1, 1], vec![0.0, 1.0, 3.0]);
     c.max_m[0] = 3.0;
-    c.sigma_a_base = 0.25;
-    c.sigma_s_base = 0.75;
+    c.sigma_a_base = 0.25.into();
+    c.sigma_s_base = 0.75.into();
     let grid = GridMedium::try_from(&c).unwrap();
     // Independent integrated optical depths at distances from each ray's entry.
     // Include vacuum, reverse traversal, a start inside a cell and a surface clip.
@@ -619,7 +742,9 @@ fn delta_tracking_collision_cdf_and_weights_match_piecewise_optical_depth() {
         let mut escaped = 0;
         let mut weights = 0.0;
         for _ in 0..n {
-            let s = grid.sample_segment(&r, limit, true, &mut rng).unwrap();
+            let s = grid
+                .sample_segment(&r, limit, 550.0, true, &mut rng)
+                .unwrap();
             if let Some(p) = s.position {
                 let t = (p - r.origin).dot(&r.direction);
                 assert!(t >= enter && t < exit);
@@ -658,8 +783,8 @@ fn delta_tracking_uniform_grid_and_homogeneous_have_the_same_distance_statistics
     let homogeneous = HomogeneousMedium::try_from(&HomogeneousMediumConfig {
         min_m: c.min_m,
         max_m: c.max_m,
-        sigma_a: 1.7 * c.sigma_a_base,
-        sigma_s: 1.7 * c.sigma_s_base,
+        sigma_a: (1.7 * 0.2).into(),
+        sigma_s: (1.7 * 0.3).into(),
         g: c.g,
     })
     .unwrap();
@@ -671,7 +796,7 @@ fn delta_tracking_uniform_grid_and_homogeneous_have_the_same_distance_statistics
         let mut rng = StdRng::seed_from_u64(77);
         let (mut events, mut distance) = (0, 0.0);
         for _ in 0..n {
-            let s = m.sample_segment(&r, 10.0, true, &mut rng).unwrap();
+            let s = m.sample_segment(&r, 10.0, 550.0, true, &mut rng).unwrap();
             if let Some(p) = s.position {
                 events += 1;
                 distance += p.x + 1.0;
@@ -694,7 +819,9 @@ fn delta_tracking_missed_and_empty_segments_do_not_consume_rng() {
         (ray([1.0; 3], [1.0, 0.0, 0.0]), 0.0),
         (ray([2.0, 1.0, 1.0], [1.0, 0.0, 0.0]), 10.0),
     ] {
-        let s = grid.sample_segment(&r, limit, true, &mut rng).unwrap();
+        let s = grid
+            .sample_segment(&r, limit, 550.0, true, &mut rng)
+            .unwrap();
         assert!(s.position.is_none());
         assert_eq!(s.weight, 1.0);
     }
@@ -704,23 +831,29 @@ fn delta_tracking_missed_and_empty_segments_do_not_consume_rng() {
 #[test]
 fn delta_tracking_reports_unrepresentable_distance_instead_of_stalling() {
     let mut c = config([1; 3], vec![1.0]);
-    c.sigma_a_base = 0.0;
-    c.sigma_s_base = 1e300;
+    c.sigma_a_base = 0.0.into();
+    c.sigma_s_base = 1e300.into();
     let grid = GridMedium::try_from(&c).unwrap();
     let r = ray([-1.0, 1.0, 1.0], [1.0, 0.0, 0.0]);
     assert!(
-        grid.sample_segment(&r, 10.0, true, &mut StdRng::seed_from_u64(1))
+        grid.sample_segment(&r, 10.0, 550.0, true, &mut StdRng::seed_from_u64(1))
             .unwrap_err()
             .contains("cannot advance")
     );
     c.max_m[0] = f64::MAX;
-    c.sigma_s_base = 1.0 / f64::MAX;
+    c.sigma_s_base = (1.0 / f64::MAX).into();
     let grid = GridMedium::try_from(&c).unwrap();
     let r = ray([-f64::MAX / 2.0, 1.0, 1.0], [1.0, 0.0, 0.0]);
     assert!(
-        grid.sample_segment(&r, f64::INFINITY, true, &mut StdRng::seed_from_u64(1))
-            .unwrap_err()
-            .contains("finite ray distances")
+        grid.sample_segment(
+            &r,
+            f64::INFINITY,
+            550.0,
+            true,
+            &mut StdRng::seed_from_u64(1)
+        )
+        .unwrap_err()
+        .contains("finite ray distances")
     );
 }
 
@@ -729,24 +862,26 @@ fn homogeneous_trait_dispatch_preserves_queries_and_free_flight_rng() {
     let homogeneous = HomogeneousMedium::try_from(&HomogeneousMediumConfig {
         min_m: [0.0; 3],
         max_m: [2.0; 3],
-        sigma_a: 0.2,
-        sigma_s: 0.3,
+        sigma_a: 0.2.into(),
+        sigma_s: 0.3.into(),
         g: 0.7,
     })
     .unwrap();
-    let m: Box<dyn Medium> = Box::new(homogeneous);
+    let m: &dyn Medium = &homogeneous;
     assert_eq!(m.density_at(Vector3::repeat(1.0)), 1.0);
     assert_eq!(m.density_at(Vector3::repeat(3.0)), 0.0);
     assert_eq!(
-        m.coefficients_at(Vector3::repeat(1.0)).sigma_t(),
-        m.sigma_t_majorant()
+        m.coefficients_at(Vector3::repeat(1.0), 550.0).sigma_t(),
+        m.sigma_t_majorant(550.0)
     );
     let mut a = StdRng::seed_from_u64(34);
     let mut b = a.clone();
     let r = ray([-1.0, 1.0, 1.0], [1.0, 0.0, 0.0]);
     for _ in 0..128 {
-        let expected = homogeneous.sample_segment(&r, 10.0, true, &mut a).unwrap();
-        let actual = m.sample_segment(&r, 10.0, true, &mut b).unwrap();
+        let expected = homogeneous
+            .sample_segment(&r, 10.0, 550.0, true, &mut a)
+            .unwrap();
+        let actual = m.sample_segment(&r, 10.0, 550.0, true, &mut b).unwrap();
         assert_eq!(actual.position, expected.position);
         assert_eq!(actual.weight, expected.weight);
     }

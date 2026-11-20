@@ -4,27 +4,44 @@ use super::PhotonLanding;
 use crate::config::RenderJob;
 use crate::geometry::hit::Hit;
 use crate::geometry::ray::Ray;
+use crate::medium::Medium;
 use crate::scene::{MediumRegion, Scene};
 use nalgebra::Vector3;
 use rand::RngCore;
 
-pub(super) fn segment_transmittance(
-    scene: &Scene,
-    region: MediumRegion,
-    ray: &Ray,
-    distance: f64,
-) -> Result<f64, &'static str> {
-    let Some(medium) = scene.active_medium(region)? else {
-        return Ok(1.0);
-    };
-    if !distance.is_finite() || distance <= 0.0 {
-        return Err("invalid photon segment distance");
+#[derive(Clone, Copy)]
+pub(super) struct PhotonSegment {
+    pub ray: Ray,
+    pub region: MediumRegion,
+    pub distance: f64,
+}
+
+impl PhotonSegment {
+    pub fn medium(self, scene: &Scene) -> Result<Option<&dyn Medium>, &'static str> {
+        let medium = scene.active_medium(self.region)?;
+        if medium.is_some() && (!self.distance.is_finite() || self.distance <= 0.0) {
+            return Err("invalid photon segment distance");
+        }
+        Ok(medium)
     }
-    let tr = medium.transmittance_ray(ray, distance);
-    if !(0.0..=1.0).contains(&tr) {
-        return Err("invalid photon medium transmittance");
+
+    pub fn transmittance(self, scene: &Scene, wavelength_nm: f64) -> Result<f64, &'static str> {
+        self.medium(scene)?.map_or(Ok(1.0), |medium| {
+            self.transmittance_in(medium, wavelength_nm)
+        })
     }
-    Ok(tr)
+
+    pub fn transmittance_in(
+        self,
+        medium: &dyn Medium,
+        wavelength_nm: f64,
+    ) -> Result<f64, &'static str> {
+        let tr = medium.transmittance_ray(&self.ray, self.distance, wavelength_nm);
+        if !(0.0..=1.0).contains(&tr) {
+            return Err("invalid photon medium transmittance");
+        }
+        Ok(tr)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,24 +167,34 @@ impl PhotonTracer {
         scene: &RenderJob,
         ray: Ray,
         first_hit: Option<Hit>,
+        wavelength_nm: f64,
         rng: &mut dyn RngCore,
     ) -> Result<PhotonPathResult, &'static str> {
         let region = scene.scene.initial_medium_region(ray.origin, None)?;
-        let tr = match first_hit {
-            Some(first) => segment_transmittance(&scene.scene, region, &ray, first.distance)?,
-            None => 1.0,
+        let transmittance =
+            |segment: PhotonSegment| segment.transmittance(&scene.scene, wavelength_nm);
+        let tr = if let Some(first) = first_hit {
+            transmittance(PhotonSegment {
+                ray,
+                region,
+                distance: first.distance,
+            })?
+        } else {
+            1.0
         };
         let state = PhotonPathState::new(ray, region, self.object_id, tr);
-        self.trace_state(scene, state, first_hit, rng)
+        self.trace_state(scene, state, first_hit, rng, transmittance)
     }
 
-    /// 从当前命中继续追踪。进入时通量已包含到该命中的 Tr，供各波长复用发射首段。
+    /// Walk successive finite hit segments. The caller supplies the first
+    /// segment's weight and either evaluates or records later transmittances.
     pub(super) fn trace_state(
         &self,
         scene: &RenderJob,
         mut state: PhotonPathState,
         mut hit: Option<Hit>,
         rng: &mut dyn RngCore,
+        mut transmittance: impl FnMut(PhotonSegment) -> Result<f64, &'static str>,
     ) -> Result<PhotonPathResult, &'static str> {
         let termination = loop {
             let Some(current) = hit else {
@@ -186,12 +213,11 @@ impl PhotonTracer {
             self.scatter(&scene.scene, &mut state, current, rng)?;
             hit = scene.scene.intersect(&state.ray);
             if let Some(next) = hit {
-                state.flux_weight *= segment_transmittance(
-                    &scene.scene,
-                    state.medium_region,
-                    &state.ray,
-                    next.distance,
-                )?;
+                state.flux_weight *= transmittance(PhotonSegment {
+                    ray: state.ray,
+                    region: state.medium_region,
+                    distance: next.distance,
+                })?;
             }
         };
         Ok(PhotonPathResult { state, termination })
@@ -355,13 +381,13 @@ mod tests {
         .unwrap();
         let min_m = [-10.0, -10.0, 0.5];
         let max_m = [10.0, 10.0, 2.5];
-        let homogeneous = |sigma_a, sigma_s| -> Box<dyn Medium> {
+        let homogeneous = |sigma_a: f64, sigma_s: f64| -> Box<dyn Medium> {
             Box::new(
                 HomogeneousMedium::try_from(&HomogeneousMediumConfig {
                     min_m,
                     max_m,
-                    sigma_a,
-                    sigma_s,
+                    sigma_a: sigma_a.into(),
+                    sigma_s: sigma_s.into(),
                     g: 0.7,
                 })
                 .unwrap(),
@@ -372,8 +398,8 @@ mod tests {
             max_m,
             resolution: [1, 1, 2],
             densities: vec![1.0, 3.0],
-            sigma_a_base: 0.2,
-            sigma_s_base: 0.3,
+            sigma_a_base: 0.2.into(),
+            sigma_s_base: 0.3.into(),
             g: 0.7,
         })
         .unwrap();
@@ -390,7 +416,7 @@ mod tests {
             // Force entry, two internal reflections, and exit using the original Fresnel draws.
             let mut rng = Sequence::new(&[u64::MAX, 0, 0, u64::MAX]);
             let result = tracer
-                .trace(&scene, ray, scene.scene.intersect(&ray), &mut rng)
+                .trace(&scene, ray, scene.scene.intersect(&ray), 550.0, &mut rng)
                 .unwrap();
             let landing = result.landing().unwrap();
             let expected_x = 2.0 * theta.tan() + 3.0 * glass_theta.tan();
@@ -418,10 +444,10 @@ mod tests {
             fn density_at(&self, _: Vector3<f64>) -> f64 {
                 unreachable!()
             }
-            fn coefficients_at(&self, _: Vector3<f64>) -> MediumCoefficients {
+            fn coefficients_at(&self, _: Vector3<f64>, _: f64) -> MediumCoefficients {
                 unreachable!()
             }
-            fn sigma_t_majorant(&self) -> f64 {
+            fn sigma_t_majorant(&self, _: f64) -> f64 {
                 unreachable!()
             }
             fn phase(&self) -> HenyeyGreenstein {
@@ -431,12 +457,13 @@ mod tests {
                 &self,
                 _: &Ray,
                 _: f64,
+                _: f64,
                 _: bool,
                 _: &mut dyn RngCore,
             ) -> Result<MediumSample, String> {
                 unreachable!()
             }
-            fn transmittance_ray(&self, _: &Ray, _: f64) -> f64 {
+            fn transmittance_ray(&self, _: &Ray, _: f64, _: f64) -> f64 {
                 self.0
             }
         }
@@ -447,7 +474,7 @@ mod tests {
             scene.scene.medium = Some(Box::new(FixedTransmittance(tr)));
             assert_eq!(
                 tracer
-                    .trace(&scene, ray, Some(hit), &mut Sequence::new(&[]))
+                    .trace(&scene, ray, Some(hit), 550.0, &mut Sequence::new(&[]))
                     .unwrap_err(),
                 "invalid photon medium transmittance"
             );
@@ -457,7 +484,7 @@ mod tests {
             let hit = Hit { distance, ..hit };
             assert_eq!(
                 tracer
-                    .trace(&scene, ray, Some(hit), &mut Sequence::new(&[]))
+                    .trace(&scene, ray, Some(hit), 550.0, &mut Sequence::new(&[]))
                     .unwrap_err(),
                 "invalid photon segment distance"
             );
@@ -469,7 +496,7 @@ mod tests {
         let (scene, mut tracer, ray) = slab(1.5, 6);
         let mut rng = Sequence::new(&[u64::MAX, 0, 0, 0, 0, u64::MAX]);
         let result = tracer
-            .trace(&scene, ray, scene.scene.intersect(&ray), &mut rng)
+            .trace(&scene, ray, scene.scene.intersect(&ray), 550.0, &mut rng)
             .unwrap();
         assert_eq!(
             (
@@ -494,6 +521,7 @@ mod tests {
                 &scene,
                 ray,
                 scene.scene.intersect(&ray),
+                550.0,
                 &mut Sequence::new(&[u64::MAX, 0]),
             )
             .unwrap();
@@ -518,7 +546,13 @@ mod tests {
             state.medium = PhotonMedium::Glass;
             let mut rng = Sequence::new(&[]);
             let result = tracer
-                .trace_state(&scene, state, scene.scene.intersect(&ray), &mut rng)
+                .trace_state(
+                    &scene,
+                    state,
+                    scene.scene.intersect(&ray),
+                    &mut rng,
+                    |segment| segment.transmittance(&scene.scene, 550.0),
+                )
                 .unwrap();
             assert_eq!(result.termination, PhotonTermination::EventLimit);
             assert_eq!(
@@ -601,6 +635,7 @@ mod tests {
                 &scene,
                 ray,
                 Some(entry),
+                550.0,
                 &mut Sequence::new(&[u64::MAX; 32]),
             )
             .unwrap();
@@ -629,7 +664,7 @@ mod tests {
                 let mut two = 0.0;
                 for _ in 0..N {
                     let result = tracer
-                        .trace(&scene, ray, scene.scene.intersect(&ray), &mut rng)
+                        .trace(&scene, ray, scene.scene.intersect(&ray), 550.0, &mut rng)
                         .unwrap();
                     let bucket = match result.termination {
                         PhotonTermination::Ground(_) => 0,
@@ -727,13 +762,13 @@ mod tests {
         );
         job.photon.ground_id = Some(ground);
         job.select_caustics_object(target).unwrap();
-        let absorption = |sigma_a| {
+        let absorption = |sigma_a: f64| {
             Box::new(
                 HomogeneousMedium::try_from(&HomogeneousMediumConfig {
                     min_m: [-10.0; 3],
                     max_m: [10.0; 3],
-                    sigma_a,
-                    sigma_s: 0.0,
+                    sigma_a: sigma_a.into(),
+                    sigma_s: 0.0.into(),
                     g: 0.0,
                 })
                 .unwrap(),
@@ -813,6 +848,7 @@ mod tests {
                     &scene,
                     ray,
                     scene.scene.intersect(&ray),
+                    550.0,
                     &mut Sequence::new(&[]),
                 )
                 .unwrap();
@@ -826,6 +862,7 @@ mod tests {
                     &scene,
                     ray,
                     scene.scene.intersect(&ray),
+                    550.0,
                     &mut Sequence::new(&[])
                 )
                 .is_err()
@@ -871,7 +908,7 @@ mod tests {
                 .unwrap();
                 let mut rng = Sequence::new(&[u64::MAX; 2]);
                 let result = tracer
-                    .trace(&scene, ray, scene.scene.intersect(&ray), &mut rng)
+                    .trace(&scene, ray, scene.scene.intersect(&ray), 550.0, &mut rng)
                     .unwrap();
                 let sin_t = theta.sin() / ior;
                 let tan_t = sin_t / (1.0 - sin_t * sin_t).sqrt();

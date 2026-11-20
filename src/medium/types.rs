@@ -12,6 +12,13 @@ impl MediumCoefficients {
     pub fn sigma_t(self) -> f64 {
         self.sigma_a + self.sigma_s
     }
+
+    pub(super) fn scaled_by_density(self, density: f64) -> Self {
+        Self {
+            sigma_a: density * self.sigma_a,
+            sigma_s: density * self.sigma_s,
+        }
+    }
 }
 
 /// Distance sampling result. Weight includes Tr / survival PDF, or σs Tr / distance PDF.

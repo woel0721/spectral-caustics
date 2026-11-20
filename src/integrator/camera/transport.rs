@@ -49,6 +49,9 @@ pub trait CameraTransport: Copy {
     fn finite(self, v: Self::Value) -> bool;
     fn valid_weight(self, v: Self::Value) -> bool;
     fn importance(self, v: Self::Value) -> f64;
+    fn wavelength_nm(self) -> Option<f64> {
+        None
+    }
     fn emission(self, rgb: Vector3<f64>) -> Option<Self::Value>;
     fn sunlight(
         self,
@@ -168,6 +171,9 @@ impl CameraTransport for Rgb {
 }
 impl CameraTransport for Spectral {
     type Value = f64;
+    fn wavelength_nm(self) -> Option<f64> {
+        Some(self.wavelength_nm)
+    }
     fn one(self) -> f64 {
         1.0
     }
