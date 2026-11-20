@@ -1,0 +1,60 @@
+{
+  "render": {
+    "width": 640,
+    "height": 426,
+    "samples_per_pixel_axis": 4,
+    "camera_spp": 256,
+    "camera_mode": "rgb",
+    "mode": "constant",
+    "wavelength_min_nm": 380,
+    "wavelength_max_nm": 780,
+    "wavelength_step_nm": 10,
+    "seed": 42,
+    "max_spectral_blocks": 16,
+    "exposure": 1.5,
+    "output_path": "output/local_procedural_fog/camera_combined.png"
+  },
+  "scene": {
+    "camera": {
+      "position": [2, -3.2, 1.65],
+      "target": [0, 0, 0.67],
+      "up": [0, 0, 1],
+      "fov_y_degrees": 24
+    },
+    "background_linear_rgb": [0, 0, 0],
+    "environment": null,
+    "objects": [
+      {
+        "type": "ground",
+        "height_m": 0,
+        "material": { "type": "lambertian", "albedo": [0.18, 0.18, 0.18] }
+      }
+    ],
+    "ground_checkerboard": {
+      "cell_size_m": 0.5,
+      "even_scale": 1,
+      "odd_scale": 0.6
+    },
+    "ground_margin_m": 6,
+    "receiver": { "min_m": [-2, -2], "max_m": [2, 2] },
+    "light": {
+      "type": "disk_area",
+      "center": [-0.9, 1.5, 1.65],
+      "normal": [0.9, -1.5, -0.85],
+      "radius": 0.01,
+      "total_flux": 20
+    },
+    "light_samples": 4,
+    "max_diffuse_bounces": 0,
+    "max_volume_scatters": 8,
+    "medium": {
+      "min_m": [-0.8, -0.5, 0.2],
+      "max_m": [0.8, 0.5, 1.4],
+      "resolution": [64, 40, 48],
+      "procedural": { "seed": 42 },
+      "sigma_a_base": 0.05,
+      "sigma_s_base": 1.2,
+      "g": 0.35
+    }
+  }
+}

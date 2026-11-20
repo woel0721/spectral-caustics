@@ -183,7 +183,7 @@ cargo test --locked --test volume
 | --- | --- |
 | 省略 `medium_interface` 或设为 `null` | 无区域绑定，路径按 `scene.medium` 的空间范围计算介质效果。 |
 | `"medium_interface": { "interior": null }` | 绑定边界，内部为参与介质真空，表面按玻璃 IOR 折射和反射。空对象 `{}` 同样表示内部真空。 |
-| `"medium_interface": { "interior": { ... } }` | 绑定边界，内部使用指定的介质。内部介质接受与 `scene.medium` 相同的均匀或网格配置。 |
+| `"medium_interface": { "interior": { ... } }` | 绑定边界，内部介质接受与 `scene.medium` 相同的均匀、显式网格或程序化网格配置。 |
 
 绑定后外侧使用 `scene.medium`。内部介质的 `min_m` 和 `max_m` 仍是世界坐标，内部消光和散射只发生在玻璃内部与介质盒重叠的范围。
 
@@ -207,7 +207,7 @@ Photon Path 在发射点分类。位于选中的已绑定玻璃内部时，以 `
 
 相机传输只使用三个关键接口：`sample_segment(...)` 返回 `Result<MediumSample, String>`，包含真实散射点（可缺省）和已补偿权重；`transmittance_ray(ray, max_distance)` 返回段透射率；`phase()` 返回相函数。内部算法的封装原则见 [架构职责边界](../.agents/architecture.md#当前物理范围)。另有只读的 `density_at(position)`、`coefficients_at(position)`、`sigma_t_majorant()` 供检查介质数据；直接在具体类型上调用 trait 方法需导入 `medium::Medium`。局部系数由 `MediumCoefficients` 返回，其 `sigma_t()` 为吸收与散射系数之和。
 
-JSON 的 `scene.medium` 根据互斥字段结构区分 `MediumConfig` 两个配置变体，再由 `medium::from_config` 构造 `Box<dyn Medium>`：已有均匀配置保留 `sigma_a/sigma_s`，网格使用 `resolution/densities/sigma_a_base/sigma_s_base`；不需要 `type` 字段。最小双层网格配置：
+JSON 的 `scene.medium` 根据互斥字段区分均匀、显式网格和程序化网格配置，由 `medium::from_config` 构造 `Box<dyn Medium>`。均匀配置使用 `sigma_a/sigma_s`，显式网格使用 `resolution/densities/sigma_a_base/sigma_s_base`，程序化网格将 `densities` 换成 `procedural` 对象。最小双层网格配置如下。
 
 ```json
 "max_volume_scatters": 8,
@@ -252,6 +252,18 @@ cargo run --release --locked --example grid_medium_compare -- 256 384 output/gri
 ```
 
 `configs/grid_fog.json` 是 4×2×3 密度变化的雾场，默认 192×128、32 SPP、seed=42、体预算 8；输出在 `output/grid_fog/`。设预算为 0 可观察相同总消光下不含散射光的图像。
+
+### 局部程序化雾团
+
+[局部雾团示例](../configs/local_procedural_fog.json) 在 1.6×1.0×1.2 m 的盒内生成带疏密变化的雾团，边缘由椭球包络渐淡。构建场景时按体素中心生成密度，之后使用同一个 `GridMedium` 处理光线。移动或缩放 `min_m/max_m` 可改变覆盖范围，`resolution` 控制烘焙分辨率，`procedural.seed` 控制形状，与 `render.seed` 独立。
+
+示例用半径 0.01 m 的圆盘照明。可将 `scene.medium` 设为 `null` 获取无介质图，或将 `max_volume_scatters` 设为 0 获取仅消光图。对照时保持灯光与曝光相同，并给每组配置设置独立的输出目录。
+
+```sh
+cargo run --release --locked -- configs/local_procedural_fog.json
+```
+
+### 网格对照与性能基准
 
 `grid_medium_compare` 输出 `homogeneous`、`uniform_grid`、`layered_single`、`layered_multiple`、`clumped_extinction`、`clumped_single`、`clumped_multiple` 七组，每组包含三个分量 PNG 和可重跑的 `config.json`。均匀/分层/团块密度均归一到体积平均密度 1，系数、相机、光源、曝光与 seed 相同；散射预算分别为 0/1/8。分层与团块网格为 12×10×8 的分块常数场。均匀网格与均匀介质的随机数消耗不同，比较统计分布与能量，不要求低 SPP 图像逐位相同。`hero` 使用单波长，`packet` 使用四波长 CRN，SPP 须能被 4 整除。
 
