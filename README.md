@@ -41,8 +41,8 @@ cargo run --release --locked -- configs/grid_fog.json
 
 | 想尝试的场景 | 替换命令末尾的配置文件 |
 | --- | --- |
-| 玻璃球聚光 | [configs/sphere_forward_preview.json](configs/sphere_forward_preview.json) |
-| 棱镜色散与地面焦散 | [configs/vertical_prism_forward_preview.json](configs/vertical_prism_forward_preview.json) |
+| 圆盘面光源下的玻璃球聚光 | [configs/sphere_forward_preview.json](configs/sphere_forward_preview.json) |
+| 圆盘面光源下的棱镜色散与地面焦散 | [configs/vertical_prism_forward_preview.json](configs/vertical_prism_forward_preview.json) |
 | 比较均匀雾与网格雾 | [configs/homogeneous_fog.json](configs/homogeneous_fog.json) · [configs/grid_fog.json](configs/grid_fog.json) |
 | 在雾中渲染内部真空的玻璃球 | [configs/sphere_medium_interface.json](configs/sphere_medium_interface.json) |
 
