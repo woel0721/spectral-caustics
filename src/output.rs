@@ -32,35 +32,27 @@ pub fn save_png_with_exposure(
         return Err("曝光必须有限且非负".into());
     }
     // image 使用 u32 表示宽高；无法转换时返回错误。
-    let width = u32::try_from(framebuffer.width)?;
-    let height = u32::try_from(framebuffer.height)?;
+    let width = u32::try_from(framebuffer.width())?;
+    let height = u32::try_from(framebuffer.height())?;
 
     let mut image = RgbImage::new(width, height);
 
-    for y in 0..height {
-        for x in 0..width {
-            // 读取当前位置的 XYZ。
-            let xyz = *framebuffer
-                .get(x as usize, y as usize)
-                .ok_or("像素坐标越界")?;
-
-            // XYZ -> 线性 RGB。
+    // Framebuffer 的构造保证像素切片包含 height 个完整的行。
+    let xyz_rows = framebuffer.pixels().chunks_exact(framebuffer.width());
+    for (xyz_row, rgb_row) in xyz_rows.zip(image.rows_mut()) {
+        for (&xyz, pixel) in xyz_row.iter().zip(rgb_row) {
             let linear_rgb = xyz_to_linear_srgb(xyz).ok_or("XYZ 非法或颜色计算溢出")? * exposure;
             if !linear_rgb.iter().all(|v| v.is_finite()) {
                 return Err("曝光计算溢出".into());
             }
 
-            // 在编码前压缩 HDR 高光；保留曲线内的最终范围限制。
             let mapped_rgb = tone_map(linear_rgb);
             if !mapped_rgb.iter().all(|v| v.is_finite()) {
                 return Err("ACES 色调映射计算溢出".into());
             }
 
-            // 复用已有函数：编码并量化为 [u8; 3]。
             let rgb8 = linear_rgb_to_srgb8(mapped_rgb).ok_or("sRGB 编码失败")?;
-
-            // Rgb(...) 将三个字节包装成 image 库的像素类型。
-            image.put_pixel(x, y, Rgb(rgb8));
+            *pixel = Rgb(rgb8);
         }
     }
 
