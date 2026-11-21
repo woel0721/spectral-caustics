@@ -983,7 +983,7 @@ fn transmission(wi: Vector3<f64>, weight: f64) -> BsdfSample {
 }
 
 fn trace_center_pixel(scene: &RenderJob, seed: u64) -> Vector3<f64> {
-    let (light_wi, light) = camera_lighting_setup(scene, 1, 1).unwrap();
+    let (light_wi, light) = camera_lighting_setup(scene, 1, 1, 1).unwrap();
     let ray = scene.camera.ray_for_pixel(0, 0, 1, 1).unwrap();
     evaluate_path(
         scene,

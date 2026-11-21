@@ -1244,7 +1244,7 @@ fn camera_paths_run_inside_the_configured_render_pool() {
 }
 
 #[test]
-fn runtime_rejects_unsupported_counts_and_invalid_prism_geometry() {
+fn runtime_rejects_unsupported_counts_and_invalid_receiver_height() {
     let original = SceneConfig::default();
     let mut config = original.clone();
     config.objects.clear();
@@ -1258,29 +1258,44 @@ fn runtime_rejects_unsupported_counts_and_invalid_prism_geometry() {
         material: Default::default(),
     });
     assert!(RenderJob::from_config(&config).is_err());
-    config = original.clone();
-    config.objects[0] = ObjectConfig::Prism {
-        caustics: true,
-        medium_interface: None,
-        vertices_m: [[0.0; 3]; 6],
-        material: MaterialConfig::Dielectric {
-            ior: 1.5,
-            dispersion: None,
-        },
-    };
-    assert!(config.validate().is_ok()); // 数据校验与几何构建职责分开。
-    assert!(RenderJob::from_config(&config).is_err());
-    config = original.clone();
-    if let ObjectConfig::Prism { vertices_m, .. } = &mut config.objects[0] {
-        vertices_m.swap(0, 1);
-    }
-    assert!(RenderJob::from_config(&config).is_err());
     config = original;
     config.objects[1] = ObjectConfig::Ground {
         height_m: 3.0,
         material: Default::default(),
     };
     assert!(RenderJob::from_config(&config).is_err());
+}
+
+#[test]
+fn saving_and_building_reject_degenerate_or_miswound_prisms() {
+    let directory = TemporaryDirectory::new();
+    let path = directory.0.join("scene.json");
+    let valid = Config::default();
+    valid.build().unwrap();
+    valid.save(&path).unwrap();
+    let saved = fs::read(&path).unwrap();
+    let ObjectConfig::Prism { mut vertices_m, .. } = valid.scene.objects[0] else {
+        panic!("expected default prism");
+    };
+    vertices_m.swap(0, 1);
+    for invalid in [[[0.0; 3]; 6], vertices_m] {
+        let mut config = valid.clone();
+        let ObjectConfig::Prism { vertices_m, .. } = &mut config.scene.objects[0] else {
+            unreachable!();
+        };
+        *vertices_m = invalid;
+        let save_error = config.save(&path).unwrap_err();
+        assert!(
+            save_error.to_string().contains("scene.objects[0]"),
+            "{save_error}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), saved);
+        let build_error = config.build().err().expect("invalid prism built");
+        assert!(
+            build_error.to_string().contains("scene.objects[0]"),
+            "{build_error}"
+        );
+    }
 }
 
 #[test]

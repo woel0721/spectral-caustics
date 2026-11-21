@@ -250,32 +250,8 @@ pub(crate) fn validate_spectral_camera(
     height: usize,
     total_paths: usize,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    camera_lighting_setup(scene, width, height)?;
-    width
-        .checked_mul(height)
-        .and_then(|n| n.checked_mul(total_paths))
-        .and_then(|n| n.checked_mul(scene.camera_options.light_samples))
-        .and_then(|n| {
-            n.checked_mul(
-                scene.camera_options.max_diffuse_bounces
-                    + 1
-                    + scene.camera_options.max_volume_scatters,
-            )
-        })
-        .ok_or("有限光源样本总数溢出")?;
+    camera_lighting_setup(scene, width, height, total_paths)?;
     scene.scene.light.validate_emission()?;
-    width
-        .checked_mul(height)
-        .and_then(|n| n.checked_mul(total_paths))
-        .and_then(|n| n.checked_mul(scene.camera_options.environment_samples))
-        .and_then(|n| {
-            n.checked_mul(
-                scene.camera_options.max_diffuse_bounces
-                    + 1
-                    + scene.camera_options.max_volume_scatters,
-            )
-        })
-        .ok_or("光谱相机工作量溢出")?;
     for object in &scene.scene.objects {
         let material = scene.scene.material(object.material_id());
         if !material.supports_spectral() {

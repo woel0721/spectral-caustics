@@ -386,7 +386,7 @@ impl SceneConfig {
     /// 检查场景描述能否用于运行时构建，供 JSON 加载和 RenderJob::from_config 使用。
     ///
     /// 输入：self 中的相机、材质、几何参数、采样预算、光源和接收区域；输出：有效时 Ok(())，否则 Err。
-    /// 检查焦散目标和介质界面的唯一性。未绑定界面的 Prism 在运行时进一步检查凸性与绕序。
+    /// 检查焦散目标和介质界面的唯一性，并按构建时的规则检查棱镜顶点。
     pub fn validate(&self) -> Result<(), String> {
         self.camera.validate()?;
         if let Some(medium) = &self.medium {
@@ -488,23 +488,12 @@ impl SceneConfig {
                 ObjectConfig::Prism {
                     vertices_m,
                     material,
-                    medium_interface,
                     ..
                 } => {
                     material
                         .validate()
                         .map_err(|message| format!("scene.objects[{index}].{message}"))?;
-                    if vertices_m.iter().flatten().any(|v| !v.is_finite()) {
-                        return Err("scene 三棱镜顶点必须为有限坐标".into());
-                    }
-                    if medium_interface.is_some()
-                        && crate::geometry::prism::Prism::from_vertices(vertices_m.map(Into::into))
-                            .is_none()
-                    {
-                        return Err(format!(
-                            "scene.objects[{index}].medium_interface 要求有效的封闭凸三棱镜"
-                        ));
-                    }
+                    super::build::build_prism(*vertices_m, index)?;
                 }
                 ObjectConfig::Ground { height_m, material } => {
                     material

@@ -40,7 +40,7 @@ pub fn integrate_rgb(
     if spp == 0 {
         return Err("camera SPP must be positive".into());
     }
-    let (light_wi, light) = camera_lighting_setup(job, width, height)?;
+    let (light_wi, light) = camera_lighting_setup(job, width, height, spp)?;
     // Sun color uses the source's quadrature even without a caustics target.
     // Previously the high-level pipeline obtained this white from the photon preview.
     let sun_color = if ground.is_none() && light > 0.0 {
@@ -56,16 +56,6 @@ pub fn integrate_rgb(
         Vector3::repeat(1.0)
     };
 
-    width
-        .checked_mul(height)
-        .and_then(|n| n.checked_mul(spp))
-        .and_then(|n| n.checked_mul(job.camera_options.environment_samples))
-        .and_then(|n| {
-            n.checked_mul(
-                job.camera_options.max_diffuse_bounces + 1 + job.camera_options.max_volume_scatters,
-            )
-        })
-        .ok_or("camera workload overflow")?;
     #[cfg(feature = "diagnostics")]
     if job
         .diagnostics

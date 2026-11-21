@@ -22,6 +22,12 @@ use nalgebra::Vector2;
 use nalgebra::Vector3;
 use std::error::Error;
 
+pub(super) fn build_prism(vertices_m: [[f64; 3]; 6], index: usize) -> Result<Prism, String> {
+    Prism::from_vertices(vertices_m.map(Vector3::from)).ok_or_else(|| {
+        format!("scene.objects[{index}].vertices_m 须按示例顺序描述非退化、朝外法线的凸三棱镜")
+    })
+}
+
 impl Default for RenderJob {
     /// 返回与 Scene::new 相同的空运行时场景；几何物体需后续添加。
     fn default() -> Self {
@@ -128,8 +134,7 @@ impl RenderJob {
                     caustics,
                     ..
                 } => {
-                    let prism = Prism::from_vertices(vertices_m.map(Vector3::from))
-                        .ok_or("三棱镜顶点无效：需要按示例顺序描述非退化、朝外法线的凸三棱镜")?;
+                    let prism = build_prism(*vertices_m, index)?;
                     let id = scene
                         .scene
                         .add(Box::new(prism), material::from_config(material)?);

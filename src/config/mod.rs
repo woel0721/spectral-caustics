@@ -69,26 +69,14 @@ impl Config {
                 }
             }
         }
-        self.render
-            .width
-            .checked_mul(self.render.height)
-            .and_then(|pixels| pixels.checked_mul(self.render.camera_spp))
-            .and_then(|paths| paths.checked_mul(self.scene.environment_samples))
-            .and_then(|samples| {
-                samples.checked_mul(
-                    self.scene.max_diffuse_bounces + 1 + self.scene.max_volume_scatters,
-                )
-            })
-            .ok_or("环境方向样本总数溢出")?;
-        self.render
-            .width
-            .checked_mul(self.render.height)
-            .and_then(|n| n.checked_mul(self.render.camera_spp))
-            .and_then(|n| n.checked_mul(self.scene.light_samples))
-            .and_then(|n| {
-                n.checked_mul(self.scene.max_diffuse_bounces + 1 + self.scene.max_volume_scatters)
-            })
-            .ok_or("有限光源样本总数溢出")?;
+        render::validate_camera_workload(
+            self.render.width,
+            self.render.height,
+            self.render.camera_spp,
+            1 + self.scene.max_diffuse_bounces + self.scene.max_volume_scatters,
+            self.scene.environment_samples,
+            self.scene.light_samples,
+        )?;
         Ok(())
     }
 
