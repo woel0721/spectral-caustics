@@ -117,7 +117,7 @@ Diagnostics 在 Debug / Release 都由 feature 控制。target 省略时选择�
 ## 示例与验证
 
 ```sh
-cargo run --release --locked --example camera_direct_caustics -- 8
+cargo run --release --locked -- configs/sphere.json
 cargo run --release --locked --example camera_parallel_benchmark -- 16 64
 cargo run --release --locked --example spectral_camera_compare -- 64 64 output/compare configs/vertical_prism_spectral_caustics.json
 cargo run --release --locked --example sphere_wavelengths
@@ -132,6 +132,8 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo clippy --locked --all-targets --features diagnostics -- -D warnings
 git diff --check
 ```
+
+玻璃球配置将 `camera_direct.png`、`camera_caustics.png` 和 `camera_combined.png` 写到 `output/sphere/`。快速验证时可复制该配置，降低分辨率和 `render.camera_spp`，并把 `render.output_path` 指到独立目录。
 
 固定配置 / seed 在当前实现的 Rayon 1/2/4 线程下逐位可复现。改变采样块数量会改变浮点加法分组，测试使用数值容差；不冻结旧算法的 RNG 消耗或旧版本逐位结果。
 
