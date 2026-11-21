@@ -8,7 +8,7 @@ use crate::integrator::camera::{
 use crate::config::RenderJob;
 use crate::integrator::camera::spectral::PREFIX_STREAM;
 use crate::integrator::camera::spectral::packet_rng;
-use crate::integrator::camera::spectral::validate_spectral_camera;
+use crate::integrator::camera::spectral::spectral_camera_setup;
 use crate::optics::dispersion::IorMode;
 use crate::sampling::rng::CAMERA_STREAM;
 use crate::sampling::rng::DIFFUSE_STREAM;
@@ -58,12 +58,7 @@ pub fn render_fixed_wavelength_camera(
     }
     let lanes = wavelengths_nm.len();
     let paths = spp.checked_mul(lanes).ok_or("固定波长相机路径数量溢出")?;
-    validate_spectral_camera(scene, width, height, paths)?;
-    let (sun_wi, sun_strength) = scene
-        .scene
-        .light
-        .analytic_sun()?
-        .unwrap_or((nalgebra::Vector3::z(), 0.0));
+    let (sun_wi, sun_strength) = spectral_camera_setup(scene, width, height, paths)?;
     let count = width
         .checked_mul(height)
         .and_then(|n| n.checked_mul(lanes))

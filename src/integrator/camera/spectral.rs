@@ -55,12 +55,7 @@ pub fn integrate_spectral(
         settings.mode,
     );
     let (spatial_spp, total_paths) = spectral_sample_counts(spp, packet_size)?;
-    validate_spectral_camera(scene, width, height, total_paths)?;
-    let (sun_wi, sun_strength) = scene
-        .scene
-        .light
-        .analytic_sun()?
-        .unwrap_or((Vector3::z(), 0.0));
+    let (sun_wi, sun_strength) = spectral_camera_setup(scene, width, height, total_paths)?;
     #[cfg(feature = "diagnostics")]
     let debug = settings.diagnostics.path;
     let mut buffers = super::CameraLightingImages {
@@ -241,24 +236,23 @@ pub fn integrate_spectral(
     Ok(buffers)
 }
 
-/// 在光谱渲染前检查场景、材质和工作量，避免开始追踪后才发现不支持的输入。
+/// 在光谱渲染前检查照明、工作量与材质的光谱能力，返回解析太阳的方向和法向辐照度。
 ///
-/// 输入：scene、宽高和每像素 total_paths；输出：有效时 Ok(())，未绑定/无光谱材质、非法照明或数量溢出时 Err。
-pub(crate) fn validate_spectral_camera(
+/// 圆盘光源沿用照明初始化给出的零强度解析太阳项。
+pub(crate) fn spectral_camera_setup(
     scene: &RenderJob,
     width: usize,
     height: usize,
     total_paths: usize,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    camera_lighting_setup(scene, width, height, total_paths)?;
-    scene.scene.light.validate_emission()?;
+) -> Result<(Vector3<f64>, f64), Box<dyn Error + Send + Sync>> {
+    let sun = camera_lighting_setup(scene, width, height, total_paths)?;
     for object in &scene.scene.objects {
         let material = scene.scene.material(object.material_id());
         if !material.supports_spectral() {
             return Err("光谱相机暂不支持 GGX Metal 或其他无光谱采样接口的材质".into());
         }
     }
-    Ok(())
+    Ok(sun)
 }
 
 /// 为某个 Packet 样本/波长路径建立可复现随机流，供像素并行与公共随机数采样。
