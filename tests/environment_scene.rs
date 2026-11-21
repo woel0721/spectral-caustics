@@ -1,3 +1,4 @@
+mod support;
 use nalgebra::Vector2;
 use nalgebra::Vector3;
 use rand::Rng;
@@ -25,6 +26,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+use support::assert_camera_images_bits_eq;
 
 struct TemporaryHdr(PathBuf);
 
@@ -942,9 +944,7 @@ fn mixed_hdri_camera_is_thread_independent_and_preserves_caustics() {
                             Some(&lighting),
                         )
                         .unwrap();
-                        assert_eq!(images.direct.pixels(), baseline.direct.pixels());
-                        assert_eq!(images.caustics.pixels(), baseline.caustics.pixels());
-                        assert_eq!(images.combined.pixels(), baseline.combined.pixels());
+                        assert_camera_images_bits_eq(&images, &baseline);
                         for ((direct, caustics), combined) in images
                             .direct
                             .pixels()

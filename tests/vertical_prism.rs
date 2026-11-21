@@ -7,10 +7,10 @@ use serde_json::json;
 use spectral_caustics::config::Config;
 use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 use spectral_caustics::config::scene::ObjectConfig;
-use spectral_caustics::film::Framebuffer;
 use spectral_caustics::geometry::ray::Ray;
 use spectral_caustics::optics::dispersion::IorMode;
 use spectral_caustics::renderer::Renderer;
+use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 fn config(caustics: bool) -> Config {
     Config::from_json(if caustics {
@@ -19,15 +19,6 @@ fn config(caustics: bool) -> Config {
         include_str!("../configs/vertical_prism_spectral.json")
     })
     .unwrap()
-}
-
-fn identical(a: &Framebuffer, b: &Framebuffer) {
-    assert_eq!((a.width(), a.height()), (b.width(), b.height()));
-    for (a, b) in a.pixels().iter().zip(b.pixels()) {
-        for (a, b) in a.iter().zip(b.iter()) {
-            assert_eq!(a.to_bits(), b.to_bits());
-        }
-    }
 }
 
 #[test]
@@ -125,7 +116,7 @@ fn striped_through_prism_spectral_render_repeats_for_threads_and_mis() {
                 );
                 assert!(image.pixels().iter().any(|p| p.y > 0.1));
                 if let Some(previous) = &reference {
-                    identical(&image, previous);
+                    assert_framebuffer_bits_eq(&image, previous);
                 }
                 reference = Some(image);
             }
@@ -210,10 +201,8 @@ fn vertical_prism_ground_caustics_are_additive_colored_and_thread_deterministic(
                 let light: &spectral_caustics::caustics::SpectralLighting = light;
                 let previous: &spectral_caustics::integrator::camera::CameraLightingImages =
                     previous;
-                identical(&lighting.caustics, &light.caustics);
-                identical(&images.direct, &previous.direct);
-                identical(&images.caustics, &previous.caustics);
-                identical(&images.combined, &previous.combined);
+                assert_framebuffer_bits_eq(&lighting.caustics, &light.caustics);
+                assert_camera_images_bits_eq(&images, previous);
             }
             reference = Some((lighting, images));
         }

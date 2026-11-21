@@ -17,8 +17,6 @@ use spectral_caustics::config::render::RenderSetting;
 use spectral_caustics::config::scene::GroundReceiverConfig;
 use spectral_caustics::config::scene::ObjectConfig;
 use spectral_caustics::config::scene::SceneConfig;
-#[cfg(feature = "diagnostics")]
-use spectral_caustics::film::Framebuffer;
 use spectral_caustics::geometry::ground::Ground;
 use spectral_caustics::geometry::ray::Ray;
 use spectral_caustics::geometry::sphere::Sphere;
@@ -31,6 +29,8 @@ use spectral_caustics::spectrum::cie_xyz;
 use spectral_caustics::spectrum::emission::d65_spectrum;
 use spectral_caustics::spectrum::rgb_reflectance;
 use std::f64::consts::PI;
+#[cfg(feature = "diagnostics")]
+use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 fn config() -> Config {
     let mut c =
@@ -44,15 +44,6 @@ fn config() -> Config {
 }
 fn disk(radius: f64) -> DiskAreaLight {
     DiskAreaLight::new(Vector3::z() * 2.0, -Vector3::z(), radius, 20.0).unwrap()
-}
-#[cfg(feature = "diagnostics")]
-fn same(a: &Framebuffer, b: &Framebuffer) {
-    assert_eq!((a.width(), a.height()), (b.width(), b.height()));
-    for (a, b) in a.pixels().iter().zip(b.pixels()) {
-        for (a, b) in a.iter().zip(b.iter()) {
-            assert_eq!(a.to_bits(), b.to_bits());
-        }
-    }
 }
 fn ground_scene(radius: f64) -> RenderJob {
     let mut scene = RenderJob::new();
@@ -524,9 +515,7 @@ fn disk_packet_components_and_rgb_repeat_across_threads_with_crn_preserved() {
                     assert_eq!(*d + *k, *sum);
                 }
                 if let Some(old) = &reference {
-                    same(&old.direct, &image.direct);
-                    same(&old.caustics, &image.caustics);
-                    same(&old.combined, &image.combined);
+                    assert_camera_images_bits_eq(&image, old);
                 }
                 reference = Some(image);
             }
@@ -539,7 +528,7 @@ fn disk_packet_components_and_rgb_repeat_across_threads_with_crn_preserved() {
                 .render(&scene)
                 .map(|images| images.combined)
                 .unwrap();
-            same(&debug, &reference.unwrap().combined);
+            assert_framebuffer_bits_eq(&debug, &reference.unwrap().combined);
             #[cfg(feature = "diagnostics")]
             {
                 c.render.diagnostics.disable_ground_sun = false;
@@ -582,9 +571,7 @@ fn disk_packet_components_and_rgb_repeat_across_threads_with_crn_preserved() {
                 assert!((*d + *k - *sum).norm() < 1e-12);
             }
             if let Some(old) = &reference {
-                same(&old.direct, &image.direct);
-                same(&old.caustics, &image.caustics);
-                same(&old.combined, &image.combined);
+                assert_camera_images_bits_eq(&image, old);
             }
             reference = Some(image);
         }

@@ -20,6 +20,7 @@ use spectral_caustics::spectrum::d65_normalization;
 use spectral_caustics::spectrum::d65_spd;
 use spectral_caustics::spectrum::emission::d65_normalization_continuous;
 mod support;
+use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 fn config(source: &str) -> Config {
     let mut c = Config::from_json(source).unwrap();
@@ -34,13 +35,6 @@ fn config(source: &str) -> Config {
         e.map_path = None;
     }
     c
-}
-
-fn same(a: &Framebuffer, b: &Framebuffer) {
-    assert_eq!((a.width(), a.height()), (b.width(), b.height()));
-    for (a, b) in a.pixels().iter().zip(b.pixels()) {
-        assert_eq!(a.map(f64::to_bits), b.map(f64::to_bits));
-    }
 }
 
 fn assert_linear_sum(direct: &Framebuffer, caustics: &Framebuffer, combined: &Framebuffer) {
@@ -93,8 +87,8 @@ fn json_vacuum_interface_matches_manual_binding_in_camera_and_photon_outputs() {
     let xyz = |job| integrate_xyz(job, Some(target), ground, &c.render).unwrap();
     let json_xyz = xyz(&bound);
     let rust_xyz = xyz(&manual);
-    same(&json_xyz.caustics, &rust_xyz.caustics);
-    same(
+    assert_framebuffer_bits_eq(&json_xyz.caustics, &rust_xyz.caustics);
+    assert_framebuffer_bits_eq(
         json_xyz.direct.as_ref().unwrap(),
         rust_xyz.direct.as_ref().unwrap(),
     );
@@ -102,7 +96,7 @@ fn json_vacuum_interface_matches_manual_binding_in_camera_and_photon_outputs() {
     // Removing extinction inside the glass increases the deposited caustic flux.
     // Geometrically direct photons never enter the sphere.
     let unbound_xyz = xyz(&unbound);
-    same(
+    assert_framebuffer_bits_eq(
         json_xyz.direct.as_ref().unwrap(),
         unbound_xyz.direct.as_ref().unwrap(),
     );
@@ -140,9 +134,7 @@ fn json_vacuum_interface_matches_manual_binding_in_camera_and_photon_outputs() {
         .unwrap()
         .render(&manual)
         .unwrap();
-        same(&json_image.direct, &rust_image.direct);
-        same(&json_image.caustics, &rust_image.caustics);
-        same(&json_image.combined, &rust_image.combined);
+        assert_camera_images_bits_eq(&json_image, &rust_image);
         assert_ne!(
             json_image.direct.pixels(),
             renderer.render(&unbound).unwrap().direct.pixels()
@@ -192,8 +184,8 @@ fn photon_xyz_atlas_and_direct_preview_apply_the_same_analytic_extinction() {
         let vacuum = c.build().unwrap();
         let vacuum_xyz = xyz(&vacuum);
         let vacuum_atlas = map(&vacuum, &c.render, 2);
-        same(&clear_xyz.caustics, &vacuum_xyz.caustics);
-        same(
+        assert_framebuffer_bits_eq(&clear_xyz.caustics, &vacuum_xyz.caustics);
+        assert_framebuffer_bits_eq(
             clear_xyz.direct.as_ref().unwrap(),
             vacuum_xyz.direct.as_ref().unwrap(),
         );
@@ -227,8 +219,8 @@ fn photon_xyz_atlas_and_direct_preview_apply_the_same_analytic_extinction() {
         c.scene.medium = Some(MediumConfig::Grid(spectral_hg));
         let hg = c.build().unwrap();
         let hg_xyz = xyz(&hg);
-        same(&fog_xyz.caustics, &hg_xyz.caustics);
-        same(
+        assert_framebuffer_bits_eq(&fog_xyz.caustics, &hg_xyz.caustics);
+        assert_framebuffer_bits_eq(
             fog_xyz.direct.as_ref().unwrap(),
             hg_xyz.direct.as_ref().unwrap(),
         );
@@ -529,14 +521,14 @@ fn constant_ior_spectral_absorption_preserves_landings_and_filters_xyz_and_atlas
     let filtered_xyz = xyz(&job, Some(target), 1);
     for threads in [2, 4] {
         let parallel = xyz(&job, Some(target), threads);
-        same(&filtered_xyz.caustics, &parallel.caustics);
-        same(
+        assert_framebuffer_bits_eq(&filtered_xyz.caustics, &parallel.caustics);
+        assert_framebuffer_bits_eq(
             filtered_xyz.direct.as_ref().unwrap(),
             parallel.direct.as_ref().unwrap(),
         );
     }
     let direct_only = xyz(&job, None, 4);
-    same(
+    assert_framebuffer_bits_eq(
         filtered_xyz.direct.as_ref().unwrap(),
         direct_only.direct.as_ref().unwrap(),
     );
@@ -660,9 +652,7 @@ fn attenuated_caustics_repeat_bitwise_in_rgb_hero_and_packet() {
                 .unwrap()
                 .render(&fog)
                 .unwrap();
-            same(&reference.direct, &actual.direct);
-            same(&reference.caustics, &actual.caustics);
-            same(&reference.combined, &actual.combined);
+            assert_camera_images_bits_eq(&actual, &reference);
         }
     }
 }
@@ -772,7 +762,7 @@ fn photon_volume_landing_maps_reintegrate_and_repeat_across_threads() {
         };
         let baseline = xyz(&disabled, 1);
         let serial = xyz(enabled, 1);
-        same(
+        assert_framebuffer_bits_eq(
             baseline.direct.as_ref().unwrap(),
             serial.direct.as_ref().unwrap(),
         );
@@ -823,7 +813,7 @@ fn photon_volume_landing_maps_reintegrate_and_repeat_across_threads() {
             };
             let enabled_image = render(enabled, 1);
             let disabled_image = render(&disabled, 1);
-            same(&enabled_image.direct, &disabled_image.direct);
+            assert_framebuffer_bits_eq(&enabled_image.direct, &disabled_image.direct);
             assert_ne!(
                 enabled_image.caustics.pixels(),
                 disabled_image.caustics.pixels()
@@ -842,22 +832,20 @@ fn photon_volume_landing_maps_reintegrate_and_repeat_across_threads() {
                     },
                     1,
                 );
-                same(&image.direct, &disabled_image.direct);
+                assert_framebuffer_bits_eq(&image.direct, &disabled_image.direct);
                 assert_linear_sum(&image.direct, &image.caustics, &image.combined);
                 assert_ne!(previous_caustics.pixels(), image.caustics.pixels());
                 previous_caustics = image.caustics;
             }
             for threads in [2, 4] {
                 let parallel = render(enabled, threads);
-                same(&enabled_image.direct, &parallel.direct);
-                same(&enabled_image.caustics, &parallel.caustics);
-                same(&enabled_image.combined, &parallel.combined);
+                assert_camera_images_bits_eq(&parallel, &enabled_image);
             }
         }
         for threads in [2, 4] {
             let parallel = xyz(enabled, threads);
-            same(&serial.caustics, &parallel.caustics);
-            same(
+            assert_framebuffer_bits_eq(&serial.caustics, &parallel.caustics);
+            assert_framebuffer_bits_eq(
                 serial.direct.as_ref().unwrap(),
                 parallel.direct.as_ref().unwrap(),
             );
@@ -957,11 +945,11 @@ fn forward_xyz_and_scalar_maps_share_paths_conserve_flux_and_repeat_across_threa
                     (Renderer::new(c.render.clone()).unwrap()).settings(),
                 )
                 .unwrap();
-                same(
+                assert_framebuffer_bits_eq(
                     lighting.direct.as_ref().unwrap(),
                     actual.direct.as_ref().unwrap(),
                 );
-                same(&lighting.caustics, &actual.caustics);
+                assert_framebuffer_bits_eq(&lighting.caustics, &actual.caustics);
                 let actual = map(&scene, &c.render, threads);
                 for j in 0..atlas.wavelength_samples().len() {
                     assert_eq!(
@@ -1053,9 +1041,7 @@ fn camera_components_packet_and_rng_are_deterministic_with_forward_photons() {
                         c.render.thread_count = Some(threads);
                         let renderer = Renderer::new(c.render.clone()).unwrap();
                         let actual = renderer.render(&scene).unwrap();
-                        same(&reference.direct, &actual.direct);
-                        same(&reference.caustics, &actual.caustics);
-                        same(&reference.combined, &actual.combined);
+                        assert_camera_images_bits_eq(&actual, &reference);
                         let lighting = spectral_caustics::integrator::photon::integrate_xyz(
                             &scene,
                             scene.photon.caustics_object_id,
@@ -1075,9 +1061,7 @@ fn camera_components_packet_and_rng_are_deterministic_with_forward_photons() {
                             Some(&lighting),
                         )
                         .unwrap();
-                        same(&rgb.direct, &actual.direct);
-                        same(&rgb.caustics, &actual.caustics);
-                        same(&rgb.combined, &actual.combined);
+                        assert_camera_images_bits_eq(&rgb, &actual);
                     }
                 }
             }

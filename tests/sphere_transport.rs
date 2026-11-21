@@ -1,3 +1,5 @@
+#[cfg(feature = "diagnostics")]
+mod support;
 use nalgebra::Vector3;
 use rand::RngCore;
 use serde_json::json;
@@ -6,8 +8,6 @@ use spectral_caustics::config::material::MaterialConfig;
 #[cfg(feature = "diagnostics")]
 use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 use spectral_caustics::config::scene::ObjectConfig;
-#[cfg(feature = "diagnostics")]
-use spectral_caustics::film::Framebuffer;
 use spectral_caustics::geometry::object::Hittable;
 use spectral_caustics::geometry::ray::Ray;
 use spectral_caustics::geometry::sphere::Sphere;
@@ -16,6 +16,8 @@ use spectral_caustics::material::ScatterType;
 use spectral_caustics::material::dielectric::Dielectric;
 #[cfg(feature = "diagnostics")]
 use spectral_caustics::renderer::Renderer;
+#[cfg(feature = "diagnostics")]
+use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 fn materials() -> [MaterialConfig; 4] {
     [
@@ -246,16 +248,6 @@ fn sphere_two_interfaces_match_analytic_snell_direction_and_cancel_eta_squared()
 }
 
 #[cfg(feature = "diagnostics")]
-fn identical(a: &Framebuffer, b: &Framebuffer) {
-    assert_eq!((a.width(), a.height()), (b.width(), b.height()));
-    assert!(a.pixels().iter().zip(b.pixels()).all(|(a, b)| {
-        a.iter()
-            .zip(b.iter())
-            .all(|(a, b)| a.to_bits() == b.to_bits())
-    }));
-}
-
-#[cfg(feature = "diagnostics")]
 #[test]
 fn sphere_rgb_components_and_debug_repeat_across_threads_mis_depths_and_seeds() {
     for material in materials() {
@@ -325,9 +317,7 @@ fn sphere_rgb_components_and_debug_repeat_across_threads_mis_depths_and_seeds() 
                             Some(&lighting),
                         )
                         .unwrap();
-                        identical(&ordinary.direct, &images.direct);
-                        identical(&ordinary.caustics, &images.caustics);
-                        identical(&ordinary.combined, &images.combined);
+                        assert_camera_images_bits_eq(&ordinary, &images);
                         assert!(images.combined.pixels().iter().any(|p| p.norm() > 0.0));
                         for ((a, b), c) in images
                             .direct
@@ -425,11 +415,11 @@ fn adding_a_distant_sphere_preserves_prism_spectral_caustics() {
         (renderer).settings(),
     )
     .unwrap();
-    identical(
+    assert_framebuffer_bits_eq(
         expected.direct.as_ref().unwrap(),
         actual.direct.as_ref().unwrap(),
     );
-    identical(&expected.caustics, &actual.caustics);
+    assert_framebuffer_bits_eq(&expected.caustics, &actual.caustics);
 }
 
 #[cfg(feature = "diagnostics")]
@@ -471,9 +461,7 @@ fn debug_target_can_switch_between_sphere_ground_and_none_without_changing_radia
             Some(&lighting),
         )
         .unwrap();
-        identical(&images.direct, &reference.direct);
-        identical(&images.caustics, &reference.caustics);
-        identical(&images.combined, &reference.combined);
+        assert_camera_images_bits_eq(&images, &reference);
         if let Some(debug) = images.path_debug {
             assert_eq!(debug.target_object_id, target);
             assert_eq!(

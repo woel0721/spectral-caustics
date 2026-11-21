@@ -1,3 +1,4 @@
+mod support;
 use nalgebra::Vector3;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -25,6 +26,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+use support::assert_framebuffer_bits_eq;
 
 struct TemporaryDirectory(PathBuf);
 
@@ -1042,18 +1044,15 @@ fn configured_thread_pool_and_block_counts_preserve_results_and_flux() {
     config.render.thread_count = Some(4);
     let renderer = Renderer::new(config.render.clone()).unwrap();
     assert_eq!(renderer.thread_count(), 4);
-    assert_eq!(
-        spectral_caustics::integrator::photon::integrate_xyz(
-            &config.build().unwrap(),
-            config.build().unwrap().photon.caustics_object_id,
-            config.build().unwrap().photon.ground_id.expect("receiver"),
-            (renderer).settings()
-        )
-        .and_then(|images| images.combined())
-        .unwrap()
-        .pixels(),
-        reference.pixels()
-    );
+    let actual = spectral_caustics::integrator::photon::integrate_xyz(
+        &config.build().unwrap(),
+        config.build().unwrap().photon.caustics_object_id,
+        config.build().unwrap().photon.ground_id.expect("receiver"),
+        (renderer).settings(),
+    )
+    .and_then(|images| images.combined())
+    .unwrap();
+    assert_framebuffer_bits_eq(&actual, &reference);
     for blocks in [1, 5, 32] {
         config.render.max_spectral_blocks = blocks;
         let image = render(&config);
@@ -1119,7 +1118,7 @@ fn camera_pixels_are_reproducible_across_configured_thread_counts() {
                 (&images.combined, &reference.combined),
             ] {
                 assert_eq!((actual.width(), actual.height()), (24, 16));
-                assert_eq!(actual.pixels(), expected.pixels());
+                assert_framebuffer_bits_eq(actual, expected);
             }
             for ((direct, caustics), combined) in images
                 .direct

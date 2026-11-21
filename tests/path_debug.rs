@@ -1,4 +1,5 @@
 #![cfg(feature = "diagnostics")]
+mod support;
 use spectral_caustics::config::Config;
 use spectral_caustics::config::material::MaterialConfig;
 use spectral_caustics::config::scene::EnvironmentConfig;
@@ -6,14 +7,13 @@ use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 use spectral_caustics::config::scene::ObjectConfig;
 #[cfg(feature = "diagnostics")]
 use spectral_caustics::diagnostics::StopReason;
-use spectral_caustics::film::Framebuffer;
-use spectral_caustics::integrator::camera::CameraLightingImages;
 use spectral_caustics::renderer::Renderer;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 struct TemporaryDirectory(PathBuf);
 impl TemporaryDirectory {
@@ -61,21 +61,6 @@ fn config() -> Config {
     config.scene.environment_samples = 3;
     config.scene.max_diffuse_bounces = 4;
     config
-}
-
-fn identical(a: &Framebuffer, b: &Framebuffer) {
-    assert_eq!((a.width(), a.height()), (b.width(), b.height()));
-    assert_eq!(a.pixels().len(), b.pixels().len());
-    assert!(a.pixels().iter().zip(b.pixels()).all(|(a, b)| {
-        a.iter()
-            .zip(b.iter())
-            .all(|(a, b)| a.to_bits() == b.to_bits())
-    }));
-}
-fn identical_images(a: &CameraLightingImages, b: &CameraLightingImages) {
-    identical(&a.direct, &b.direct);
-    identical(&a.caustics, &b.caustics);
-    identical(&a.combined, &b.combined);
 }
 
 #[cfg(feature = "diagnostics")]
@@ -200,11 +185,11 @@ fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_en
                         (renderer).settings(),
                     )
                     .unwrap();
-                    identical(
+                    assert_framebuffer_bits_eq(
                         photons.direct.as_ref().unwrap(),
                         lighting.direct.as_ref().unwrap(),
                     );
-                    identical(&photons.caustics, &lighting.caustics);
+                    assert_framebuffer_bits_eq(&photons.caustics, &lighting.caustics);
                     let images = spectral_caustics::integrator::camera::integrate_rgb(
                         &scene,
                         &spectral_caustics::config::render::RenderSetting {
@@ -217,7 +202,7 @@ fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_en
                         Some(&photons),
                     )
                     .unwrap();
-                    identical_images(&images, &ordinary);
+                    assert_camera_images_bits_eq(&images, &ordinary);
                     let stats = images.path_debug.as_ref().unwrap();
                     if let Some(expected) = &reference {
                         assert_eq!(stats, expected);

@@ -1,3 +1,4 @@
+mod support;
 use nalgebra::Vector3;
 use rand::RngCore;
 use rand::SeedableRng;
@@ -46,6 +47,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+use support::assert_framebuffer_bits_eq;
 
 struct FixedRng {
     value: u64,
@@ -83,14 +85,6 @@ fn settings(spp: usize) -> RenderSetting {
 }
 fn mean(image: &Framebuffer) -> Vector3<f64> {
     image.pixels().iter().copied().sum::<Vector3<f64>>() / image.pixels().len() as f64
-}
-fn same(a: &Framebuffer, b: &Framebuffer) {
-    assert_eq!((a.width(), a.height()), (b.width(), b.height()));
-    for (a, b) in a.pixels().iter().zip(b.pixels()) {
-        for (a, b) in a.iter().zip(b.iter()) {
-            assert_eq!(a.to_bits(), b.to_bits());
-        }
-    }
 }
 fn integrate(f: impl Fn(f64) -> f64) -> Vector3<f64> {
     (0..4000)
@@ -792,7 +786,7 @@ fn packet_one_keeps_independent_seeded_primary_sampling() {
             .unwrap();
         assert_eq!(-ray.direction, wo);
     }
-    same(
+    assert_framebuffer_bits_eq(
         &reference,
         &Renderer::new(RenderSetting {
             width: 1,
@@ -958,7 +952,7 @@ fn packet_setting_preserves_rgb_camera_and_source_caustic_components() {
     let one = Renderer::new(c.render.clone()).unwrap();
     c.render.spectral_packet_size = 4;
     let four = Renderer::new(c.render.clone()).unwrap();
-    same(
+    assert_framebuffer_bits_eq(
         &one.render(&scene).map(|images| images.combined).unwrap(),
         &four.render(&scene).map(|images| images.combined).unwrap(),
     );
@@ -976,8 +970,8 @@ fn packet_setting_preserves_rgb_camera_and_source_caustic_components() {
         (four).settings(),
     )
     .unwrap();
-    same(a.direct.as_ref().unwrap(), b.direct.as_ref().unwrap());
-    same(&a.caustics, &b.caustics);
+    assert_framebuffer_bits_eq(a.direct.as_ref().unwrap(), b.direct.as_ref().unwrap());
+    assert_framebuffer_bits_eq(&a.caustics, &b.caustics);
     assert!(a.caustics.pixels().iter().any(|p| p.y > 0.0));
     let a = spectral_caustics::integrator::camera::integrate_rgb(
         &scene,
@@ -1008,7 +1002,7 @@ fn packet_setting_preserves_rgb_camera_and_source_caustic_components() {
         (&a.caustics, &b.caustics),
         (&a.combined, &b.combined),
     ] {
-        same(x, y);
+        assert_framebuffer_bits_eq(x, y);
     }
 }
 
@@ -1406,7 +1400,7 @@ fn camera_modes_repeat_bitwise_across_threads_and_renderer_uses_integrators() {
                             .unwrap();
                         assert!(image.pixels().iter().any(|p| p.y > 0.0));
                         if let Some(previous) = &reference {
-                            same(&image, previous);
+                            assert_framebuffer_bits_eq(&image, previous);
                         }
                         reference = Some(image);
                     }
@@ -1430,7 +1424,7 @@ fn camera_modes_repeat_bitwise_across_threads_and_renderer_uses_integrators() {
         &c.render,
     )
     .unwrap();
-    same(
+    assert_framebuffer_bits_eq(
         &image,
         &spectral_caustics::integrator::camera::integrate_rgb(&scene, &c.render, Some(&lighting))
             .unwrap()
