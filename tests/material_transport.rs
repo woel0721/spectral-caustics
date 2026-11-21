@@ -1,3 +1,4 @@
+mod support;
 use nalgebra::Vector3;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -9,6 +10,7 @@ use spectral_caustics::config::scene::SceneConfig;
 use spectral_caustics::integrator::photon::integrate_xyz;
 use spectral_caustics::material;
 use spectral_caustics::material::ScatterType;
+use support::assert_camera_images_bits_eq;
 
 #[test]
 fn mirror_json_roundtrip_builds_trait_object_and_validates_parameters() {
@@ -235,18 +237,10 @@ fn mirror_and_ggx_components_repeat_bitwise_across_threads_mis_depths_and_seeds(
                             );
                             assert_eq!(images.caustics.pixels()[i], Vector3::zeros());
                         }
-                        let bits: Vec<_> = [&images.direct, &images.caustics, &images.combined]
-                            .into_iter()
-                            .flat_map(|b| {
-                                b.pixels()
-                                    .iter()
-                                    .map(|v| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()])
-                            })
-                            .collect();
                         if let Some(expected) = &reference {
-                            assert_eq!(&bits, expected);
+                            assert_camera_images_bits_eq(&images, expected);
                         } else {
-                            reference = Some(bits);
+                            reference = Some(images);
                         }
                     }
                 }

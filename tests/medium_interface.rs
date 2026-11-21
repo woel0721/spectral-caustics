@@ -1,3 +1,4 @@
+mod support;
 use nalgebra::{Vector2, Vector3};
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
@@ -32,6 +33,7 @@ use spectral_caustics::{
         MediumRegion::{Exterior, Interior},
     },
 };
+use support::assert_camera_images_bits_eq;
 
 fn interface_example_json() -> Value {
     serde_json::from_str(include_str!("../configs/sphere_medium_interface.json")).unwrap()
@@ -519,10 +521,10 @@ fn bound_sphere_renders_deterministically_in_rgb_hero_and_packet() {
                 assert_eq!(*caustics, Vector3::zeros());
             }
             assert_eq!(image.direct.pixels(), image.combined.pixels());
-            if let Some(pixels) = &reference {
-                assert_eq!(image.combined.pixels(), pixels);
+            if let Some(expected) = &reference {
+                assert_camera_images_bits_eq(&image, expected);
             } else {
-                reference = Some(image.combined.pixels().to_vec());
+                reference = Some(image);
             }
         }
     }

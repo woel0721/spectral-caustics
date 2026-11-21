@@ -10,7 +10,6 @@ use spectral_caustics::config::Config;
 use spectral_caustics::config::material::MaterialConfig;
 use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 use spectral_caustics::config::scene::ObjectConfig;
-use spectral_caustics::film::Framebuffer;
 use spectral_caustics::material::Material;
 use spectral_caustics::material::dielectric::Dielectric;
 use spectral_caustics::optics::dispersion::Cauchy;
@@ -19,6 +18,7 @@ use spectral_caustics::renderer::Renderer;
 use spectral_caustics::spectrum::d65_normalization;
 use spectral_caustics::spectrum::d65_spd;
 use spectral_caustics::spectrum::wavelength_to_xyz;
+use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 fn config() -> Config {
     let mut config = Config::from_json(include_str!("../configs/sphere.json")).unwrap();
@@ -37,15 +37,6 @@ fn set_glass(config: &mut Config, ior: f64, dispersion: Option<Cauchy>) {
         panic!()
     };
     *material = MaterialConfig::Dielectric { ior, dispersion };
-}
-
-fn identical(a: &Framebuffer, b: &Framebuffer) {
-    assert_eq!((a.width(), a.height()), (b.width(), b.height()));
-    for (a, b) in a.pixels().iter().zip(b.pixels()) {
-        for (a, b) in a.iter().zip(b.iter()) {
-            assert_eq!(a.to_bits(), b.to_bits());
-        }
-    }
 }
 
 #[test]
@@ -216,7 +207,7 @@ fn spectral_sphere_matches_independent_constant_ior_renders_integrated_in_xyz() 
         for (expected, mono) in expected.iter_mut().zip(mono.caustics.pixels()) {
             *expected += xyz * (mono.y / white_y);
         }
-        identical(
+        assert_framebuffer_bits_eq(
             actual.direct.as_ref().unwrap(),
             mono.direct.as_ref().unwrap(),
         );
@@ -338,14 +329,12 @@ fn sphere_components_are_additive_colored_and_repeat_across_threads_mis_and_dept
                         let light: &spectral_caustics::caustics::SpectralLighting = light;
                         let previous: &spectral_caustics::integrator::camera::CameraLightingImages =
                             previous;
-                        identical(
+                        assert_framebuffer_bits_eq(
                             lighting.direct.as_ref().unwrap(),
                             light.direct.as_ref().unwrap(),
                         );
-                        identical(&lighting.caustics, &light.caustics);
-                        identical(&images.direct, &previous.direct);
-                        identical(&images.caustics, &previous.caustics);
-                        identical(&images.combined, &previous.combined);
+                        assert_framebuffer_bits_eq(&lighting.caustics, &light.caustics);
+                        assert_camera_images_bits_eq(&images, previous);
                     }
                     reference = Some((lighting, images));
                 }
@@ -416,8 +405,8 @@ fn changing_light_dispersion_preserves_camera_direct_and_rgb_paths() {
         .map(|images| images.combined)
         .unwrap();
         if let Some((direct, previous_rgb)) = &reference {
-            identical(&images.direct, direct);
-            identical(&rgb, previous_rgb);
+            assert_framebuffer_bits_eq(&images.direct, direct);
+            assert_framebuffer_bits_eq(&rgb, previous_rgb);
         }
         reference = Some((images.direct, rgb));
         caustics.push(images.caustics);

@@ -42,7 +42,7 @@ git diff --check
 
 ## 如何解释结果
 
-- 固定配置、seed 和采样块时，重复运行和 Rayon 1/2/4 线程的 Direct、Caustics、Combined 应分别逐位一致。[均匀介质](../tests/volume.rs)和[网格介质](../tests/grid_medium.rs)的线程回归使用浮点 `assert_eq!`，它将 `+0.0` 和 `-0.0` 判为相等。要验证包括零符号在内的位模式，可逐分量比较 `f64::to_bits()`。Diagnostics 的纯观察路径也应保持物理结果。
+- 固定配置、seed 和采样块时，重复运行和 Rayon 1/2/4 线程的 Direct、Caustics、Combined 应分别逐位一致。[集成测试共享断言](../tests/support/mod.rs)核对图像尺寸，并对每个 XYZ 分量比较 `f64::to_bits()`，包括零的符号位。Diagnostics 的纯观察路径也应保持物理结果。
 - 浮点重分组、源端积分步长变化、Monte Carlo 与独立数值积分的比较使用有理由的容差；不冻结旧版本 RNG 消耗或 PNG。统计比较说明样本数与误差范围。
 - 通量守恒测试须区分完整接收与有限窗口、遮挡、逃逸、截断。对丢失通量不能重新归一化；有雾的源端完整能量不在当前焦散模型的保证范围。
 - 保留解析 Snell/Fresnel、MIS/PDF、RR、颜色数据、波长重积分、光子通量等核心数学测试，以及真实 Pipeline 的集成覆盖。局部数学与端到端回归虽有重叠，验证目的不同；不为降低测试数量删除它们。

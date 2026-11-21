@@ -1,4 +1,8 @@
+#[cfg(feature = "diagnostics")]
+mod support;
 use spectral_caustics::config::Config;
+#[cfg(feature = "diagnostics")]
+use support::assert_camera_images_bits_eq;
 
 #[cfg(not(feature = "diagnostics"))]
 #[test]
@@ -36,13 +40,7 @@ fn spectral_observer_counts_every_lane_without_changing_transport_or_thread_resu
                 .unwrap()
                 .render(&job)
                 .unwrap();
-            for (a, b) in [
-                (&ordinary.direct, &images.direct),
-                (&ordinary.caustics, &images.caustics),
-                (&ordinary.combined, &images.combined),
-            ] {
-                assert_eq!(a.pixels(), b.pixels());
-            }
+            assert_camera_images_bits_eq(&images, &ordinary);
             let stats = images.path_debug.unwrap();
             assert!(stats.pixels.iter().all(|p| p.samples == 8));
             assert!(

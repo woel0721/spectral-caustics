@@ -1,3 +1,4 @@
+mod support;
 use nalgebra::Vector3;
 use serde_json::json;
 use spectral_caustics::{
@@ -6,6 +7,7 @@ use spectral_caustics::{
     medium::MediumConfig,
     renderer::Renderer,
 };
+use support::assert_camera_images_bits_eq;
 
 #[test]
 fn configured_fog_has_local_support_and_an_independent_shape_seed() {
@@ -119,15 +121,7 @@ fn disk_lights_local_fog_and_parallel_renders_agree() {
         for threads in [2, 4] {
             config.render.thread_count = Some(threads);
             let parallel = render(&config);
-            for (actual, expected) in [
-                (&parallel.direct, &reference.direct),
-                (&parallel.caustics, &reference.caustics),
-                (&parallel.combined, &reference.combined),
-            ] {
-                for (a, e) in actual.pixels().iter().zip(expected.pixels()) {
-                    assert_eq!(a.map(f64::to_bits), e.map(f64::to_bits));
-                }
-            }
+            assert_camera_images_bits_eq(&parallel, &reference);
         }
 
         let mut control = config.clone();

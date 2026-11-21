@@ -1,3 +1,4 @@
+mod support;
 use nalgebra::Vector3;
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use spectral_caustics::{
@@ -22,6 +23,7 @@ use spectral_caustics::{
     optics::dispersion::IorMode,
     renderer::Renderer,
 };
+use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 fn slab(a: f64, s: f64, g: f64) -> Box<dyn Medium> {
     Box::new(
@@ -589,15 +591,10 @@ fn configured_fog_repeats_across_rgb_hero_packet_mis_threads_and_zero_density() 
                             .collect::<Vec<_>>(),
                         images.combined.pixels()
                     );
-                    let components = (
-                        images.direct.pixels().to_vec(),
-                        images.caustics.pixels().to_vec(),
-                        images.combined.pixels().to_vec(),
-                    );
-                    if let Some(r) = &reference {
-                        assert_eq!(&components, r);
+                    if let Some(expected) = &reference {
+                        assert_camera_images_bits_eq(&images, expected);
                     } else {
-                        reference = Some(components);
+                        reference = Some(images);
                     }
                 }
                 let mut vacuum = c.clone();
@@ -663,15 +660,7 @@ fn spectral_medium_json_renders_in_hero_and_packet_and_rejects_rgb() {
                     .unwrap()
                     .render(&job)
                     .unwrap();
-                let xyz = |frame: &spectral_caustics::film::Framebuffer| {
-                    frame
-                        .pixels()
-                        .iter()
-                        .map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()])
-                        .collect::<Vec<_>>()
-                };
-                let direct = xyz(&image.direct);
-                assert_eq!(xyz(&image.combined), direct);
+                assert_framebuffer_bits_eq(&image.combined, &image.direct);
                 assert!(
                     image
                         .caustics
@@ -680,9 +669,9 @@ fn spectral_medium_json_renders_in_hero_and_packet_and_rejects_rgb() {
                         .all(|p| *p == Vector3::zeros())
                 );
                 if let Some(expected) = &reference {
-                    assert_eq!(&direct, expected);
+                    assert_camera_images_bits_eq(&image, expected);
                 } else {
-                    reference = Some(direct);
+                    reference = Some(image);
                 }
             }
         }

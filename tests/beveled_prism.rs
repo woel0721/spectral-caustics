@@ -1,3 +1,4 @@
+mod support;
 use nalgebra::Vector2;
 use nalgebra::Vector3;
 use serde_json::json;
@@ -7,11 +8,11 @@ use spectral_caustics::config::camera::CameraConfig;
 use spectral_caustics::config::material::MaterialConfig;
 use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 use spectral_caustics::config::scene::ObjectConfig;
-use spectral_caustics::film::Framebuffer;
 use spectral_caustics::geometry::beveled_prism::BeveledPrism;
 use spectral_caustics::geometry::beveled_prism::ROUND_SEGMENTS;
 use spectral_caustics::geometry::object::Hittable;
 use spectral_caustics::renderer::Renderer;
+use support::assert_camera_images_bits_eq;
 
 fn config() -> Config {
     let mut config = Config::from_json(include_str!("../configs/beveled_prism.json")).unwrap();
@@ -193,15 +194,6 @@ fn camera_center_ray_hits_all_eight_facets_of_each_round_corner_at_both_test_siz
     }
 }
 
-fn identical(a: &Framebuffer, b: &Framebuffer) {
-    assert_eq!((a.width(), a.height()), (b.width(), b.height()));
-    assert!(a.pixels().iter().zip(b.pixels()).all(|(a, b)| {
-        a.iter()
-            .zip(b.iter())
-            .all(|(a, b)| a.to_bits() == b.to_bits())
-    }));
-}
-
 #[test]
 fn existing_materials_and_debug_reuse_rgb_paths_across_mis_depths_and_threads() {
     for material in materials() {
@@ -251,9 +243,7 @@ fn existing_materials_and_debug_reuse_rgb_paths_across_mis_depths_and_threads() 
                         .unwrap()
                         .render(&scene)
                         .unwrap();
-                    identical(&images.direct, &ordinary.direct);
-                    identical(&images.caustics, &ordinary.caustics);
-                    identical(&images.combined, &ordinary.combined);
+                    assert_camera_images_bits_eq(&images, &ordinary);
                     for ((direct, caustics), combined) in images
                         .direct
                         .pixels()

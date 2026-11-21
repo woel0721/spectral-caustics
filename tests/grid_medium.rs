@@ -1,3 +1,4 @@
+mod support;
 use nalgebra::Vector3;
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use spectral_caustics::{
@@ -18,6 +19,7 @@ use spectral_caustics::{
     optics::dispersion::IorMode,
     renderer::Renderer,
 };
+use support::assert_camera_images_bits_eq;
 
 // Defined outside the library: a custom implementation needs no config variant
 // or registration to participate in the shared camera pipeline.
@@ -307,17 +309,10 @@ fn configured_grid_repeats_across_rgb_hero_packet_threads_and_zero_density_is_va
                 assert_eq!(d + ca, *combined);
                 assert!(combined.iter().all(|v| v.is_finite()));
             }
-            let components = [images.direct, images.caustics, images.combined].map(|image| {
-                image
-                    .pixels()
-                    .iter()
-                    .map(|p| p.map(f64::to_bits))
-                    .collect::<Vec<_>>()
-            });
-            if let Some(reference) = &reference {
-                assert_eq!(&components, reference);
+            if let Some(expected) = &reference {
+                assert_camera_images_bits_eq(&images, expected);
             } else {
-                reference = Some(components);
+                reference = Some(images);
             }
         }
         let mut vacuum = c.clone();

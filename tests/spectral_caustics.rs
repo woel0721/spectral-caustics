@@ -16,7 +16,6 @@ use spectral_caustics::config::RenderJob;
 use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 #[cfg(feature = "diagnostics")]
 use spectral_caustics::config::scene::ObjectConfig;
-use spectral_caustics::film::Framebuffer;
 use spectral_caustics::geometry::object::Hittable;
 use spectral_caustics::geometry::ray::Ray;
 use spectral_caustics::material::lambertian::Lambertian;
@@ -28,6 +27,7 @@ use spectral_caustics::spectrum::d65_spd;
 use spectral_caustics::spectrum::rgb_reflectance;
 use std::f64::consts::PI;
 use std::process::Command;
+use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 fn config() -> Config {
     let mut c = Config::from_json(include_str!(
@@ -41,14 +41,6 @@ fn config() -> Config {
     c.render.thread_count = Some(1);
     c.scene.environment.as_mut().unwrap().map_path = None;
     c
-}
-
-fn same(a: &Framebuffer, b: &Framebuffer) {
-    for (a, b) in a.pixels().iter().zip(b.pixels()) {
-        for (a, b) in a.iter().zip(b.iter()) {
-            assert_eq!(a.to_bits(), b.to_bits());
-        }
-    }
 }
 
 fn center(map: &SpectralCausticsMap, index: usize) -> Vector3<f64> {
@@ -342,9 +334,7 @@ fn spectral_components_preserve_direct_crn_additivity_and_thread_determinism() {
                             assert_eq!(*d + *k, *sum);
                         }
                         if let Some(old) = &reference {
-                            same(&images.direct, &old.direct);
-                            same(&images.caustics, &old.caustics);
-                            same(&images.combined, &old.combined);
+                            assert_camera_images_bits_eq(&images, old);
                         }
                         reference = Some(images);
                     }
@@ -363,7 +353,7 @@ fn spectral_components_preserve_direct_crn_additivity_and_thread_determinism() {
                     )
                     .map(|images| images.combined)
                     .unwrap();
-                    same(&reference.unwrap().direct, &old);
+                    assert_framebuffer_bits_eq(&reference.unwrap().direct, &old);
                 }
             }
         }
@@ -454,7 +444,7 @@ fn disabled_or_absent_source_preserves_old_spectral_camera_and_skips_atlas() {
         .map(|images| images.combined)
         .unwrap();
         let renderer = Renderer::new(c.render.clone()).unwrap();
-        same(
+        assert_framebuffer_bits_eq(
             &old,
             &renderer
                 .render(&scene)
@@ -462,8 +452,8 @@ fn disabled_or_absent_source_preserves_old_spectral_camera_and_skips_atlas() {
                 .unwrap(),
         );
         let images = renderer.render(&scene).unwrap();
-        same(&old, &images.direct);
-        same(&old, &images.combined);
+        assert_framebuffer_bits_eq(&old, &images.direct);
+        assert_framebuffer_bits_eq(&old, &images.combined);
         assert!(
             images
                 .caustics
@@ -509,11 +499,11 @@ fn ground_sun_debug_preserves_source_maps_caustics_rgb_and_packet_thread_results
         (Renderer::new(c.render.clone()).unwrap()).settings(),
     )
     .unwrap();
-    same(
+    assert_framebuffer_bits_eq(
         rgb_source.direct.as_ref().unwrap(),
         debug_source.direct.as_ref().unwrap(),
     );
-    same(&rgb_source.caustics, &debug_source.caustics);
+    assert_framebuffer_bits_eq(&rgb_source.caustics, &debug_source.caustics);
     for packet in [1, 4] {
         c.render.spectral_packet_size = packet;
         #[cfg(feature = "diagnostics")]
@@ -545,8 +535,8 @@ fn ground_sun_debug_preserves_source_maps_caustics_rgb_and_packet_thread_results
                 Some(&map),
             )
             .unwrap();
-            same(&images, &split.combined);
-            same(&baseline.caustics, &split.caustics);
+            assert_framebuffer_bits_eq(&images, &split.combined);
+            assert_framebuffer_bits_eq(&baseline.caustics, &split.caustics);
             assert!(split.caustics.pixels().iter().any(|p| p.y > 0.0));
             assert!(
                 split.direct.pixels().iter().any(|p| p.y > 0.0),
@@ -570,8 +560,8 @@ fn ground_sun_debug_preserves_source_maps_caustics_rgb_and_packet_thread_results
                 assert_eq!(*d + *k, *sum);
             }
             if let Some(old) = &reference {
-                same(&split.direct, &old.direct);
-                same(&split.combined, &old.combined);
+                assert_framebuffer_bits_eq(&split.direct, &old.direct);
+                assert_framebuffer_bits_eq(&split.combined, &old.combined);
             }
             reference = Some(split);
         }
@@ -609,9 +599,7 @@ fn ground_sun_debug_preserves_source_maps_caustics_rgb_and_packet_thread_results
         Some(&rgb_source),
     )
     .unwrap();
-    same(&baseline.direct, &debug.direct);
-    same(&baseline.caustics, &debug.caustics);
-    same(&baseline.combined, &debug.combined);
+    assert_camera_images_bits_eq(&baseline, &debug);
     // 没有焦散目标时的单图入口也应传递调试开关，不依赖光源图集。
     c.render.camera_mode = spectral_caustics::config::render::CameraMode::Spectral;
     c.scene.environment = None;
