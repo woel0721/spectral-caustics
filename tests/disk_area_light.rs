@@ -12,7 +12,6 @@ use rand::rngs::StdRng;
 use spectral_caustics::config::Config;
 use spectral_caustics::config::RenderJob;
 use spectral_caustics::config::light::DiskAreaLightConfig;
-#[cfg(feature = "diagnostics")]
 use spectral_caustics::config::render::CameraMode;
 use spectral_caustics::config::render::RenderSetting;
 use spectral_caustics::config::scene::GroundReceiverConfig;
@@ -215,6 +214,45 @@ fn disk_and_parallel_tagged_config_roundtrip_and_reject_invalid_inputs() {
     assert!(bad.validate().is_err());
     bad.scene.light_samples = usize::MAX;
     assert!(bad.validate().is_err());
+}
+
+#[test]
+fn finite_light_workload_counts_every_camera_path_before_rendering() {
+    let mut c = config();
+    c.render.width = 1;
+    c.render.height = 1;
+    c.render.camera_spp = 4;
+    c.scene.max_diffuse_bounces = 0;
+    c.scene.max_volume_scatters = 0;
+    // Only sky is visible, so even a regression cannot enter a huge disk-sampling loop.
+    c.scene
+        .objects
+        .retain(|o| matches!(o, ObjectConfig::Ground { .. }));
+    c.scene.camera.position = [0.0, 0.0, 1.0];
+    c.scene.camera.target = [0.0, 0.0, 2.0];
+    c.scene.camera.up = [0.0, 1.0, 0.0];
+
+    let limit = usize::MAX / c.render.camera_spp;
+    for (mode, packet) in [
+        (CameraMode::Rgb, 1),
+        (CameraMode::Spectral, 1),
+        (CameraMode::Spectral, 4),
+    ] {
+        c.render.camera_mode = mode;
+        c.render.spectral_packet_size = packet;
+        let renderer = Renderer::new(c.render.clone()).unwrap();
+        c.scene.light_samples = limit;
+        c.validate().unwrap();
+        renderer.render(&c.build().unwrap()).unwrap();
+
+        c.scene.light_samples = limit + 1;
+        assert!(c.validate().unwrap_err().contains("有限光源"));
+        let error = renderer
+            .render(&c.build().unwrap())
+            .err()
+            .expect("light workload overflow");
+        assert!(error.to_string().contains("有限光源"), "{error}");
+    }
 }
 
 #[test]

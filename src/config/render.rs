@@ -7,6 +7,28 @@ use std::path::PathBuf;
 
 pub(crate) const MAX_PHOTON_VOLUME_SCATTERS: usize = 1024;
 
+pub(crate) fn validate_camera_workload(
+    width: usize,
+    height: usize,
+    paths_per_pixel: usize,
+    vertices_per_path: usize,
+    environment_samples: usize,
+    light_samples: usize,
+) -> Result<(), &'static str> {
+    let vertices = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(paths_per_pixel))
+        .and_then(|paths| paths.checked_mul(vertices_per_path))
+        .ok_or("相机路径顶点总数溢出")?;
+    vertices
+        .checked_mul(environment_samples)
+        .ok_or("环境方向样本总数溢出")?;
+    vertices
+        .checked_mul(light_samples)
+        .ok_or("有限光源样本总数溢出")?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CameraMode {
