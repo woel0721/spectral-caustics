@@ -50,9 +50,6 @@ impl Framebuffer {
     pub fn pixels_mut(&mut self) -> &mut [Vector3<f64>] {
         &mut self.pixels
     }
-    pub fn into_pixels(self) -> Vec<Vector3<f64>> {
-        self.pixels
-    }
 
     /// 把图片坐标变成一维数组下标，供像素读写共用。
     ///
