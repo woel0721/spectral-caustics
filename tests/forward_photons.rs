@@ -43,6 +43,20 @@ fn same(a: &Framebuffer, b: &Framebuffer) {
     }
 }
 
+fn assert_linear_sum(direct: &Framebuffer, caustics: &Framebuffer, combined: &Framebuffer) {
+    for ((direct, caustics), combined) in direct
+        .pixels()
+        .iter()
+        .zip(caustics.pixels())
+        .zip(combined.pixels())
+    {
+        assert_eq!(
+            (direct + caustics).map(f64::to_bits),
+            combined.map(f64::to_bits)
+        );
+    }
+}
+
 fn map(scene: &RenderJob, settings: &RenderSetting, threads: usize) -> SpectralCausticsMap {
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
@@ -568,13 +582,28 @@ fn constant_ior_spectral_absorption_preserves_landings_and_filters_xyz_and_atlas
         }
     }
     let filtered_atlas = map(&job, &settings, 1);
+    let absorption_with_volume_budget = map(
+        &job,
+        &RenderSetting {
+            photon_max_volume_scatters: 2,
+            ..settings.clone()
+        },
+        1,
+    );
     let mut reintegrated = vec![Vector3::zeros(); filtered_xyz.caustics.pixels().len()];
     for (i, &(nm, width)) in filtered_atlas.wavelength_samples().iter().enumerate() {
         let cie = cie_xyz(nm).unwrap() * width;
         let clear = clear_atlas.layer_irradiance(i).unwrap();
         let filtered = filtered_atlas.layer_irradiance(i).unwrap();
-        for ((&clear, &filtered), xyz) in clear.iter().zip(filtered).zip(&mut reintegrated) {
+        let with_budget = absorption_with_volume_budget.layer_irradiance(i).unwrap();
+        for (((&clear, &filtered), &with_budget), xyz) in clear
+            .iter()
+            .zip(filtered)
+            .zip(with_budget)
+            .zip(&mut reintegrated)
+        {
             assert!((clear * caustic_tr(nm) - filtered).abs() <= 2e-12 * clear);
+            assert!((with_budget - filtered).abs() <= 2e-12 * filtered);
             *xyz += cie * filtered;
         }
     }
@@ -653,6 +682,221 @@ fn forward_event_budget_rejects_invalid_configuration() {
     let mut value = serde_json::to_value(RenderSetting::default()).unwrap();
     value["photon_trace_mode"] = serde_json::json!("two_transmission");
     assert!(serde_json::from_value::<RenderSetting>(value).is_err());
+}
+
+#[test]
+fn photon_volume_budget_defaults_to_zero_and_roundtrips_in_json() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(include_str!("../configs/sphere_medium_interface.json")).unwrap();
+    let parse = |value: &serde_json::Value| Config::from_json(&value.to_string()).unwrap();
+    let default = parse(&value);
+    assert_eq!(default.render.photon_max_volume_scatters, 0);
+    value["render"]["photon_max_volume_scatters"] = serde_json::json!(0);
+    assert_eq!(parse(&value).render, default.render);
+    for budget in [1, 4, 1024] {
+        value["render"]["photon_max_volume_scatters"] = serde_json::json!(budget);
+        let enabled = parse(&value);
+        enabled.validate().unwrap();
+        assert_eq!(enabled.render.photon_max_volume_scatters, budget);
+        assert_eq!(
+            parse(&serde_json::to_value(&enabled).unwrap()).render,
+            enabled.render
+        );
+    }
+    value["render"]["photon_max_volume_scatters"] = serde_json::json!(1025);
+    assert!(
+        parse(&value)
+            .validate()
+            .unwrap_err()
+            .contains("photon_max_volume_scatters")
+    );
+    value["render"]["photon_max_volume_scatters"] = serde_json::json!(-1);
+    assert!(Config::from_json(&value.to_string()).is_err());
+}
+
+#[test]
+fn photon_volume_landing_maps_reintegrate_and_repeat_across_threads() {
+    let mut c = config(include_str!("../configs/sphere_medium_interface.json"));
+    c.render.width = 24;
+    c.render.height = 18;
+    c.render.samples_per_pixel_axis = 3;
+    let min_m = [-3.0, -3.0, 0.0];
+    let max_m = [3.0, 3.0, 0.49];
+    let homogeneous = |g| {
+        MediumConfig::Homogeneous(HomogeneousMediumConfig {
+            min_m,
+            max_m,
+            sigma_a: 0.2.into(),
+            sigma_s: 2.0.into(),
+            g,
+        })
+    };
+    let g_curve = HgAnisotropy::Curve {
+        samples: vec![[380.0, -0.2], [780.0, 0.85]],
+    };
+    let grid = MediumConfig::Grid(GridMediumConfig {
+        min_m,
+        max_m,
+        resolution: [1, 1, 2],
+        densities: vec![0.6, 1.4],
+        sigma_a_base: 0.2.into(),
+        sigma_s_base: MediumCoefficient::Curve {
+            samples: vec![[380.0, 1.0], [780.0, 3.0]],
+        },
+        g: 0.45.into(),
+    });
+    for (medium, mode, phase_only) in [
+        (homogeneous(0.45.into()), IorMode::Constant, false),
+        (homogeneous(g_curve), IorMode::Constant, true),
+        (grid.clone(), IorMode::Constant, false),
+        (grid, IorMode::Dispersion, false),
+    ] {
+        c.scene.medium = Some(medium);
+        c.render.mode = mode;
+        c.render.camera_mode = CameraMode::Spectral;
+        c.render.photon_max_volume_scatters = 2;
+        let job = c.build().unwrap();
+        let target = job.photon.caustics_object_id;
+        let ground = job.photon.ground_id.unwrap();
+        let xyz = |settings, threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| integrate_xyz(&job, target, ground, settings).unwrap())
+        };
+        let enabled = &c.render;
+        let disabled = RenderSetting {
+            photon_max_volume_scatters: 0,
+            ..enabled.clone()
+        };
+        let baseline = xyz(&disabled, 1);
+        let serial = xyz(enabled, 1);
+        same(
+            baseline.direct.as_ref().unwrap(),
+            serial.direct.as_ref().unwrap(),
+        );
+        // A pixel outside the ballistic footprint can only receive photons
+        // whose travel direction changed in the fog below the sphere.
+        assert!(
+            baseline
+                .caustics
+                .pixels()
+                .iter()
+                .zip(serial.caustics.pixels())
+                .any(|(old, new)| old.y == 0.0 && new.y > 0.0)
+        );
+        let atlas = map(&job, enabled, 1);
+        let mut integral = vec![Vector3::zeros(); serial.caustics.pixels().len()];
+        for (i, &(nm, width)) in atlas.wavelength_samples().iter().enumerate() {
+            for (xyz, &e) in integral.iter_mut().zip(atlas.layer_irradiance(i).unwrap()) {
+                *xyz += cie_xyz(nm).unwrap() * (e * width);
+            }
+        }
+        for (integrated, xyz) in integral.iter().zip(serial.caustics.pixels()) {
+            assert!((integrated - xyz).norm() <= 2e-12 * xyz.norm());
+        }
+        if phase_only {
+            let phase_changes_footprint = |map: &SpectralCausticsMap| {
+                let last = map.wavelength_samples().len() - 1;
+                let (blue, red) = (
+                    map.layer_irradiance(0).unwrap(),
+                    map.layer_irradiance(last).unwrap(),
+                );
+                blue.iter().zip(red).any(|(&a, &b)| {
+                    let a = a / d65_spd(380.0).unwrap();
+                    let b = b / d65_spd(780.0).unwrap();
+                    (a - b).abs() > 1e-12 * a.max(b)
+                })
+            };
+            assert!(!phase_changes_footprint(&map(&job, &disabled, 1)));
+            assert!(phase_changes_footprint(&atlas));
+            let render = |settings: &RenderSetting, threads| {
+                Renderer::new(RenderSetting {
+                    thread_count: Some(threads),
+                    spectral_packet_size: 4,
+                    ..settings.clone()
+                })
+                .unwrap()
+                .render(&job)
+                .unwrap()
+            };
+            let enabled_image = render(enabled, 1);
+            let disabled_image = render(&disabled, 1);
+            same(&enabled_image.direct, &disabled_image.direct);
+            assert_ne!(
+                enabled_image.caustics.pixels(),
+                disabled_image.caustics.pixels()
+            );
+            assert_linear_sum(
+                &disabled_image.direct,
+                &disabled_image.caustics,
+                &disabled_image.combined,
+            );
+            let mut previous_caustics = disabled_image.caustics;
+            for photon_max_volume_scatters in [1, 4] {
+                let image = render(
+                    &RenderSetting {
+                        photon_max_volume_scatters,
+                        ..enabled.clone()
+                    },
+                    1,
+                );
+                same(&image.direct, &disabled_image.direct);
+                assert_linear_sum(&image.direct, &image.caustics, &image.combined);
+                assert_ne!(previous_caustics.pixels(), image.caustics.pixels());
+                previous_caustics = image.caustics;
+            }
+            for threads in [2, 4] {
+                let parallel = render(enabled, threads);
+                same(&enabled_image.direct, &parallel.direct);
+                same(&enabled_image.caustics, &parallel.caustics);
+                same(&enabled_image.combined, &parallel.combined);
+            }
+        }
+        for threads in [2, 4] {
+            let parallel = xyz(enabled, threads);
+            same(&serial.caustics, &parallel.caustics);
+            same(
+                serial.direct.as_ref().unwrap(),
+                parallel.direct.as_ref().unwrap(),
+            );
+            let parallel = map(&job, enabled, threads);
+            for i in 0..atlas.wavelength_samples().len() {
+                let a = atlas.layer_irradiance(i).unwrap();
+                let b = parallel.layer_irradiance(i).unwrap();
+                assert!(a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits()));
+            }
+        }
+    }
+}
+
+#[test]
+fn photon_volume_caustics_stay_zero_when_all_emission_misses_the_glass() {
+    let mut c = config(include_str!("../configs/sphere_medium_interface.json"));
+    c.render.mode = IorMode::Constant;
+    c.render.photon_max_volume_scatters = 4;
+    let light = c.scene.light.as_parallel_mut().unwrap();
+    // The glass ends at x=0.8. All photons start farther to the right,
+    // traveling towards +x through scattering medium to the receiver.
+    light.aperture_min_m = [0.95, -0.8];
+    light.aperture_max_m = [1.15, 0.8];
+    let job = c.build().unwrap();
+    let target = job.photon.caustics_object_id.unwrap();
+    let ground = job.photon.ground_id.unwrap();
+    let lighting = integrate_xyz(&job, Some(target), ground, &c.render).unwrap();
+    assert!(lighting.direct.unwrap().pixels().iter().any(|p| p.y > 0.0));
+    assert!(
+        lighting
+            .caustics
+            .pixels()
+            .iter()
+            .all(|p| *p == Vector3::zeros())
+    );
+    let atlas = map(&job, &c.render, 1);
+    for i in 0..atlas.wavelength_samples().len() {
+        assert!(atlas.layer_irradiance(i).unwrap().iter().all(|&v| v == 0.0));
+    }
 }
 
 #[test]

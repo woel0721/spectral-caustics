@@ -1,4 +1,4 @@
-//! Local coefficients and compensated camera segment sampling results.
+//! Local coefficients and compensated segment sampling results.
 use nalgebra::Vector3;
 
 /// Local absorption/scattering coefficients; extinction is their sum.

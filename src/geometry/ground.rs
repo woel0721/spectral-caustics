@@ -52,13 +52,23 @@ impl Ground {
 }
 
 impl Hittable for Ground {
+    fn intersect(&self, ray: &Ray) -> Option<Hit> {
+        self.intersect_after(ray, INTERSECTION_EPSILON)
+    }
+
+    fn intersect_from_volume(&self, ray: &Ray) -> Option<Hit> {
+        self.intersect_after(ray, 0.0)
+    }
+}
+
+impl Ground {
     /// 求光线与水平地面的交点，并检查它是否位于有限边界内。
     ///
     /// 输入：Ray；输出：正向 Hit，平行、越界、距离过近或数值无效返回 None。
     ///
     /// 公式：t=(height-origin.z)/direction.z，P=origin+t·direction。
     /// 支持双面求交，返回的几何法线固定为世界 +Z。
-    fn intersect(&self, ray: &Ray) -> Option<Hit> {
+    fn intersect_after(&self, ray: &Ray, min_distance: f64) -> Option<Hit> {
         if !ray.origin.iter().all(|v| v.is_finite()) || !ray.direction.iter().all(|v| v.is_finite())
         {
             return None;
@@ -71,7 +81,7 @@ impl Hittable for Ground {
 
         // origin.z + distance * direction.z = height。
         let distance = (self.height - ray.origin.z) / ray.direction.z;
-        if !distance.is_finite() || distance <= INTERSECTION_EPSILON {
+        if !distance.is_finite() || distance <= min_distance {
             return None;
         }
 
