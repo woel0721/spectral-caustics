@@ -3,6 +3,7 @@
 use spectral_caustics::config::Config;
 use spectral_caustics::config::material::MaterialConfig;
 use spectral_caustics::config::scene::ObjectConfig;
+use spectral_caustics::output;
 use spectral_caustics::renderer::Renderer;
 use std::error::Error;
 use std::fs;
@@ -26,7 +27,6 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if args.next().is_some() {
         return Err("用法：sphere_materials [SPP] [正方形边长] [输出目录]".into());
     }
-    config.validate()?;
     for (name, material) in [
         (
             "dielectric",
@@ -59,11 +59,11 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         ),
     ] {
         let start = Instant::now();
-        let ObjectConfig::Sphere {
+        let Some(ObjectConfig::Sphere {
             material: slot,
             caustics,
             ..
-        } = &mut config.scene.objects[0]
+        }) = config.scene.objects.first_mut()
         else {
             return Err("configs/sphere.json 的第一个物体必须为 Sphere".into());
         };
@@ -71,39 +71,12 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         *slot = material;
         let output = directory.join(name);
         fs::create_dir_all(&output)?;
-        config.render.output_path = output.join("lighting.png");
+        config.render.output_path = output.join("camera_combined.png");
         config.save(output.join("config.json"))?;
         let scene = config.build()?;
         let renderer = Renderer::new(config.render.clone())?;
-        // 显式选择理想介质球体；Mirror/GGX 只参与 RGB 相机路径。
-        let lighting = spectral_caustics::integrator::photon::integrate_xyz(
-            &scene,
-            scene.photon.caustics_object_id,
-            scene.photon.ground_id.expect("receiver"),
-            (renderer).settings(),
-        )?;
-        let images = spectral_caustics::integrator::camera::integrate_rgb(
-            &scene,
-            &spectral_caustics::config::render::RenderSetting {
-                width: (renderer).settings().width,
-                height: (renderer).settings().height,
-                camera_spp: config.render.camera_spp,
-                seed: config.render.seed,
-                ..Default::default()
-            },
-            Some(&lighting),
-        )?;
-        for (image, filename) in [
-            (&images.direct, "camera_direct.png"),
-            (&images.caustics, "camera_caustics.png"),
-            (&images.combined, "camera_combined.png"),
-        ] {
-            spectral_caustics::output::save_png_with_exposure(
-                image,
-                output.join(filename),
-                (renderer).settings().exposure,
-            )?;
-        }
+        let images = renderer.render(&scene)?;
+        output::save_components(&images, &config.render.output_path, config.render.exposure)?;
         #[cfg(feature = "diagnostics")]
         if let Some(debug) = &images.path_debug {
             debug.save(&config.render.output_path)?;

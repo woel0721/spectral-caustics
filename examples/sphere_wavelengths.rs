@@ -1,9 +1,10 @@
-use spectral_caustics::film::Framebuffer;
-// 同一批发射位置的 450/550/650 nm 焦散诊断；相机仍使用原有 RGB 材质。
+//! 从同一光谱焦散图集提取 450/550/650 nm，使用 RGB 相机查看各层焦散。
 
-use spectral_caustics::caustics::SpectralLighting;
+use spectral_caustics::caustics::{SpectralCausticsMap, SpectralLighting};
 use spectral_caustics::config::Config;
 use spectral_caustics::config::RenderJob;
+use spectral_caustics::film::Framebuffer;
+use spectral_caustics::integrator::photon::integrate_spectral;
 use spectral_caustics::renderer::Renderer;
 use spectral_caustics::spectrum::d65_normalization;
 use spectral_caustics::spectrum::d65_spd;
@@ -17,26 +18,25 @@ const WAVELENGTHS_NM: [f64; 3] = [450.0, 550.0, 650.0];
 
 /// 只保留一个现有积分节点的光谱贡献，归一化仍使用完整 D65 光谱。
 fn wavelength_lighting(
-    config: &Config,
+    atlas: &SpectralCausticsMap,
     scene: &RenderJob,
     wavelength_nm: f64,
 ) -> Result<(SpectralLighting, f64), Box<dyn Error + Send + Sync>> {
-    let atlas = spectral_caustics::integrator::photon::integrate_spectral(scene, &config.render)?
-        .ok_or("missing caustic target")?;
-    let index = atlas
-        .wavelength_samples()
+    let samples = atlas.wavelength_samples();
+    let index = samples
         .iter()
         .position(|s| s.0 == wavelength_nm)
         .ok_or("diagnostic wavelength must be an integration node")?;
-    let width = atlas.wavelength_samples()[index].1;
+    let integration_width = samples[index].1;
     let cmf = spectral_caustics::spectrum::cie_xyz(wavelength_nm).ok_or("invalid wavelength")?;
-    let mut caustics = Framebuffer::new(config.render.width, config.render.height)?;
+    let (width, height) = atlas.dimensions();
+    let mut caustics = Framebuffer::new(width, height)?;
     for (p, &e) in caustics
         .pixels_mut()
         .iter_mut()
         .zip(atlas.layer_irradiance(index).unwrap())
     {
-        *p = cmf * (e * width);
+        *p = cmf * (e * integration_width);
     }
     let target = scene
         .photon
@@ -46,15 +46,14 @@ fn wavelength_lighting(
         .scene
         .material(scene.scene.objects[target].material_id());
     let ior = material
-        .photon_ior(Some(wavelength_nm), config.render.mode)
+        .photon_ior(Some(wavelength_nm), atlas.mode())
         .ok_or("invalid IOR")?;
     let (light_wi, strength) = scene
         .scene
         .light
         .analytic_sun()?
         .ok_or("parallel light required")?;
-    let samples = config.render.wavelength_samples()?;
-    let k = d65_normalization(&samples).ok_or("invalid spectrum")?;
+    let k = d65_normalization(samples).ok_or("invalid spectrum")?;
     let white = samples
         .iter()
         .map(|&(nm, w)| wavelength_to_xyz(nm, d65_spd(nm).unwrap(), w, k).unwrap())
@@ -63,7 +62,7 @@ fn wavelength_lighting(
         SpectralLighting {
             direct: None,
             caustics,
-            receiver: scene.photon.receiver,
+            receiver: *atlas.receiver(),
             light_wi,
             sun_irradiance_xyz: white * strength,
         },
@@ -101,9 +100,12 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         config.render.max_spectral_blocks,
         config.render.exposure,
     );
+    let start = Instant::now();
+    let atlas = integrate_spectral(&scene, &config.render)?.ok_or("missing caustic target")?;
+    println!("光谱焦散图集生成耗时 {:.3}s", start.elapsed().as_secs_f64());
     for wavelength_nm in WAVELENGTHS_NM {
         let start = Instant::now();
-        let (lighting, ior) = wavelength_lighting(&config, &scene, wavelength_nm)?;
+        let (lighting, ior) = wavelength_lighting(&atlas, &scene, wavelength_nm)?;
         spectral_caustics::output::save_png_with_exposure(
             &lighting.caustics,
             directory.join(format!("ground_caustics_{wavelength_nm:.0}nm.png")),
@@ -158,11 +160,11 @@ mod tests {
             };
         }
         let scene = c.build().unwrap();
-        let samples = c.render.wavelength_samples().unwrap();
-        let k = d65_normalization(&samples).unwrap();
+        let atlas = integrate_spectral(&scene, &c.render).unwrap().unwrap();
+        let k = d65_normalization(atlas.wavelength_samples()).unwrap();
         let mut reference: Option<(SpectralLighting, Vec<f64>)> = None;
         for nm in WAVELENGTHS_NM {
-            let (lighting, n) = wavelength_lighting(&c, &scene, nm).unwrap();
+            let (lighting, n) = wavelength_lighting(&atlas, &scene, nm).unwrap();
             assert_eq!(n, 1.52);
             let spectral_y = wavelength_to_xyz(nm, d65_spd(nm).unwrap(), 10.0, k)
                 .unwrap()
