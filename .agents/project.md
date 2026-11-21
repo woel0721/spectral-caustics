@@ -6,7 +6,7 @@
 
 - 运行与配置见 [README](../README.md)，公共 API 和传输细节见[技术指南](../docs/rendering_guide.md)。判断当前能力和限制时查 [ROADMAP](../ROADMAP.md) 对应章节。涉及实现声明时核对相关源码，后续功能以本次任务授权为准。
 - [重构记录](../docs/refactor.md) 是带日期的迁移与验收证据，其中的测试数量、日志路径和当时授权不代表当前状态或持续权限。
-- [颜色数据说明](../assets/color/README.md) 负责来源、许可证与校验和。该文档仍有旧源码路径及已删除 API 的描述；当前接口以 [spectrum](../src/spectrum/mod.rs)、[emission](../src/spectrum/emission.rs) 和 [Material](../src/material/mod.rs) 为准。
+- [颜色数据说明](../assets/color/README.md) 记录数据来源、许可证、校验和及对应的光谱实现入口。
 - 文档与实现冲突时先定位差异并报告，不为迎合陈旧文字恢复旧行为，也不借机修复任务外问题。改变接口或物理语义时同步其所属文档及相关链接。
 
 ## Rust 与抽象选择

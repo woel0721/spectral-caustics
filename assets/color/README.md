@@ -24,10 +24,9 @@
 
 `.gitattributes` 保留这些 CSV/JSON 的原始换行字节，避免 Git 自动转换换行后使校验和失效；官方 CRLF 按有效行尾处理。
 
-`src/optics/spectrum.rs` 使用原表，按 metadata 指定的方式进行线性插值，表外返回零。
-接口拒绝非正或非有限波长。渲染阶段计划使用 380–780 nm 子区间；截断与有限步长会使积分白点略有误差。
-D65 原表以 560 nm 的相对功率为 100；代码按所选波长及积分宽度计算统一的 k，使白光 Y = 1。
-这提供相对颜色标尺，不表示真实光源的瓦特数，也没有包含空间光子通量和玻璃透射损耗。
+`cie_xyz` 和 `d65_spd` 查询原表，在相邻节点间线性插值，表外返回零，非正或非有限波长返回 `None`。D65 原表在 560 nm 的相对功率为 100。[CIE 与 D65 查询实现](../../src/spectrum/mod.rs)
+
+源端平行光按配置的波长节点与梯形积分宽度调用 `d65_normalization`，使该组节点积分得到的白光 Y = 1。积分区间和步长会影响所得白点的 X、Z 分量。该归一化只定义相对颜色标尺，空间通量和玻璃透射由传输过程单独计算。[归一化实现](../../src/spectrum/mod.rs) · [光源归一化](../../src/light/mod.rs)
 
 ## PBRT RGB 反射基谱
 
@@ -37,13 +36,13 @@ PBRT 代码和基谱的版权为 Matt Pharr、Greg Humphreys 和 Wenzel Jakob，
 
 - 方法说明：[PBRT — The SampledSpectrum Class](https://pbr-book.org/3ed-2018/Color_and_Radiometry/The_SampledSpectrum_Class)，以及 Brian Smits, *An RGB-to-Spectrum Conversion for Reflectances* (1999)，[DOI](https://doi.org/10.1080/10867651.1999.10487511)。
 - 数据 SHA-256：`bc785beefb8dd372b94d9f9092790fe18a9aeb43064d6defd6639dcafdd6d1c7`。
-- 实现：`src/optics/spectrum.rs::rgb_reflectance` 按 RGB 通道排序组合白、二次色和原色基谱，沿波长线性插值并在表外延用最近端点。使用 PBRT 的 0.94 反射率缩放；本项目额外将最终反射率上限设为 1（PBRT 原实现仅将负值裁为零），保证各波长 Lambertian 反射能量不超过入射能量。
-- 本实现直接查询原始分段线性基谱，没有经过 PBRT 内部 400–700 nm 的分桶平均；RGB→光谱不唯一，D65 下的 RGB 还原不保证精确。材质的 `evaluate` 在 `EvaluateMode::Spectral { wavelength_nm }` 模式下返回 `BsdfValue::Spectral(f64)`，仅保存标量光谱 BSDF；CIE 匹配函数在积分器转换为 XYZ 时使用，表外的 XYZ 响应为零。
+- `rgb_reflectance` 按 RGB 通道排序组合白、二次色和原色基谱。查询直接在原始节点间线性插值，表外延用最近端点。组合结果乘以 PBRT 的反射率缩放系数 0.94，再限制在 `[0,1]`。RGB 到光谱的映射有多解，D65 下的 RGB 还原可能存在误差。PBRT 的 `SampledSpectrum` 在 400–700 nm 上对波段取平均。[反射谱实现](../../src/spectrum/mod.rs) · [PBRT 波段平均](https://pbr-book.org/3ed-2018/Color_and_Radiometry/The_SampledSpectrum_Class)
+- `Material::evaluate_spectral` 接收当前波长并返回标量 `f64` BSDF。Lambertian 在有效反射方向上返回 `rgb_reflectance` 得到的反射率除以 π。光谱相机累积路径贡献时使用 CIE 匹配函数转换为线性 XYZ。[Material 接口](../../src/material/mod.rs) · [Lambertian 实现](../../src/material/lambertian.rs) · [光谱相机积分](../../src/integrator/camera/spectral.rs)
 
-## PBRT RGB 发光基谱与 Hero 相机
+## PBRT RGB 发光基谱与光谱相机
 
 `pbrt_rgb_illuminant.csv` 从 [PBRT v3 官方 spectrum.cpp](https://github.com/mmp/pbrt-v3/blob/master/src/core/spectrum.cpp) 提取 `RGB2SpectLambda` 与七个 `RGBIllum2Spect*` 数组（白、青、品红、黄、红、绿、蓝），32 个 380–720 nm 节点，保留原数值字面量。它与反射基谱是不同的数据；适用同目录的 `PBRT_LICENSE.txt` BSD 两条款许可。提取文件 SHA-256：`def69d81d7fe266ae9575d9d85b3804066108852bbd980446ebe093761c61b24`。
 
-`src/optics/emission.rs` 采用七基谱通道排序组合，再除以同一波长的白基谱、乘本项目归一化 D65，作为 **D65 白点校准的发光近似**。这是本项目的校准方式，不是完整 PBRT 色彩管线；PBRT 的共同 Illuminant 缩放因子在白基谱比值中相消。720–780 nm 沿用端点，仅将负光谱值截为零。RGB→光谱并不唯一，任意 RGB 色度不保证精确还原，亦不能将本模型视为实测 HDRI 光谱。
+`rgb_emission` 先用 RGB 的最大分量分离 HDR 强度，再按通道排序组合七条发光基谱。组合值的负值截为零，随后除以同一波长的白基谱，乘以归一化 D65 并恢复 HDR 强度。PBRT 的共同 Illuminant 缩放因子在基谱比值中相消。720–780 nm 使用 720 nm 的基谱值。单位 RGB 白色对应归一化 D65，发光谱允许保留 HDR 强度。这是 HDRI、渐变天空和常量背景的光谱近似，色度还原可能存在误差。[发光谱实现](../../src/spectrum/emission.rs)
 
-先以 max(RGB) 分离 HDR 强度，重建色度，再恢复强度；没有反射率的 [0,1] 上限。太阳、环境、渐变和常量背景统一使用每 nm 的光谱密度。太阳直接使用 D65；RGB 白色重建恰为 D65。Hero 相机固定采样 380–780 nm，D65 的 Y 积分按原表的分段线性插值连续归一化（每个 1 nm 区间对 SPD×CMF 使用 Simpson 积分）。相机样本仅乘 CIE 与 1/p(λ)，不再乘光子积分的离散 Δλ。
+光谱相机的解析太阳与圆盘照明使用连续归一化的 D65 光谱密度，单位为每 nm。归一化在 380–780 nm 上逐个 1 nm 区间对 SPD 与 ȳ 的乘积做 Simpson 积分。Hero 和 Packet 均在这一波段采样，每条光谱路径的贡献乘 CIE 匹配函数与 `1/(p(λ)·camera_spp)`。源端的离散波长积分宽度不进入相机的采样权重。[连续归一化](../../src/spectrum/emission.rs) · [相机照明](../../src/integrator/camera/transport.rs) · [光谱相机积分](../../src/integrator/camera/spectral.rs)
