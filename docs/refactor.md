@@ -21,7 +21,13 @@
 | 函数定义 | 1062 | 1059 | 125 个旧名定义删除/替换，122 个新名定义 |
 | 测试定义 | 477 | 451 | 45 个旧定义删除/替换，19 个新定义，净减少 26 |
 
-删除的主要接口/类型包括 PhotonTraceMode、take_photon_landing、take_photon_from_hit、trace_caustics_photon、旧 Render 的 render_mode/render_lighting/save 及重叠相机入口、SpectralPathState、SpectralBsdfSample、BsdfValue、EvaluateMode、Ray 的保留距离/逆方向字段。trace_forward_photon 迁为 Photon Integrator 的 trace_photon；无 legacy/compat API。
+### 有意删除
+
+- 删除 `two_transmission` 算法及其选择枚举 `PhotonTraceMode`、配置、调用入口和适配测试。
+- 删除旧 `Render` 的 `render_mode`、`render_lighting`、`save` 以及重叠的 Renderer / Camera 单图和分量包装。光子追踪职责从 Scene 移至 Photon Integrator。`take_photon_landing`、`take_photon_from_hit`、`trace_caustics_photon` 随旧入口移除，`trace_forward_photon` 迁为 Photon Integrator 的 `trace_photon`。
+- 删除重复光谱路径状态、采样类型和动态数值变体 `SpectralPathState`、`SpectralBsdfSample`、`BsdfValue` 和 `EvaluateMode`。
+- 移除 Ray 中未使用的保留距离及逆方向缓存。绑定后的运行时 Hit 使用必填物体和材质编号。
+- 移除由 Debug / Release profile 隐式决定 AOV 的规则、旧 JSON 字段和未标记类型的光源格式。
 
 测试清理针对旧双透射/模式选择、兼容入口、可缺失材质、已删除 Ray 字段和无调用方的 Framebuffer 累积器。Cauchy、解析 Snell 落点、Forward 玻璃板 Fresnel 级数、TIR、棱边续追、RGB/Scalar RR 补偿、BSDF/PDF、MIS 数值积分、CIE/D65、发射通量、光谱重积分、CRN、分量相加与线程确定性保留或迁到活跃实现。没有把旧积分器放进测试目录继续维护。保留单元和集成两个层次的部分覆盖，分别验证局部数学与真实 Pipeline，不为减少数量而删除它们。
 
@@ -45,11 +51,11 @@
 
 ## API 与数值语义
 
-- 没有双透射模式。Forward 会包含旧算法忽略的反射、透射和 TIR，原 PNG 不作为逐位基准。
-- 原无图 RGB 的太阳 Φ/A 修正为 Φ/(A·|d_z|)；统一入口保留源 D65 白点，不因取消无用缓冲而改变颜色标尺。
-- 三种支持的几何都缺省 caustics=false；显式选择非 Dielectric 报错。光源 type 必填，旧调试字段/旧算法字段被拒绝。
-- CLI 统一保存三分量；配置解析与数值构建分开；AOV 由 diagnostics feature 控制，Release 也可以显式开启。
-- 先合并标量再做光谱/XYZ 积分、缓存圆盘几何，允许末位舍入变化。固定配置/seed 的线程间结果仍逐位一致；改变采样块分组使用容差。
+- Forward 统一了光子焦散计算，多次反射、透射和全反射均可计入结果。原双透射算法的 PNG 只作历史对照。
+- 原无焦散图 RGB 入口的太阳法向辐照度从 `Φ/A` 修正为 `Φ/(A·|d_z|)`，使水平接收面的辐照度与光子发射归一化一致。统一入口保留源 D65 白点。
+- Sphere、Prism 和 VerticalPrism 在 JSON 中统一以 `caustics=false` 为缺省值，显式选择非 Dielectric 作为焦散目标会报错。光源需要 `type` 字段，旧调试字段和旧算法字段会被拒绝。
+- 配置解析与实际构建验证分离。CLI 统一保存三个分量，AOV 通过 `diagnostics` feature 显式开启，Debug 和 Release 均支持。旧入口随迁移移除。
+- 标量几何层先合并，再乘光谱权重与 CIE 匹配函数。该顺序和圆盘几何缓存可能影响末位舍入。固定设置、seed 和采样块时，线程间结果仍逐位一致。改变采样块分组的对照使用容差。
 - 没有扩大物理范围：二值玻璃阴影、单理想介质、首次连续地面焦散、环境逃逸限制及有限预算不变。
 
 ## 旧文件迁移清单

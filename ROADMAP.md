@@ -1,6 +1,6 @@
 # 当前实现与开发边界
 
-本文件描述当前架构，不冻结历史阶段的 API。实现细节及运行方式见 README。
+本文件描述当前架构与估计器边界。运行方式见 [README](README.md)，历史接口迁移与数值变化见 [重构记录](docs/refactor.md)。
 
 ## 架构
 
@@ -27,22 +27,6 @@
 - 均匀介质、显式网格和程序化雾的吸收和散射系数可配置成覆盖 380–780 nm 的分段线性曲线。Hero/Packet 的自由程、表面阴影和体照明按路径波长查询。 [均匀介质配置](docs/rendering_guide.md#均匀介质与多次体散射) · [网格配置](docs/rendering_guide.md#非均匀密度网格)
 - `render.photon_max_volume_scatters` 默认 0。开启后，XYZ 焦散与 Eλ 图集均可接收玻璃事件之后发生体散射并到达地面的通量，独立光子 Direct 预览按源到地面的逐波长 Tr 计算。JSON 和 Rust API 可为一个封闭玻璃绑定内部介质，相机与光子在起射点分类，透射穿过绑定界面时切换区域。光子的 Air/Glass 状态负责折射率侧别。有限体散射预算丢弃更高阶体散射。Ratio Tracking 已提供独立的 `GridMedium` 查询与 Release 对照实验，渲染中的确定性透射率使用精确 DDA。层次化空块跳跃和介质发光仍未实现。局部 Majorant 仍有块遍历与缓存开销，均匀场景不保证加速。
 
-## 有意删除
-
-- two_transmission 算法及选择枚举、配置、入口、历史适配测试。
-- 重叠的 Renderer / Camera 单图与分量包装 API，Scene 上的光子追踪职责。
-- SpectralPathState / SpectralBsdfSample / BsdfValue / EvaluateMode 的重复状态和动态数值变体。
-- Ray 未使用的缓存字段，运行时 Hit 的可缺失物体 / 材质编号。
-- 由 Debug / Release profile 决定 AOV 的隐式规则，旧 JSON 字段及未标记的光源格式。
-
 ## 当前没有扩展
 
 没有新增材质、透明阴影、嵌套介质、环境焦散、通用 Photon Mapping、BVH / KD-Tree、GUI 或 GPU。光谱 GGX 仍拒绝。接收区外通量丢弃；RGB XYZ 焦散图绑定仍要求中性 Lambertian 地面；光谱使用材质的波长反射率。
-
-## 重构的数值变化
-
-- 所有光子焦散统一 Forward。多次反射 / 透射和 TIR 进入结果，取代旧双透射限定光路，因此旧 PNG 不作为逐位基准。
-- 原无图 RGB 入口的太阳强度 Φ/A 修正为 Φ/(A·|d_z|)，使水平接收面的能量和光子发射归一化一致。
-- 标量几何层先合并再乘光谱 / CMF，可能改变末位舍入；采样块重新分组允许容差。固定设置和线程数的确定性仍要求逐位一致。
-- 三种支持的几何统一以 caustics=false 为 JSON 缺省值；显式选择非 Dielectric 将报错，不再静默忽略。
-- 配置解析与实际构建验证分离；CLI 统一输出三个分量；Diagnostics 改为显式 feature。以上均不保留兼容入口。
