@@ -18,7 +18,7 @@ pub struct HomogeneousMediumConfig {
     pub max_m: [f64; 3],
     pub sigma_a: MediumCoefficient,
     pub sigma_s: MediumCoefficient,
-    pub g: f64,
+    pub g: HgAnisotropy,
 }
 
 /// A constant coefficient or piecewise linear samples in [nm, m⁻¹].
@@ -35,6 +35,20 @@ impl From<f64> for MediumCoefficient {
     }
 }
 
+/// Constant HG anisotropy or piecewise linear samples in [nm, dimensionless g].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum HgAnisotropy {
+    Constant(f64),
+    Curve { samples: Vec<[f64; 2]> },
+}
+
+impl From<f64> for HgAnisotropy {
+    fn from(value: f64) -> Self {
+        Self::Constant(value)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GridMediumConfig {
@@ -46,7 +60,7 @@ pub struct GridMediumConfig {
     pub densities: Vec<f64>,
     pub sigma_a_base: MediumCoefficient,
     pub sigma_s_base: MediumCoefficient,
-    pub g: f64,
+    pub g: HgAnisotropy,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,7 +72,7 @@ pub struct ProceduralMediumConfig {
     pub procedural: ProceduralDensityConfig,
     pub sigma_a_base: MediumCoefficient,
     pub sigma_s_base: MediumCoefficient,
-    pub g: f64,
+    pub g: HgAnisotropy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -11,8 +11,9 @@ use spectral_caustics::{
     },
     material::lambertian::Lambertian,
     medium::{
-        GridMedium, GridMediumConfig, HomogeneousMedium, HomogeneousMediumConfig, Medium,
-        MediumCoefficient, MediumCoefficients, MediumConfig, MediumSample, phase::HenyeyGreenstein,
+        GridMedium, GridMediumConfig, HgAnisotropy, HomogeneousMedium, HomogeneousMediumConfig,
+        Medium, MediumCoefficient, MediumCoefficients, MediumConfig, MediumSample,
+        phase::HenyeyGreenstein,
     },
     optics::dispersion::IorMode,
     renderer::Renderer,
@@ -35,8 +36,8 @@ impl Medium for CustomMedium {
     fn sigma_t_majorant(&self, wavelength_nm: f64) -> f64 {
         self.inner.sigma_t_majorant(wavelength_nm)
     }
-    fn phase(&self) -> HenyeyGreenstein {
-        self.inner.phase()
+    fn phase(&self, wavelength_nm: f64) -> HenyeyGreenstein {
+        self.inner.phase(wavelength_nm)
     }
     fn transmittance_ray(&self, ray: &Ray, max_distance: f64, wavelength_nm: f64) -> f64 {
         self.inner
@@ -99,7 +100,7 @@ fn camera_rejects_invalid_custom_medium_samples_before_accumulating_radiance() {
         max_m: [1.0; 3],
         sigma_a: 0.5.into(),
         sigma_s: 0.0.into(),
-        g: 0.0,
+        g: 0.0.into(),
     })
     .unwrap();
     let mut job = RenderJob::new();
@@ -145,7 +146,7 @@ fn layers(a: f64, s: f64) -> GridMediumConfig {
         densities: vec![1.0, 3.0],
         sigma_a_base: a.into(),
         sigma_s_base: s.into(),
-        g: 0.7,
+        g: 0.7.into(),
     }
 }
 
@@ -267,10 +268,25 @@ fn configured_grid_repeats_across_rgb_hero_packet_threads_and_zero_density_is_va
     m.densities = (0..2295)
         .map(|i| (i % 17 + 2 * ((i / 17) % 15) + 3 * (i / 255)) as f64 / 20.0)
         .collect();
-    for (mode, packet) in [
-        (CameraMode::Rgb, 1),
-        (CameraMode::Spectral, 1),
-        (CameraMode::Spectral, 4),
+    let mut spectral_hg = c.clone();
+    let Some(MediumConfig::Grid(m)) = &mut spectral_hg.scene.medium else {
+        panic!("expected grid")
+    };
+    m.g = HgAnisotropy::Curve {
+        samples: vec![[380.0, -0.6], [780.0, 0.7]],
+    };
+    let error = Renderer::new(spectral_hg.render.clone())
+        .unwrap()
+        .render(&spectral_hg.build().unwrap())
+        .err()
+        .expect("RGB should reject spectral HG");
+    assert!(error.to_string().contains("camera_mode"));
+    for (mut c, mode, packet) in [
+        (c.clone(), CameraMode::Rgb, 1),
+        (c.clone(), CameraMode::Spectral, 1),
+        (c, CameraMode::Spectral, 4),
+        (spectral_hg.clone(), CameraMode::Spectral, 1),
+        (spectral_hg, CameraMode::Spectral, 4),
     ] {
         c.render.camera_mode = mode;
         c.render.spectral_packet_size = packet;
@@ -291,11 +307,13 @@ fn configured_grid_repeats_across_rgb_hero_packet_threads_and_zero_density_is_va
                 assert_eq!(d + ca, *combined);
                 assert!(combined.iter().all(|v| v.is_finite()));
             }
-            let components = (
-                images.direct.pixels().to_vec(),
-                images.caustics.pixels().to_vec(),
-                images.combined.pixels().to_vec(),
-            );
+            let components = [images.direct, images.caustics, images.combined].map(|image| {
+                image
+                    .pixels()
+                    .iter()
+                    .map(|p| p.map(f64::to_bits))
+                    .collect::<Vec<_>>()
+            });
             if let Some(reference) = &reference {
                 assert_eq!(&components, reference);
             } else {
@@ -348,7 +366,7 @@ fn uniform_grid_and_homogeneous_render_the_same_extinction_in_rgb_hero_and_packe
             max_m: m.max_m,
             sigma_a: m.sigma_a_base.clone(),
             sigma_s: m.sigma_s_base.clone(),
-            g: m.g,
+            g: m.g.clone(),
         };
         for (mode, packet) in [
             (CameraMode::Rgb, 1),

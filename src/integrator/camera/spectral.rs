@@ -402,8 +402,8 @@ mod tests {
             camera::Camera,
             config::camera::CameraConfig,
             medium::{
-                GridMedium, GridMediumConfig, HomogeneousMedium, HomogeneousMediumConfig, Medium,
-                MediumCoefficient,
+                GridMedium, GridMediumConfig, HgAnisotropy, HomogeneousMedium,
+                HomogeneousMediumConfig, Medium, MediumCoefficient,
             },
         };
         let mut job = RenderJob::new();
@@ -423,7 +423,7 @@ mod tests {
                     max_m: [2.0; 3],
                     sigma_a: 0.1.into(),
                     sigma_s: 0.9.into(),
-                    g: 0.3,
+                    g: 0.3.into(),
                 })
                 .unwrap(),
             ) as Box<dyn Medium>,
@@ -435,7 +435,7 @@ mod tests {
                     sigma_s: MediumCoefficient::Curve {
                         samples: vec![[380.0, 4.0], [600.0, 0.0], [780.0, 0.0]],
                     },
-                    g: 0.3,
+                    g: 0.3.into(),
                 })
                 .unwrap(),
             ),
@@ -452,7 +452,9 @@ mod tests {
                         .collect(),
                     sigma_a_base: 0.1.into(),
                     sigma_s_base: 0.9.into(),
-                    g: 0.3,
+                    g: HgAnisotropy::Curve {
+                        samples: vec![[380.0, -0.6], [780.0, 0.7]],
+                    },
                 })
                 .unwrap(),
             ),
@@ -524,7 +526,7 @@ mod tests {
                     );
                     if let Some(r) = reference {
                         if chromatic {
-                            seen_divergent_lanes |= geometry.0 != r.0;
+                            seen_divergent_lanes |= geometry.0 != r.0 || geometry.2 != r.2;
                         } else {
                             assert_eq!(geometry, r);
                         }

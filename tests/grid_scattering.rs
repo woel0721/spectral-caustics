@@ -77,7 +77,7 @@ fn layered_grid_single_scattering_matches_independent_slab_integrals() {
         densities: (0..16).map(|i| if i < 8 { 1.0 } else { 3.0 }).collect(),
         sigma_a_base: 0.2.into(),
         sigma_s_base: 0.3.into(),
-        g: 0.0,
+        g: 0.0.into(),
     });
     job.camera_options.max_volume_scatters = 1;
     let ray = Ray::new(Vector3::z() * 4.0, -Vector3::z()).unwrap();
@@ -91,7 +91,7 @@ fn layered_grid_single_scattering_matches_independent_slab_integrals() {
                 densities: (0..16).map(|i| if i < 8 { 1.0 } else { 3.0 }).collect(),
                 sigma_a_base: 0.2.into(),
                 sigma_s_base: 0.3.into(),
-                g,
+                g: g.into(),
             })
             .unwrap(),
         ));
@@ -102,7 +102,7 @@ fn layered_grid_single_scattering_matches_independent_slab_integrals() {
                 .medium
                 .as_ref()
                 .unwrap()
-                .phase()
+                .phase(550.0)
                 .eval(Vector3::z(), wi);
             // Total tau = 0.5 * (1 + 3) = 2. On the camera side integrate
             // albedo * exp(-2 tau) d tau; opposite-side Tr is exp(-2) everywhere.
@@ -139,7 +139,7 @@ fn heterogeneous_multiple_scattering_preserves_albedo_geometry_budgets_and_scala
         densities: octants([0.2, 2.0, 1.0, 3.0, 2.0, 0.5, 4.0, 1.5]),
         sigma_a_base: 0.8.into(),
         sigma_s_base: 3.2.into(),
-        g: 0.4,
+        g: 0.4.into(),
     });
     let ray = Ray::new(Vector3::z() * 3.0, -Vector3::z()).unwrap();
     let d65 = spectral_caustics::spectrum::emission::d65_spectrum(550.0).unwrap();
@@ -187,7 +187,7 @@ fn conservative_heterogeneous_fog_recovers_unit_environment_with_multiple_scatte
         densities: octants([0.0, 0.2, 1.3, 2.0, 0.7, 1.8, 0.3, 1.1]),
         sigma_a_base: 0.0.into(),
         sigma_s_base: 0.7.into(),
-        g: 0.4,
+        g: 0.4.into(),
     });
     job.scene.environment = Some(
         Environment::try_from(&EnvironmentConfig {

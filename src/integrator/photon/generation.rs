@@ -145,7 +145,7 @@ impl PhotonPlan {
             .light
             .spectral_normalization(&nodes)
             .ok_or("invalid source spectrum")?;
-        let spectral_extinction = job.scene.has_wavelength_dependent_medium();
+        let spectral_extinction = job.scene.has_wavelength_dependent_medium_coefficients();
         let fixed_tracer = if spectral_extinction && settings.mode == IorMode::Constant {
             photon_tracer(job, settings, target, ground, nodes[0].0)?
         } else {
@@ -233,7 +233,7 @@ fn fixed_transmittance(
 ) -> Result<Option<f64>, &'static str> {
     match segment.medium(&job.scene)? {
         None => Ok(Some(1.0)),
-        Some(medium) if medium.is_wavelength_dependent() => Ok(None),
+        Some(medium) if medium.has_wavelength_dependent_coefficients() => Ok(None),
         Some(medium) => segment
             .transmittance_in(medium, ACHROMATIC_QUERY_NM)
             .map(Some),
@@ -729,7 +729,7 @@ mod tests {
                     samples: vec![[380.0, 1.0], [780.0, 0.1]],
                 },
                 sigma_s: 0.0.into(),
-                g: 0.0,
+                g: 0.0.into(),
             })
             .unwrap(),
         ));

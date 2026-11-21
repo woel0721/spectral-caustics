@@ -11,7 +11,7 @@ mod spectral;
 mod types;
 
 pub use config::{
-    GridMediumConfig, HomogeneousMediumConfig, MediumCoefficient, MediumConfig,
+    GridMediumConfig, HgAnisotropy, HomogeneousMediumConfig, MediumCoefficient, MediumConfig,
     ProceduralDensityConfig, ProceduralMediumConfig, from_config,
 };
 pub use grid::GridMedium;
@@ -24,19 +24,24 @@ use phase::HenyeyGreenstein;
 use rand::RngCore;
 
 /// Scene medium shared by camera and photon paths and Rayon workers.
-/// Local coefficients and global spatial bounds are evaluated at the given wavelength
-/// in nm (finite and within 380–780 nm). Ray distances are in metres.
+/// Wavelength arguments are in nm (finite and within 380–780 nm).
+/// Ray distances are in metres.
 /// Camera transport uses only sample_segment, transmittance_ray and phase:
 /// density traversal, majorants and null-collision loops stay inside the medium.
 pub trait Medium: Send + Sync {
-    /// True if any coefficient requires a wavelength-resolved transport path.
+    /// True if the coefficients or phase function require a spectral camera.
     fn is_wavelength_dependent(&self) -> bool {
         false
+    }
+    /// True if the absorption or scattering coefficient depends on wavelength.
+    /// Media with only a spectral phase function override this to return false.
+    fn has_wavelength_dependent_coefficients(&self) -> bool {
+        self.is_wavelength_dependent()
     }
     fn density_at(&self, position: Vector3<f64>) -> f64;
     fn coefficients_at(&self, position: Vector3<f64>, wavelength_nm: f64) -> MediumCoefficients;
     fn sigma_t_majorant(&self, wavelength_nm: f64) -> f64;
-    fn phase(&self) -> HenyeyGreenstein;
+    fn phase(&self, wavelength_nm: f64) -> HenyeyGreenstein;
     /// Deterministic transmittance in [0, 1] from the ray origin up to max_distance.
     fn transmittance_ray(&self, ray: &Ray, max_distance: f64, wavelength_nm: f64) -> f64;
 

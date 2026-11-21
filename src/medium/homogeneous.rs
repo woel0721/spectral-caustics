@@ -2,7 +2,7 @@
 use super::{
     HomogeneousMediumConfig, Medium, MediumCoefficients, MediumSample,
     bounds::{box_interval, contains, valid_bounds},
-    phase::HenyeyGreenstein,
+    phase::{HenyeyGreenstein, SpectralHg},
     spectral::SpectralCoefficients,
 };
 use crate::geometry::ray::Ray;
@@ -14,7 +14,7 @@ pub struct HomogeneousMedium {
     min: Vector3<f64>,
     max: Vector3<f64>,
     coefficients: SpectralCoefficients,
-    phase: HenyeyGreenstein,
+    phase: SpectralHg,
 }
 
 impl TryFrom<&HomogeneousMediumConfig> for HomogeneousMedium {
@@ -27,7 +27,7 @@ impl TryFrom<&HomogeneousMediumConfig> for HomogeneousMedium {
             min: c.min_m.into(),
             max: c.max_m.into(),
             coefficients: SpectralCoefficients::new(&c.sigma_a, &c.sigma_s)?,
-            phase: HenyeyGreenstein::new(c.g)?,
+            phase: SpectralHg::new(&c.g)?,
         })
     }
 }
@@ -58,6 +58,10 @@ fn beer_lambert(sigma_t: f64, length_m: f64) -> f64 {
 
 impl Medium for HomogeneousMedium {
     fn is_wavelength_dependent(&self) -> bool {
+        self.has_wavelength_dependent_coefficients() || self.phase.is_wavelength_dependent()
+    }
+
+    fn has_wavelength_dependent_coefficients(&self) -> bool {
         self.coefficients.is_wavelength_dependent()
     }
 
@@ -75,8 +79,8 @@ impl Medium for HomogeneousMedium {
     fn sigma_t_majorant(&self, wavelength_nm: f64) -> f64 {
         self.coefficients(wavelength_nm).sigma_t()
     }
-    fn phase(&self) -> HenyeyGreenstein {
-        self.phase
+    fn phase(&self, wavelength_nm: f64) -> HenyeyGreenstein {
+        self.phase.at(wavelength_nm)
     }
     fn transmittance_ray(&self, ray: &Ray, max_distance: f64, wavelength_nm: f64) -> f64 {
         self.interval(ray, max_distance)

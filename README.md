@@ -23,7 +23,7 @@ Rust · CPU Renderer · Spectral Rendering · Volume Scattering
 | RGB / Hero / Packet 相机 | RGB 相机追踪三个颜色通道。Hero 为每条路径采样一个波长。Packet 的四个波长共享一条主射线，进入玻璃后可沿不同方向传播。 |
 | Forward Photon Tracing | 从平行光或圆盘面光源发射光子，追踪玻璃界面的反射与折射，把落到地面的通量累积成焦散图。 |
 | BSDF / Fresnel / MIS | 用 BSDF 描述漫反射、镜面和粗糙金属，用 Fresnel 决定玻璃界面的反射与透射概率。对 HDRI 环境照明，MIS 组合材质与环境两种方向采样。 |
-| Homogeneous Medium | 均匀雾支持吸收和多次体散射。Henyey–Greenstein 相函数的参数 `g` 控制散射偏向前方还是后方。 |
+| Homogeneous Medium | 均匀雾支持吸收和多次体散射。Henyey–Greenstein 相函数的参数 `g` 可按波长配置，以控制各波长的散射方向分布。 |
 | Heterogeneous Grid Medium | 用体素密度描述分层或团块状的雾。DDA 逐格累积光学厚度以计算透射率，Delta Tracking 用分块消光上界（Local Majorants）采样散射位置。 |
 
 ## 快速开始

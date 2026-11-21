@@ -128,6 +128,7 @@ pub fn trace_camera_path<T: CameraTransport>(
     state.medium_region = Some(region);
     let transport = state.transport;
     let wavelength_nm = transport.wavelength_nm();
+    let medium_wavelength_nm = wavelength_nm.unwrap_or(ACHROMATIC_QUERY_NM);
     let (sun_wi, sun) = transport.sunlight(light_wi, light, map)?;
     let mut area = AreaLightSampler::new(job, rngs.camera);
     let mut from_volume = false;
@@ -149,7 +150,7 @@ pub fn trace_camera_path<T: CameraTransport>(
             let sample = medium.sample_segment(
                 &state.ray,
                 hit.as_ref().map_or(f64::INFINITY, |h| h.distance),
-                wavelength_nm.unwrap_or(ACHROMATIC_QUERY_NM),
+                medium_wavelength_nm,
                 allow_scattering,
                 rngs.medium,
             )?;
@@ -164,7 +165,7 @@ pub fn trace_camera_path<T: CameraTransport>(
             state.throughput = state.throughput * sample.weight;
             if let Some(position) = sample.position {
                 let wo = -state.ray.direction;
-                let phase = medium.phase();
+                let phase = medium.phase(medium_wavelength_nm);
                 let direct = volume_lighting(
                     job,
                     medium,

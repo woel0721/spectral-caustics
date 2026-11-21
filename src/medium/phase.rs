@@ -1,8 +1,54 @@
 //! HG uses PBRT's convention: wo and wi both point away from the interaction.
+use super::{
+    HgAnisotropy,
+    spectral::{constant_curve_value, interpolate_curve, validate_wavelength_nodes},
+};
 use crate::material::to_world;
 use nalgebra::Vector3;
 use rand::{Rng, RngCore};
 use std::f64::consts::{PI, TAU};
+
+const INVALID_G: &str = "HG g must be finite and strictly between -1 and 1";
+
+fn valid_g(g: f64) -> bool {
+    g.is_finite() && g.abs() < 1.0
+}
+
+/// Validated anisotropy shared by the built-in media.
+#[derive(Debug, Clone)]
+pub(super) struct SpectralHg(HgAnisotropy);
+
+impl SpectralHg {
+    pub(super) fn new(g: &HgAnisotropy) -> Result<Self, String> {
+        match g {
+            HgAnisotropy::Constant(value) => {
+                HenyeyGreenstein::new(*value)?;
+            }
+            HgAnisotropy::Curve { samples } => {
+                validate_wavelength_nodes(samples).map_err(|e| format!("HG g {e}"))?;
+                if samples.iter().any(|&[_, value]| !valid_g(value)) {
+                    return Err(INVALID_G.into());
+                }
+                if let Some(value) = constant_curve_value(samples) {
+                    return Ok(Self(HgAnisotropy::Constant(value)));
+                }
+            }
+        }
+        Ok(Self(g.clone()))
+    }
+
+    pub(super) fn is_wavelength_dependent(&self) -> bool {
+        matches!(self.0, HgAnisotropy::Curve { .. })
+    }
+
+    pub(super) fn at(&self, wavelength_nm: f64) -> HenyeyGreenstein {
+        let g = match &self.0 {
+            HgAnisotropy::Constant(g) => *g,
+            HgAnisotropy::Curve { samples } => interpolate_curve(samples, wavelength_nm),
+        };
+        HenyeyGreenstein { g }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct HenyeyGreenstein {
@@ -16,8 +62,8 @@ pub struct PhaseSample {
 }
 impl HenyeyGreenstein {
     pub fn new(g: f64) -> Result<Self, String> {
-        if !g.is_finite() || g.abs() >= 1.0 {
-            return Err("HG g must be finite and strictly between -1 and 1".into());
+        if !valid_g(g) {
+            return Err(INVALID_G.into());
         }
         Ok(Self { g })
     }

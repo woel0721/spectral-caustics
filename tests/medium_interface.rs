@@ -203,7 +203,7 @@ fn absorption(sigma: f64) -> Box<dyn Medium> {
             max_m: [10.0; 3],
             sigma_a: sigma.into(),
             sigma_s: 0.0.into(),
-            g: 0.0,
+            g: 0.0.into(),
         })
         .unwrap(),
     )
@@ -284,7 +284,7 @@ fn camera_sphere_uses_the_path_wavelength_in_the_bound_interior() {
             samples: vec![[380.0, 0.2], [780.0, 1.0]],
         },
         sigma_s: 0.0.into(),
-        g: 0.0,
+        g: 0.0.into(),
     })
     .unwrap();
     job.scene
