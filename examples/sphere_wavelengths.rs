@@ -87,7 +87,6 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if args.next().is_some() {
         return Err("用法：sphere_wavelengths [SPP] [正方形边长] [输出目录]".into());
     }
-    config.validate()?;
     let scene = config.build()?;
     let renderer = Renderer::new(config.render.clone())?;
     fs::create_dir_all(&directory)?;
