@@ -54,16 +54,18 @@ pub enum PhotonMedium {
 
 #[derive(Debug, Clone, Copy)]
 pub struct PhotonPathState {
-    /// 当前向前续追的射线，从光源或上一个界面出发。
+    /// 当前向前续追的射线，从光源、玻璃界面或体散射点出发。
     pub ray: Ray,
     /// 界面的折射率一侧，用于决定 IOR 与法线方向。
     pub medium: PhotonMedium,
     /// 当前射线所在的参与介质区域。
     pub medium_region: MediumRegion,
-    /// 相对于发射光谱通量 Φλ 的无量纲系数，包含已追踪段的 Tr 与界面通量权重。
+    /// 相对于发射光谱通量 Φλ 的无量纲系数，包含介质段和玻璃界面的权重。
     pub flux_weight: f64,
     /// 已发生的反射/透射总次数，用于事件上限截断。
     pub event_count: usize,
+    /// 真实体散射次数，独立于玻璃事件。
+    pub volume_scatters: usize,
     /// 其中反射的次数，包含全反射。
     #[cfg(any(feature = "diagnostics", test))]
     pub reflections: usize,
@@ -85,6 +87,7 @@ impl PhotonPathState {
             medium_region: region,
             flux_weight: tr,
             event_count: 0,
+            volume_scatters: 0,
             #[cfg(any(feature = "diagnostics", test))]
             reflections: 0,
             #[cfg(any(feature = "diagnostics", test))]
@@ -95,13 +98,13 @@ impl PhotonPathState {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PhotonTermination {
-    /// 在空气中首次到达地面，坐标可用于沉积通量。
+    /// 在空气中首次到达地面正面，坐标可用于沉积通量。
     Ground(Vector3<f64>),
     /// 没有下一交点，光子离开场景。
     Escaped,
     /// 命中选中玻璃和可接收地面之外的物体，通量被遮挡丢弃。
     Blocked,
-    /// 达到散射次数上限，截断剩余通量。
+    /// 路径需要再执行一次玻璃界面事件，但已达到界面预算。
     EventLimit,
 }
 
@@ -170,20 +173,90 @@ impl PhotonTracer {
         wavelength_nm: f64,
         rng: &mut dyn RngCore,
     ) -> Result<PhotonPathResult, &'static str> {
+        let state = self.initial_state(scene, ray, first_hit, wavelength_nm)?;
+        self.trace_state(scene, state, first_hit, rng, |segment| {
+            segment.transmittance(&scene.scene, wavelength_nm)
+        })
+    }
+
+    pub(super) fn initial_state(
+        &self,
+        scene: &RenderJob,
+        ray: Ray,
+        first_hit: Option<Hit>,
+        wavelength_nm: f64,
+    ) -> Result<PhotonPathState, &'static str> {
         let region = scene.scene.initial_medium_region(ray.origin, None)?;
-        let transmittance =
-            |segment: PhotonSegment| segment.transmittance(&scene.scene, wavelength_nm);
         let tr = if let Some(first) = first_hit {
-            transmittance(PhotonSegment {
+            PhotonSegment {
                 ray,
                 region,
                 distance: first.distance,
-            })?
+            }
+            .transmittance(&scene.scene, wavelength_nm)?
         } else {
             1.0
         };
-        let state = PhotonPathState::new(ray, region, self.object_id, tr);
-        self.trace_state(scene, state, first_hit, rng, transmittance)
+        Ok(PhotonPathState::new(ray, region, self.object_id, tr))
+    }
+
+    /// Continue a volume-enabled path using the preweighted first segment.
+    pub(super) fn trace_state_with_volume(
+        &self,
+        scene: &RenderJob,
+        state: PhotonPathState,
+        first_hit: Option<Hit>,
+        wavelength_nm: f64,
+        max_volume_scatters: usize,
+        rng: &mut dyn RngCore,
+    ) -> Result<PhotonPathResult, String> {
+        self.trace_after_first_segment(scene, state, first_hit, rng, |state, distance, rng| {
+            let Some(medium) = scene.scene.active_medium(state.medium_region)? else {
+                return Ok(false);
+            };
+            if distance.is_some_and(|d| !d.is_finite() || d <= 0.0) {
+                return Err("invalid photon segment distance".into());
+            }
+            let allow_scattering = state.volume_scatters < max_volume_scatters;
+            let sample = medium.sample_segment(
+                &state.ray,
+                distance.unwrap_or(f64::INFINITY),
+                wavelength_nm,
+                allow_scattering,
+                rng,
+            )?;
+            if !sample.weight.is_finite()
+                || sample.weight < 0.0
+                || sample
+                    .position
+                    .is_some_and(|p| !allow_scattering || p.iter().any(|value| !value.is_finite()))
+            {
+                return Err(
+                    "invalid photon medium sample position, weight or scattering budget".into(),
+                );
+            }
+            state.flux_weight *= sample.weight;
+            if !state.flux_weight.is_finite() {
+                return Err("photon medium flux weight overflow".into());
+            }
+            let Some(position) = sample.position else {
+                return Ok(false);
+            };
+            // Rounding to a surface would make the volume-origin query skip
+            // that interface at t=0 and could select its opposite side.
+            if position == state.ray.origin || distance.is_some_and(|d| position == state.ray.at(d))
+            {
+                return Err("photon medium collision rounds to a ray segment endpoint".into());
+            }
+            // HG is sampled from its own density, so its direction weight is 1.
+            let direction = medium
+                .phase(wavelength_nm)
+                .sample(-state.ray.direction, rng)
+                .wi;
+            state.ray = Ray::new(position, direction).ok_or("invalid photon phase ray")?;
+            state.volume_scatters += 1;
+            Ok(true)
+        })
     }
 
     /// Walk successive finite hit segments. The caller supplies the first
@@ -191,19 +264,48 @@ impl PhotonTracer {
     pub(super) fn trace_state(
         &self,
         scene: &RenderJob,
-        mut state: PhotonPathState,
-        mut hit: Option<Hit>,
+        state: PhotonPathState,
+        hit: Option<Hit>,
         rng: &mut dyn RngCore,
         mut transmittance: impl FnMut(PhotonSegment) -> Result<f64, &'static str>,
     ) -> Result<PhotonPathResult, &'static str> {
+        self.trace_after_first_segment(scene, state, hit, rng, |state, distance, _| {
+            if let Some(distance) = distance {
+                state.flux_weight *= transmittance(PhotonSegment {
+                    ray: state.ray,
+                    region: state.medium_region,
+                    distance,
+                })?;
+            }
+            Ok(false)
+        })
+    }
+
+    /// The first segment is already weighted. Later segment transport returns
+    /// true when a volume event has changed the ray and invalidated the next hit.
+    fn trace_after_first_segment<E: From<&'static str>>(
+        &self,
+        scene: &RenderJob,
+        mut state: PhotonPathState,
+        mut hit: Option<Hit>,
+        rng: &mut dyn RngCore,
+        mut advance_segment: impl FnMut(
+            &mut PhotonPathState,
+            Option<f64>,
+            &mut dyn RngCore,
+        ) -> Result<bool, E>,
+    ) -> Result<PhotonPathResult, E> {
         let termination = loop {
             let Some(current) = hit else {
                 break PhotonTermination::Escaped;
             };
-            if current.object_id == (self.ground_id) && state.medium == PhotonMedium::Air {
+            if current.object_id == self.ground_id
+                && state.medium == PhotonMedium::Air
+                && state.ray.direction.dot(&current.normal) < 0.0
+            {
                 break PhotonTermination::Ground(current.coords);
             }
-            if current.object_id != (self.object_id) {
+            if current.object_id != self.object_id {
                 break PhotonTermination::Blocked;
             }
             // 允许恰好完成 max_events 次散射后的落地/逃逸，下一次散射才截断。
@@ -212,12 +314,11 @@ impl PhotonTracer {
             }
             self.scatter(&scene.scene, &mut state, current, rng)?;
             hit = scene.scene.intersect(&state.ray);
-            if let Some(next) = hit {
-                state.flux_weight *= transmittance(PhotonSegment {
-                    ray: state.ray,
-                    region: state.medium_region,
-                    distance: next.distance,
-                })?;
+            while advance_segment(&mut state, hit.map(|next| next.distance), rng)? {
+                hit = scene.scene.intersect_from_volume_with_objects(
+                    &state.ray,
+                    &[self.object_id, self.ground_id],
+                );
             }
         };
         Ok(PhotonPathResult { state, termination })
@@ -918,5 +1019,359 @@ mod tests {
                 assert_eq!(rng.draws, if ior == 1.0 { 0 } else { 2 });
             }
         }
+    }
+
+    fn uniform_draw(u: f64) -> u64 {
+        (u * u64::MAX as f64) as u64
+    }
+
+    fn reflecting_sphere() -> (RenderJob, usize, Ray) {
+        let mut job = RenderJob::new();
+        let target = job.scene.add(
+            Box::new(Sphere::new(Vector3::z() * 2.0, 1.0).unwrap()),
+            Box::new(Dielectric::new(1.5).unwrap()),
+        );
+        job.photon.ground_id = Some(job.scene.add(
+            Box::new(Ground::new(0.0).unwrap()),
+            Box::new(crate::material::lambertian::Lambertian::new(Vector3::repeat(0.8)).unwrap()),
+        ));
+        job.select_caustics_object(target).unwrap();
+        let ray = Ray::new(Vector3::z() * 4.0, -Vector3::z()).unwrap();
+        (job, target, ray)
+    }
+
+    #[test]
+    fn photon_volume_tracks_grid_null_then_real_on_an_escape_segment() {
+        use crate::integrator::photon::{trace_photon, trace_photon_with_volume};
+
+        let (mut job, _, ray) = reflecting_sphere();
+        job.scene.medium = Some(Box::new(
+            GridMedium::try_from(&GridMediumConfig {
+                min_m: [-20.0, -20.0, 3.5],
+                max_m: [20.0, 20.0, 5.5],
+                resolution: [1, 1, 2],
+                densities: vec![0.25, 1.0],
+                sigma_a_base: 0.6.into(),
+                sigma_s_base: 0.4.into(),
+                g: 0.0.into(),
+            })
+            .unwrap(),
+        ));
+        let prefix_tr = (-0.125_f64).exp();
+        for result in [
+            trace_photon(
+                &job,
+                ray,
+                None,
+                IorMode::Constant,
+                1,
+                &mut Sequence::new(&[0]),
+            )
+            .unwrap(),
+            trace_photon_with_volume(
+                &job,
+                ray,
+                None,
+                IorMode::Constant,
+                1,
+                0,
+                &mut Sequence::new(&[0]),
+            )
+            .unwrap(),
+        ] {
+            assert_eq!(result.termination, PhotonTermination::Escaped);
+            assert_eq!(result.state.volume_scatters, 0);
+            assert_eq!(result.state.flux_weight, prefix_tr);
+        }
+
+        // Reflect upward, then reject a candidate at z=3.75 and accept one at z=4.
+        // The two candidates are in the same coarse block as the denser voxel.
+        let step = -(-0.25_f64).exp_m1();
+        let mut rng = Sequence::new(&[0.0, step, 0.75, step, 0.125, 0.375, 0.0].map(uniform_draw));
+        let result =
+            trace_photon_with_volume(&job, ray, None, IorMode::Constant, 1, 1, &mut rng).unwrap();
+        assert_eq!(rng.draws, 7);
+        assert_eq!(result.state.event_count, 1);
+        assert_eq!(result.state.reflections, 1);
+        assert_eq!(result.state.volume_scatters, 1);
+        assert!((result.state.ray.origin.z - 4.0).abs() < 1e-12);
+        // The HG sample has dz=-1/4 and crosses another 2 m of the low-density
+        // voxel before leaving the box. The new direction misses the glass.
+        let landing = result.landing().unwrap();
+        assert!((landing.position.x - 4.0 * 15.0_f64.sqrt()).abs() < 1e-12);
+        assert!((landing.weight - prefix_tr * 0.4 * (-0.5_f64).exp()).abs() < 1e-14);
+    }
+
+    #[test]
+    fn photon_volume_cannot_deposit_on_the_back_of_the_receiver() {
+        use crate::integrator::photon::trace_photon_with_volume;
+        use crate::material::lambertian::Lambertian;
+        use nalgebra::Vector2;
+
+        let mut job = RenderJob::new();
+        let target = job.scene.add(
+            Box::new(Sphere::new(Vector3::new(-1.0, 0.0, -1.0), 0.25).unwrap()),
+            Box::new(Dielectric::new(1.5).unwrap()),
+        );
+        let ground = job.scene.add(
+            Box::new(
+                Ground::with_bounds(0.0, Vector2::repeat(-0.25), Vector2::repeat(0.25)).unwrap(),
+            ),
+            Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()),
+        );
+        job.photon.ground_id = Some(ground);
+        job.select_caustics_object(target).unwrap();
+        job.scene.medium = Some(Box::new(
+            HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+                min_m: [-2.0, -2.0, -1.5],
+                max_m: [2.0, 2.0, -0.01],
+                sigma_a: 0.5.into(),
+                sigma_s: 0.5.into(),
+                g: 0.0.into(),
+            })
+            .unwrap(),
+        ));
+        // Miss the finite floor on the way down, reflect off the glass at
+        // z=-0.75, then scatter from (-1, 0, -0.5) toward the floor's underside.
+        let ray = Ray::new(Vector3::new(-1.0, 0.0, 2.0), -Vector3::z()).unwrap();
+        let draws = [
+            0.0,
+            -(-0.25_f64).exp_m1(),
+            (1.0 + 1.0 / 5.0_f64.sqrt()) / 2.0,
+            0.0,
+        ]
+        .map(uniform_draw);
+        let result = trace_photon_with_volume(
+            &job,
+            ray,
+            None,
+            IorMode::Constant,
+            1,
+            1,
+            &mut Sequence::new(&draws),
+        )
+        .unwrap();
+        assert_eq!(
+            (result.state.reflections, result.state.volume_scatters),
+            (1, 1)
+        );
+        let hit = job.scene.intersect(&result.state.ray).unwrap();
+        assert_eq!(hit.object_id, ground);
+        assert!(hit.coords.norm() < 1e-14);
+        assert!(hit.normal.dot(&result.state.ray.direction) > 0.0);
+        assert!(result.state.flux_weight > 0.0);
+        assert_eq!(result.termination, PhotonTermination::Blocked);
+        assert!(result.landing().is_none());
+    }
+
+    #[test]
+    fn photon_volume_rejects_a_position_rounded_to_the_dielectric_surface() {
+        use crate::integrator::photon::trace_photon_with_volume;
+
+        let (mut job, _, ray) = reflecting_sphere();
+        // The first RNG word reflects off the sphere at z=3. A nonzero free
+        // path below the precision of that coordinate cannot spawn a volume ray.
+        job.scene.medium = Some(Box::new(
+            HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+                min_m: [-1.0, -1.0, 3.0],
+                max_m: [1.0, 1.0, 5.0],
+                sigma_a: 0.0.into(),
+                sigma_s: 1.0.into(),
+                g: 0.0.into(),
+            })
+            .unwrap(),
+        ));
+        let mut rng = Sequence::new(&[0, 0, 0, 0]);
+        let error = trace_photon_with_volume(&job, ray, None, IorMode::Constant, 2, 1, &mut rng)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "photon medium collision rounds to a ray segment endpoint"
+        );
+        assert_eq!(rng.draws, 2);
+    }
+
+    #[test]
+    fn photon_volume_budgets_are_independent_at_a_nearby_glass_hit() {
+        use crate::integrator::photon::trace_photon_with_volume;
+
+        let (mut job, target, ray) = reflecting_sphere();
+        job.scene.medium = Some(Box::new(
+            HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+                min_m: [-1.0, -1.0, 3.0],
+                max_m: [1.0, 1.0, 5.0],
+                sigma_a: 0.5.into(),
+                sigma_s: 0.5.into(),
+                g: 0.0.into(),
+            })
+            .unwrap(),
+        ));
+        let distance = 0.25 * crate::geometry::ray::INTERSECTION_EPSILON;
+        // Reflect upward, then backscatter toward the same interface.
+        let draws = [0.0, -(-distance).exp_m1(), 0.0, 0.0, 0.0].map(uniform_draw);
+        for bound in [false, true] {
+            if bound {
+                job.scene
+                    .bind_medium_interface(target, MediumInterface { interior: None })
+                    .unwrap();
+            }
+            for max_events in [1, 2] {
+                let mut rng = Sequence::new(&draws);
+                let result = trace_photon_with_volume(
+                    &job,
+                    ray,
+                    None,
+                    IorMode::Constant,
+                    max_events,
+                    1,
+                    &mut rng,
+                )
+                .unwrap();
+                assert_eq!(result.state.volume_scatters, 1);
+                assert_eq!(result.state.event_count, max_events);
+                assert_eq!(result.state.reflections, max_events);
+                assert_eq!(rng.draws, 3 + max_events);
+                let (termination, final_distance) = if max_events == 1 {
+                    (PhotonTermination::EventLimit, 0.0)
+                } else {
+                    (PhotonTermination::Escaped, 2.0)
+                };
+                assert_eq!(result.termination, termination);
+                assert!(
+                    (result.state.flux_weight - 0.5 * (-1.0 - distance - final_distance).exp())
+                        .abs()
+                        < 1e-14
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn photon_volume_slab_lands_after_one_or_two_real_events() {
+        use crate::integrator::photon::trace_photon_with_volume;
+
+        let (mut job, _, ray) = slab(1.0, 2);
+        job.scene.medium = Some(Box::new(
+            HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+                min_m: [-10.0, -10.0, 0.0],
+                max_m: [10.0, 10.0, 1.0],
+                sigma_a: 1.5.into(),
+                sigma_s: 0.5.into(),
+                g: 0.0.into(),
+            })
+            .unwrap(),
+        ));
+        let draws = [
+            -(-0.4_f64).exp_m1(),
+            0.75,
+            0.0,
+            -(-0.6_f64).exp_m1(),
+            1.0,
+            0.0,
+        ]
+        .map(uniform_draw);
+        for (budget, remaining_distance) in [(1, 1.6), (2, 1.3)] {
+            let mut rng = Sequence::new(&draws[..3 * budget]);
+            let result =
+                trace_photon_with_volume(&job, ray, None, IorMode::Constant, 2, budget, &mut rng)
+                    .unwrap();
+            assert_eq!(rng.draws, 3 * budget);
+            assert_eq!(result.state.volume_scatters, budget);
+            assert_eq!(result.state.transmissions, 2);
+            let landing = result.landing().unwrap();
+            let expected = 0.25_f64.powi(budget as i32) * (-2.0_f64 * remaining_distance).exp();
+            assert!((landing.weight - expected).abs() < 1e-14);
+        }
+
+        let height = 0.25 * crate::geometry::ray::INTERSECTION_EPSILON;
+        let u = -(-2.0 * (1.0 - height)).exp_m1();
+        let result = trace_photon_with_volume(
+            &job,
+            ray,
+            None,
+            IorMode::Constant,
+            2,
+            1,
+            &mut Sequence::new(&[u, 0.75, 0.0].map(uniform_draw)),
+        )
+        .unwrap();
+        assert!((result.state.ray.origin.z - height).abs() < 1e-14);
+        assert!((result.landing().unwrap().weight - 0.25 * (-4.0 * height).exp()).abs() < 1e-14);
+
+        // A stratified sweep of the distance variate measures the zero-collision
+        // share of landed flux. Each surviving sample must retain unit weight.
+        let samples = 1024;
+        let mut survived = 0;
+        for i in 0..samples {
+            let u = (i as f64 + 0.5) / samples as f64;
+            let result = trace_photon_with_volume(
+                &job,
+                ray,
+                None,
+                IorMode::Constant,
+                2,
+                1,
+                &mut Sequence::new(&[uniform_draw(u), u64::MAX, 0]),
+            )
+            .unwrap();
+            if result.state.volume_scatters == 0 {
+                assert_eq!(result.landing().unwrap().weight, 1.0);
+                survived += 1;
+            }
+        }
+        assert!((survived as f64 / samples as f64 - (-2.0_f64).exp()).abs() < 1.0 / samples as f64);
+    }
+
+    #[test]
+    fn photon_volume_uses_the_wavelength_of_the_interior_phase() {
+        use crate::integrator::photon::trace_photon_with_volume;
+
+        let (mut job, target, ray) = reflecting_sphere();
+        job.scene
+            .bind_medium_interface(
+                target,
+                MediumInterface {
+                    interior: Some(Box::new(
+                        HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+                            min_m: [-1.0, -1.0, 1.0],
+                            max_m: [1.0, 1.0, 3.0],
+                            sigma_a: 0.5.into(),
+                            sigma_s: 0.5.into(),
+                            g: crate::medium::HgAnisotropy::Curve {
+                                samples: vec![[380.0, -0.7], [780.0, 0.7]],
+                            },
+                        })
+                        .unwrap(),
+                    )),
+                },
+            )
+            .unwrap();
+        let trace = |nm, budget| {
+            let draws = [1.0, -(-0.25_f64).exp_m1(), 0.5, 0.0].map(uniform_draw);
+            trace_photon_with_volume(
+                &job,
+                ray,
+                nm,
+                IorMode::Constant,
+                1,
+                budget,
+                &mut Sequence::new(&draws),
+            )
+        };
+        for (nm, sign) in [(380.0, 1.0), (780.0, -1.0)] {
+            let result = trace(Some(nm), 1).unwrap();
+            assert_eq!(result.termination, PhotonTermination::EventLimit);
+            assert_eq!(result.state.volume_scatters, 1);
+            assert_eq!(result.state.transmissions, 1);
+            assert_eq!(result.state.medium, PhotonMedium::Glass);
+            assert_eq!(result.state.medium_region, MediumRegion::Interior(target));
+            assert!((result.state.ray.origin.z - 2.75).abs() < 1e-14);
+            assert!(result.state.ray.direction.z * sign > 0.7);
+        }
+        for nm in [None, Some(379.0), Some(f64::NAN)] {
+            assert!(trace(nm, 1).is_err());
+        }
+        assert!(trace(Some(550.0), 1025).is_err());
+        assert_eq!(trace(None, 0).unwrap().state.volume_scatters, 0);
     }
 }

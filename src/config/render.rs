@@ -5,6 +5,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::path::PathBuf;
 
+pub(crate) const MAX_PHOTON_VOLUME_SCATTERS: usize = 1024;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CameraMode {
@@ -39,6 +41,9 @@ pub struct RenderSetting {
     /// 仅 Forward 使用；每次理想反射/透射（含全反射）占一个事件。
     #[serde(default = "default_photon_max_events")]
     pub photon_max_events: usize,
+    /// 仅 Forward 使用；首次玻璃事件后的真实体散射上限。0 只计算消光。
+    #[serde(default)]
+    pub photon_max_volume_scatters: usize,
     /// 光源端离散积分的波长范围和步长，单位 nm；Hero 相机固定为 380..780 nm。
     pub wavelength_min_nm: f64,
     pub wavelength_max_nm: f64,
@@ -109,6 +114,7 @@ impl Default for RenderSetting {
             spectral_packet_size: default_spectral_packet_size(),
             mode: IorMode::Dispersion,
             photon_max_events: default_photon_max_events(),
+            photon_max_volume_scatters: 0,
             wavelength_min_nm: 380.0,
             wavelength_max_nm: 780.0,
             wavelength_step_nm: 10.0,
@@ -171,6 +177,11 @@ impl RenderSetting {
     pub fn validate(&self) -> Result<(), String> {
         if !(1..=1024).contains(&self.photon_max_events) {
             return Err("render.photon_max_events 必须位于 1..1024".into());
+        }
+        if self.photon_max_volume_scatters > MAX_PHOTON_VOLUME_SCATTERS {
+            return Err(format!(
+                "render.photon_max_volume_scatters 不能超过 {MAX_PHOTON_VOLUME_SCATTERS}"
+            ));
         }
         if self.width == 0 || self.height == 0 || self.samples_per_pixel_axis == 0 {
             return Err("render 的图片尺寸和每轴采样数必须大于零".into());

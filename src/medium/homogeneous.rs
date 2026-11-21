@@ -7,7 +7,7 @@ use super::{
 };
 use crate::geometry::ray::Ray;
 use nalgebra::Vector3;
-use rand::{Rng, RngCore};
+use rand::{Rng, RngCore, distr::Open01};
 
 #[derive(Debug, Clone)]
 pub struct HomogeneousMedium {
@@ -89,7 +89,7 @@ impl Medium for HomogeneousMedium {
 
     /// While scattering is allowed, sample s=-ln(1-u)/σt. Implicit absorption gives
     /// σs Tr(s)/(σt Tr(s))=σs/σt; survival gives Tr(L)/Tr(L)=1.
-    /// At the camera's volume budget, exclude further events using deterministic Tr.
+    /// At the volume budget, exclude further events using deterministic Tr.
     /// Pure absorption is evaluated analytically to avoid binary survival noise.
     fn sample_segment(
         &self,
@@ -116,7 +116,8 @@ impl Medium for HomogeneousMedium {
                 weight: beer_lambert(sigma_t, exit - enter),
             });
         }
-        let distance = -(-rng.random::<f64>()).ln_1p() / sigma_t;
+        let u: f64 = rng.sample(Open01);
+        let distance = -(-u).ln_1p() / sigma_t;
         Ok(if distance < exit - enter {
             MediumSample {
                 position: Some(ray.at(enter + distance)),

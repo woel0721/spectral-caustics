@@ -86,6 +86,9 @@ struct PhotonPlan {
     nodes: Vec<(f64, f64)>,
     normalization: f64,
     spectral_extinction: bool,
+    spectral_caustics: bool,
+    uncached_target: Option<usize>,
+    ground: usize,
 }
 impl PhotonPlan {
     fn source_density(&self, nm: f64) -> f64 {
@@ -146,7 +149,16 @@ impl PhotonPlan {
             .spectral_normalization(&nodes)
             .ok_or("invalid source spectrum")?;
         let spectral_extinction = job.scene.has_wavelength_dependent_medium_coefficients();
-        let fixed_tracer = if spectral_extinction && settings.mode == IorMode::Constant {
+        let volume_enabled = settings.photon_max_volume_scatters > 0;
+        let spectral_caustics = target.is_some()
+            && (settings.mode == IorMode::Dispersion
+                || spectral_extinction
+                || (volume_enabled && job.scene.has_wavelength_dependent_medium()));
+        // Extinction alone can be replayed on fixed geometry. With volume
+        // sampling, spectral coefficients or g can change the path itself.
+        let cache_spectral_segments =
+            spectral_extinction && settings.mode == IorMode::Constant && !volume_enabled;
+        let fixed_tracer = if cache_spectral_segments {
             photon_tracer(job, settings, target, ground, nodes[0].0)?
         } else {
             None
@@ -222,6 +234,13 @@ impl PhotonPlan {
             nodes,
             normalization,
             spectral_extinction,
+            spectral_caustics,
+            uncached_target: if cache_spectral_segments {
+                None
+            } else {
+                target
+            },
+            ground,
             blocks: blocks?,
         })
     }
@@ -283,26 +302,19 @@ struct IrradianceLayer {
     direct: Option<Vec<f64>>,
     caustics: Vec<f64>,
 }
-#[allow(clippy::too_many_arguments)]
 fn irradiance_layer(
     job: &RenderJob,
     settings: &RenderSetting,
     plan: &PhotonPlan,
-    target: Option<usize>,
-    ground: usize,
     nm: f64,
     direct: bool,
     parallel: bool,
 ) -> Result<IrradianceLayer, PhotonError> {
-    let tracer = if plan.spectral_extinction && settings.mode == IorMode::Constant {
-        None // Landings and spectral segments are already cached.
-    } else {
-        photon_tracer(job, settings, target, ground, nm)?
-    };
+    let tracer = photon_tracer(job, settings, plan.uncached_target, plan.ground, nm)?;
     let transmittance = |segment: PhotonSegment| segment.transmittance(&job.scene, nm);
     let dimensions = [plan.width, plan.height];
     let receiver = &job.photon.receiver;
-    let block = |source: &EmissionBlock| -> Result<IrradianceLayer, &'static str> {
+    let block = |source: &EmissionBlock| -> Result<IrradianceLayer, PhotonError> {
         let count = plan.width * plan.height;
         let mut caustics = vec![0.0; count];
         for (landing, segments) in &source.paths.landings {
@@ -331,16 +343,20 @@ fn irradiance_layer(
                     None => transmittance(segment)?,
                 };
                 let state = PhotonPathState::new(segment.ray, segment.region, tracer.object_id, tr);
-                if let Some(landing) = tracer
-                    .trace_state(
+                let mut rng = event_rng(settings.seed, index);
+                let path = if settings.photon_max_volume_scatters == 0 {
+                    tracer.trace_state(job, state, Some(hit), &mut rng, transmittance)?
+                } else {
+                    tracer.trace_state_with_volume(
                         job,
                         state,
                         Some(hit),
-                        &mut event_rng(settings.seed, index),
-                        transmittance,
+                        nm,
+                        settings.photon_max_volume_scatters,
+                        &mut rng,
                     )?
-                    .landing()
-                {
+                };
+                if let Some(landing) = path.landing() {
                     deposit(
                         &mut caustics,
                         landing.position,
@@ -373,7 +389,7 @@ fn irradiance_layer(
         direct: direct.then(|| vec![0.0; plan.width * plan.height]),
         caustics: vec![0.0; plan.width * plan.height],
     };
-    let mut merge = |part: Result<IrradianceLayer, &'static str>| -> Result<(), PhotonError> {
+    let mut merge = |part: Result<IrradianceLayer, PhotonError>| -> Result<(), PhotonError> {
         let part = part?;
         for (a, b) in result.caustics.iter_mut().zip(part.caustics) {
             *a += b;
@@ -434,7 +450,6 @@ fn integrate_xyz_impl(
     direct: bool,
 ) -> Result<SpectralLighting, PhotonError> {
     let plan = PhotonPlan::new(job, settings, target, ground, direct)?;
-    let target = target.filter(|&id| job.supports_ideal_caustics(id));
     let mut caustics = Framebuffer::new(plan.width, plan.height)?;
     let mut direct_frame = direct
         .then(|| Framebuffer::new(plan.width, plan.height))
@@ -444,8 +459,7 @@ fn integrate_xyz_impl(
         .light
         .white_xyz(&plan.nodes)
         .ok_or("source XYZ overflow")?;
-    let spectral_caustics =
-        target.is_some() && (settings.mode == IorMode::Dispersion || plan.spectral_extinction);
+    let spectral_caustics = plan.spectral_caustics;
     let spectral_direct = direct && plan.spectral_extinction;
     for (i, &(nm, width)) in plan.nodes.iter().enumerate() {
         if i > 0 && !spectral_caustics && !spectral_direct {
@@ -455,8 +469,6 @@ fn integrate_xyz_impl(
             job,
             settings,
             &plan,
-            target,
-            ground,
             nm,
             direct && (i == 0 || spectral_direct),
             true,
@@ -511,20 +523,8 @@ pub fn integrate_spectral(
         .and_then(|n| n.checked_mul(size_of::<f64>()))
         .filter(|&n| n <= isize::MAX as usize)
         .ok_or("atlas size overflow")?;
-    let constant = if settings.mode == IorMode::Constant && !plan.spectral_extinction {
-        Some(
-            irradiance_layer(
-                job,
-                settings,
-                &plan,
-                Some(target),
-                ground,
-                plan.nodes[0].0,
-                false,
-                true,
-            )?
-            .caustics,
-        )
+    let constant = if !plan.spectral_caustics {
+        Some(irradiance_layer(job, settings, &plan, plan.nodes[0].0, false, true)?.caustics)
     } else {
         None
     };
@@ -535,7 +535,7 @@ pub fn integrate_spectral(
             let mut layer = if let Some(g) = &constant {
                 g.clone()
             } else {
-                irradiance_layer(job, settings, &plan, Some(target), ground, nm, false, false)
+                irradiance_layer(job, settings, &plan, nm, false, false)
                     .map_err(|e| e.to_string())?
                     .caustics
             };

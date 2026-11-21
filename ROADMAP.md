@@ -7,7 +7,7 @@
 - Scene 只管理几何、材质、光源、环境、背景、可选有界介质（Box<dyn Medium>，内置 Homogeneous/Grid 实现）和求交。Medium 与 Material 同为 Send + Sync trait；可序列化的 MediumConfig 仍用枚举选择内置类型。相机及积分器选项由 RenderJob 组合。
 - Renderer 只有 `render(&RenderJob)` 一个高层入口，负责 RGB / Spectral Pipeline 与 Rayon 调度。
 - Camera Integrator 的共享路径循环处理 RGB 和标量光谱数值；两种像素 / 波长采样器保留独立随机流。
-- Photon Integrator 使用 Forward。XYZ 和 Eλ 共用发射、首交点、界面抽样和沉积。Constant 复用落点与线段几何，Dispersion 从首交点逐波长续追。
+- Photon Integrator 使用 Forward。XYZ 和 Eλ 共用发射、首交点、界面抽样和沉积。会改变光路的光谱参数（色散、开启体散射时的光谱介质）从首交点逐波长续追。
 - optics/interface 显式区分 Radiance 的折射率平方权重和 Photon Flux 权重。
 - Framebuffer、线性颜色转换、曝光 / ACES / PNG 分开。Diagnostics 独立 feature，正常构建没有诊断缓冲。
 
@@ -25,7 +25,7 @@
 - 相机体散射预算 `max_volume_scatters=0..1024`，缺省 1，雾示例 8；达到预算或纯吸收时仅积累解析 Tr。预算独立于表面事件，体散射不新增 RR；体照明与其后续表面贡献归入 Direct。表面/介质阴影均含 Tr，几何仍为二值遮挡。
 - 均匀介质使用指数自由程。GridMedium 按 8³ 细体素块缓存最大密度，并按路径波长计算局部 Majorant。Delta Tracking 携带剩余光学深度跨块，以局部 sigma_s/sigma_t 做隐式吸收。所有块的最大密度相同时合并为单段。网格相机和阴影段的确定性消光使用精确细体素 DDA。纯吸收、零有效散射、预算耗尽或仅经过零上界块时无需抽样。[Phase 3.3 基准记录](docs/medium_majorant_benchmark.md)
 - 均匀介质、显式网格和程序化雾的吸收和散射系数可配置成覆盖 380–780 nm 的分段线性曲线。Hero/Packet 的自由程、表面阴影和体照明按路径波长查询。 [均匀介质配置](docs/rendering_guide.md#均匀介质与多次体散射) · [网格配置](docs/rendering_guide.md#非均匀密度网格)
-- XYZ 焦散、Eλ 图集与独立光子 Direct 预览对有限命中段应用逐波长 Tr，记录未发生体散射的通量。JSON 和 Rust API 可为一个封闭玻璃绑定内部介质，相机与光子在起射点分类，透射穿过绑定界面时切换区域。光子的 Air/Glass 状态负责折射率侧别。有限相机预算丢弃更高阶体散射。Ratio Tracking 已提供独立的 `GridMedium` 查询与 Release 对照实验，渲染中的确定性透射率使用精确 DDA。层次化空块跳跃和介质发光仍未实现。局部 Majorant 仍有块遍历与缓存开销，均匀场景不保证加速。
+- `render.photon_max_volume_scatters` 默认 0。开启后，XYZ 焦散与 Eλ 图集均可接收玻璃事件之后发生体散射并到达地面的通量，独立光子 Direct 预览按源到地面的逐波长 Tr 计算。JSON 和 Rust API 可为一个封闭玻璃绑定内部介质，相机与光子在起射点分类，透射穿过绑定界面时切换区域。光子的 Air/Glass 状态负责折射率侧别。有限体散射预算丢弃更高阶体散射。Ratio Tracking 已提供独立的 `GridMedium` 查询与 Release 对照实验，渲染中的确定性透射率使用精确 DDA。层次化空块跳跃和介质发光仍未实现。局部 Majorant 仍有块遍历与缓存开销，均匀场景不保证加速。
 
 ## 有意删除
 

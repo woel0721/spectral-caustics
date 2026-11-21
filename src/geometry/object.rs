@@ -29,7 +29,7 @@ pub trait Hittable: Send + Sync {
     fn intersect(&self, ray: &Ray) -> Option<Hit>;
 
     /// Query a boundary from a volume vertex, where a nearby positive hit can be real.
-    /// Built-in closed geometry accepts any strictly positive distance for this query.
+    /// Built-in dielectric geometry and ground accept any strictly positive distance.
     fn intersect_from_volume(&self, ray: &Ray) -> Option<Hit> {
         self.intersect(ray)
     }
