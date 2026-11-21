@@ -927,7 +927,7 @@ fn delta_tracking_missed_and_empty_segments_do_not_consume_rng() {
 }
 
 #[test]
-fn delta_tracking_reports_unrepresentable_distance_instead_of_stalling() {
+fn grid_tracking_reports_unrepresentable_distance_instead_of_stalling() {
     let mut c = config([1; 3], vec![1.0]);
     c.sigma_a_base = 0.0.into();
     c.sigma_s_base = 1e300.into();
@@ -935,6 +935,11 @@ fn delta_tracking_reports_unrepresentable_distance_instead_of_stalling() {
     let r = ray([-1.0, 1.0, 1.0], [1.0, 0.0, 0.0]);
     assert!(
         grid.sample_segment(&r, 10.0, 550.0, true, &mut StdRng::seed_from_u64(1))
+            .unwrap_err()
+            .contains("cannot advance")
+    );
+    assert!(
+        grid.estimate_transmittance_ratio(&r, 10.0, 550.0, &mut StdRng::seed_from_u64(1))
             .unwrap_err()
             .contains("cannot advance")
     );
@@ -952,6 +957,11 @@ fn delta_tracking_reports_unrepresentable_distance_instead_of_stalling() {
         )
         .unwrap_err()
         .contains("finite ray distances")
+    );
+    assert!(
+        grid.estimate_transmittance_ratio(&r, f64::INFINITY, 550.0, &mut StdRng::seed_from_u64(1))
+            .unwrap_err()
+            .contains("finite ray distances")
     );
 }
 
