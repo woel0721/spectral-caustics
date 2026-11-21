@@ -11,7 +11,7 @@ fn config(resolution: [usize; 3], densities: Vec<f64>) -> GridMediumConfig {
         densities,
         sigma_a_base: 0.25.into(),
         sigma_s_base: 0.75.into(),
-        g: 0.0,
+        g: 0.0.into(),
     }
 }
 

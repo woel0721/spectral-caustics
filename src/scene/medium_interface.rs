@@ -33,15 +33,20 @@ impl Scene {
     }
 
     pub(crate) fn has_wavelength_dependent_medium(&self) -> bool {
-        self.medium
-            .as_deref()
-            .into_iter()
-            .chain(
-                self.objects
-                    .iter()
-                    .filter_map(|object| object.medium_interface.as_ref()?.interior.as_deref()),
-            )
-            .any(Medium::is_wavelength_dependent)
+        self.media().any(Medium::is_wavelength_dependent)
+    }
+
+    pub(crate) fn has_wavelength_dependent_medium_coefficients(&self) -> bool {
+        self.media()
+            .any(Medium::has_wavelength_dependent_coefficients)
+    }
+
+    fn media(&self) -> impl Iterator<Item = &dyn Medium> {
+        self.medium.as_deref().into_iter().chain(
+            self.objects
+                .iter()
+                .filter_map(|object| object.medium_interface.as_ref()?.interior.as_deref()),
+        )
     }
 
     pub fn bind_medium_interface(

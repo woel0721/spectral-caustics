@@ -65,7 +65,7 @@ fn field(n: usize, name: &str) -> GridMediumConfig {
         densities,
         sigma_a_base: 0.05.into(),
         sigma_s_base: 0.95.into(),
-        g: 0.7,
+        g: 0.7.into(),
     }
 }
 

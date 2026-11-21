@@ -15,7 +15,10 @@ use spectral_caustics::{
     },
     light::{DiskAreaLight, Light},
     material::lambertian::Lambertian,
-    medium::{HomogeneousMedium, HomogeneousMediumConfig, Medium, MediumCoefficient, MediumConfig},
+    medium::{
+        HgAnisotropy, HomogeneousMedium, HomogeneousMediumConfig, Medium, MediumCoefficient,
+        MediumConfig,
+    },
     optics::dispersion::IorMode,
     renderer::Renderer,
 };
@@ -27,7 +30,7 @@ fn slab(a: f64, s: f64, g: f64) -> Box<dyn Medium> {
             max_m: [100.0, 100.0, 2.0],
             sigma_a: a.into(),
             sigma_s: s.into(),
-            g,
+            g: g.into(),
         })
         .unwrap(),
     )
@@ -98,7 +101,7 @@ fn spectral_slab_matches_beer_lambert_and_single_scattering() {
             samples: vec![[380.0, 0.1], [580.0, 0.5], [780.0, 0.2]],
         },
         sigma_s: 0.0.into(),
-        g: 0.0,
+        g: 0.0.into(),
     };
     for (nm, sigma_a) in [(480.0, 0.3_f64), (580.0, 0.5), (680.0, 0.35)] {
         let mut vacuum = CameraPathState::spectral(ray(3.0), nm, 0).unwrap();
@@ -144,6 +147,64 @@ fn spectral_slab_matches_beer_lambert_and_single_scattering() {
 }
 
 #[test]
+fn spectral_hg_changes_slab_lighting_and_continuation_at_equal_extinction() {
+    use spectral_caustics::spectrum::emission::d65_spectrum;
+    use std::f64::consts::PI;
+
+    let mut job = empty();
+    job.camera_options.max_volume_scatters = 1;
+    let sigma_a = 0.2;
+    let sigma_s = 0.5;
+    let sigma_t: f64 = sigma_a + sigma_s;
+    let slab = HomogeneousMediumConfig {
+        min_m: [-100.0, -100.0, 1.0],
+        max_m: [100.0, 100.0, 2.0],
+        sigma_a: sigma_a.into(),
+        sigma_s: sigma_s.into(),
+        g: HgAnisotropy::Curve {
+            samples: vec![[380.0, -0.6], [580.0, 0.0], [780.0, 0.6]],
+        },
+    };
+    job.scene.medium = Some(Box::new(HomogeneousMedium::try_from(&slab).unwrap()));
+    for sign in [-1.0, 1.0] {
+        let mut rng = StdRng::seed_from_u64(120);
+        let mut sum = [0.0; 2];
+        let mut changed_direction = false;
+        let count = 20_000;
+        for _ in 0..count {
+            let mut blue_rng = rng.clone();
+            let mut blue = CameraPathState::spectral(ray(3.0), 480.0, 0).unwrap();
+            let mut red = CameraPathState::spectral(ray(3.0), 680.0, 0).unwrap();
+            let sun = (Vector3::z() * sign, 1.0);
+            trace(&job, &mut blue, sun, &mut blue_rng);
+            trace(&job, &mut red, sun, &mut rng);
+            assert_eq!(blue.volume_scatters, red.volume_scatters);
+            assert_eq!(blue.ray.origin, red.ray.origin);
+            assert_eq!(blue_rng.next_u64(), rng.next_u64());
+            changed_direction |= blue.ray.direction != red.ray.direction;
+            sum[0] += blue.radiance.direct;
+            sum[1] += red.radiance.direct;
+        }
+        assert!(changed_direction);
+        for (mean, (nm, g)) in sum.into_iter().zip([(480.0, -0.3), (680.0, 0.3)]) {
+            let denominator: f64 = 1.0 + g * g + 2.0 * g * sign;
+            let phase = (1.0 - g * g) / (4.0 * PI * denominator.powf(1.5));
+            let integral = if sign > 0.0 {
+                (1.0 - (-2.0 * sigma_t).exp()) / (2.0 * sigma_t)
+            } else {
+                (-sigma_t).exp()
+            };
+            let expected = d65_spectrum(nm).unwrap() * phase * sigma_s * integral;
+            let mean = mean / f64::from(count);
+            assert!(
+                (mean / expected - 1.0).abs() < 0.025,
+                "{nm} nm, {sign}: {mean}/{expected}"
+            );
+        }
+    }
+}
+
+#[test]
 fn pure_absorption_attenuates_camera_and_surface_sun_once_in_rgb_and_spectral() {
     let mut j = empty();
     j.scene.background_color = Vector3::new(0.4, 0.6, 0.8);
@@ -181,7 +242,7 @@ fn volume_sun_matches_the_independent_single_scattering_slab_integral() {
                 .medium
                 .as_ref()
                 .unwrap()
-                .phase()
+                .phase(550.0)
                 .eval(Vector3::z(), sun.0);
             let expected = if sign > 0.0 {
                 phase * 0.5 / 1.4 * (1.0 - (-1.4_f64).exp())
@@ -254,7 +315,7 @@ fn uniform_environment_multiple_scattering_recovers_energy_without_counting_phas
             max_m: [1.0; 3],
             sigma_a: 0.0.into(),
             sigma_s: 0.7.into(),
-            g: 0.0,
+            g: 0.0.into(),
         })
         .unwrap(),
     ));
@@ -456,7 +517,7 @@ fn volume_light_visibility_includes_geometry_and_finite_disk_distance() {
             max_m: [1.0, 1.0, 5.0],
             sigma_a: 10.0.into(),
             sigma_s: 0.0.into(),
-            g: 0.0,
+            g: 0.0.into(),
         })
         .unwrap(),
     ));
@@ -564,7 +625,7 @@ fn configured_fog_repeats_across_rgb_hero_packet_mis_threads_and_zero_density() 
 fn medium_json_defaults_roundtrip_and_invalid_values_fail_building() {
     let mut c = Config::load("configs/homogeneous_fog.json").unwrap();
     assert_eq!(Config::from_json(&c.to_json().unwrap()).unwrap(), c);
-    homogeneous_config(&mut c).g = 1.0;
+    homogeneous_config(&mut c).g = 1.0.into();
     assert!(c.validate().is_err());
     assert!(c.build().is_err());
     let old = Config::load("configs/default.json").unwrap();

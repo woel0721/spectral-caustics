@@ -156,14 +156,16 @@ git diff --check
 "sigma_s": { "samples": [[380, 0.8], [450, 0.55], [550, 0.24], [650, 0.12], [780, 0.06]] }
 ```
 
-每个节点是 `[波长 nm, 系数 m⁻¹]`。节点须按正的有限波长严格递增，覆盖 380–780 nm，系数须非负有限。曲线的总消光须给插值和密度缩放的舍入留出有限浮点范围。Hero 和 Packet 使用各自路径的波长计算自由程、隐式吸收权重、表面阴影及体照明阴影。体散射改变方向，沿用入射波长和配置中的 HG 参数 `g`。同一写法也可用于 `medium_interface.interior`。配置非恒定曲线时，相机使用 `render.camera_mode: "spectral"`。光子焦散和独立光子预览按发射波长节点计算消光。
+每个系数节点是 `[波长 nm, 系数 m⁻¹]`。节点须按正的有限波长严格递增，覆盖 380–780 nm，系数须非负有限。曲线的总消光须给插值和密度缩放的舍入留出有限浮点范围。Hero 和 Packet 使用各自路径的波长计算自由程、隐式吸收权重、表面阴影及体照明阴影。
+
+三种介质的 `g` 接受数字或分段线性曲线，例如 `"g": {"samples": [[380, -0.6], [550, 0.0], [780, 0.75]]}`。节点波长遵循同一规则，第二个值是无量纲的各向异性参数，每个值都须严格位于 `(-1, 1)`。同一写法也可用于 `medium_interface.interior`。任一系数或 `g` 随波长变化时，相机须设置 `render.camera_mode` 为 `"spectral"`。平坦曲线等效于对应数字。光子焦散和独立光子预览的波长依赖由消光系数决定。
 
 每条当前射线先求最近表面，再把盒交区间裁到该距离（miss 则裁到盒出口）。以下系数均在当前波长求值。体散射次数尚未达到 `scene.max_volume_scatters` 且 `sigma_s > 0` 时，用 `s = -ln(1-u)/sigma_t` 抽取区间入口后的自由程。如果 `s < L`，距离 PDF 是 `sigma_t exp(-sigma_t s)`，因此 `sigma_s Tr(s) / pdf = sigma_s/sigma_t`，把这项乘入 throughput；这是隐式吸收，每次散射均按单次散射反照率缩权。若自由程越过区间，离散生存概率为 `Tr(L)`，其权重 `Tr(L)/Tr(L)=1`，不能再乘衰减。达到预算后使用解析 `exp(-sigma_t L)`，不再采样自由程；`sigma_s=0` 时无论预算多少都使用解析 `exp(-sigma_a L)`。解析分支不消费介质 RNG。
 
 介质点的 `wo=-ray.direction`、`wi` 都远离交点，HG 为
 `p(wo,wi)=(1-g²)/[4π(1+g²+2g wo·wi)^(3/2)]`。`g=0` 为 `1/(4π)`；正 g 的峰在 `wi=-wo`，表示前向散射。采样通过逆 CDF 绕 `-wo` 生成方向，返回 `p=pdf`，续追 throughput 乘 `p/pdf=1`，没有表面余弦。方向约定及公式参考 [PBRT Phase Functions](https://pbr-book.org/4ed/Volume_Scattering/Phase_Functions)。
 
-散射点直接照明复用太阳、圆盘和渐变/HDRI 环境：太阳乘 `p Li V Tr`，圆盘乘 `p Le cos_light V Tr/(r² pdf_area)` 并按样本数平均，环境将 HG 和环境方向采样用 Balance/Power MIS 组合。环境配额沿用 `environment_samples`，圆盘沿用 `light_samples`；HG/环境均覆盖整球，没有接收面余弦。所有阴影段保持几何二值遮挡（包括玻璃），并乘盒内实际长度的 `Tr`；圆盘阴影裁到采样光源位置。已有表面的太阳、环境、圆盘 NEE 同样受到介质衰减。
+相机在每次真实体散射时按路径波长取一次 `g(λ)`，直接照明、方向 PDF 和续追采样共用该相函数。散射点直接照明复用太阳、圆盘和渐变/HDRI 环境：太阳乘 `p Li V Tr`，圆盘乘 `p Le cos_light V Tr/(r² pdf_area)` 并按样本数平均，环境将 HG 和环境方向采样用 Balance/Power MIS 组合。环境配额沿用 `environment_samples`，圆盘沿用 `light_samples`；HG/环境均覆盖整球，没有接收面余弦。所有阴影段保持几何二值遮挡（包括玻璃），并乘盒内实际长度的 `Tr`；圆盘阴影裁到采样光源位置。已有表面的太阳、环境、圆盘 NEE 同样受到介质衰减。
 
 每个散射点均调用上述体照明，HG 抽取的续追射线回到同一个 Camera Path 循环，可再次体散射、命中并着色表面、继续既有 BSDF 路径。`CameraPathState.volume_scatters` 只记录体散射次数，预算放在 `CameraOptions.max_volume_scatters` 中，不占表面 `max_diffuse_bounces` 或 Delta 预算；Diagnostics 的表面事件计数也不统计体散射。预算缺省为 1，0 关闭体散射但保留总消光，值越大允许的散射阶数越高。体散射不新增 RR，现有表面 RR 保持原规则。体散射及其后续表面贡献归入 Direct，不读取 Caustics。每次 HG 续追直接逃逸环境均由当地环境 NEE/MIS 负责，不再次累加；经过后续表面 Delta 链逃逸时仍沿用既有规则。
 
@@ -215,7 +217,7 @@ Photon Path 在发射点分类。位于选中的已绑定玻璃内部时，以 `
 
 运行时接口为 `Medium: Send + Sync` trait，`HomogeneousMedium` 与 `GridMedium` 各自实现它，`Scene.medium` 保存 `Option<Box<dyn Medium>>`。这与 `Material` 的接口和所有权方式一致，自定义介质可以直接 `Some(Box::new(medium))` 放入 Scene，无需修改内置类型列表。
 
-相机通过 `sample_segment(ray, max_distance, wavelength_nm, allow_scattering, rng)` 取得可选的真实散射点和已补偿权重，通过 `transmittance_ray(ray, max_distance, wavelength_nm)` 查询段透射率，通过 `phase()` 取得相函数。内部算法的封装原则见 [架构职责边界](../.agents/architecture.md#当前物理范围)。检查介质数据可用 `density_at(position)`、`coefficients_at(position, wavelength_nm)` 和 `sigma_t_majorant(wavelength_nm)`。直接在具体类型上调用 trait 方法需导入 `medium::Medium`。局部系数由 `MediumCoefficients` 返回，其 `sigma_t()` 为吸收与散射系数之和。
+相机通过 `sample_segment(ray, max_distance, wavelength_nm, allow_scattering, rng)` 取得可选的真实散射点和已补偿权重，通过 `transmittance_ray(ray, max_distance, wavelength_nm)` 查询段透射率，通过 `phase(wavelength_nm)` 取得相函数。内部算法的封装原则见 [架构职责边界](../.agents/architecture.md#当前物理范围)。检查介质数据可用 `density_at(position)`、`coefficients_at(position, wavelength_nm)` 和 `sigma_t_majorant(wavelength_nm)`。直接在具体类型上调用 trait 方法需导入 `medium::Medium`。局部系数由 `MediumCoefficients` 返回，其 `sigma_t()` 为吸收与散射系数之和。
 
 JSON 的 `scene.medium` 根据互斥字段区分均匀、显式网格和程序化网格配置，由 `medium::from_config` 构造 `Box<dyn Medium>`。均匀配置使用 `sigma_a/sigma_s`，显式网格使用 `resolution/densities/sigma_a_base/sigma_s_base`，程序化网格将 `densities` 换成 `procedural` 对象。最小双层网格配置如下。
 

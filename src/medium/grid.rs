@@ -1,8 +1,9 @@
 //! Piecewise constant density on a world-space axis-aligned grid. No interpolation.
 use super::{
-    GridMediumConfig, Medium, MediumCoefficients, MediumSample, ProceduralMediumConfig,
+    GridMediumConfig, HgAnisotropy, Medium, MediumCoefficients, MediumSample,
+    ProceduralMediumConfig,
     bounds::{box_interval, contains, valid_bounds},
-    phase::HenyeyGreenstein,
+    phase::{HenyeyGreenstein, SpectralHg},
     procedural,
     spectral::SpectralCoefficients,
 };
@@ -77,7 +78,7 @@ pub struct GridMedium {
     base: SpectralCoefficients,
     max_density: f64,
     majorants: MajorantGrid,
-    phase: HenyeyGreenstein,
+    phase: SpectralHg,
 }
 
 impl TryFrom<&GridMediumConfig> for GridMedium {
@@ -88,7 +89,7 @@ impl TryFrom<&GridMediumConfig> for GridMedium {
             c.max_m,
             c.resolution,
             SpectralCoefficients::new(&c.sigma_a_base, &c.sigma_s_base)?,
-            c.g,
+            &c.g,
             |_| Ok(Cow::Borrowed(&c.densities)),
         )
     }
@@ -102,7 +103,7 @@ impl TryFrom<&ProceduralMediumConfig> for GridMedium {
             c.max_m,
             c.resolution,
             SpectralCoefficients::new(&c.sigma_a_base, &c.sigma_s_base)?,
-            c.g,
+            &c.g,
             |count| procedural::generate(c.resolution, count, c.procedural.seed).map(Cow::Owned),
         )
     }
@@ -114,7 +115,7 @@ impl GridMedium {
         max: [f64; 3],
         resolution: [usize; 3],
         base: SpectralCoefficients,
-        g: f64,
+        g: &HgAnisotropy,
         density_source: impl FnOnce(usize) -> Result<Cow<'a, [f64]>, String>,
     ) -> Result<Self, String> {
         if !valid_bounds(min, max) {
@@ -124,7 +125,7 @@ impl GridMedium {
             .iter()
             .try_fold(1usize, |n, &r| if r == 0 { None } else { n.checked_mul(r) })
             .ok_or("grid resolution must be positive and not overflow")?;
-        let phase = HenyeyGreenstein::new(g)?;
+        let phase = SpectralHg::new(g)?;
         let densities = density_source(count)?;
         if count != densities.len() {
             return Err("grid resolution must match densities length".into());
@@ -226,6 +227,10 @@ impl GridMedium {
 
 impl Medium for GridMedium {
     fn is_wavelength_dependent(&self) -> bool {
+        self.has_wavelength_dependent_coefficients() || self.phase.is_wavelength_dependent()
+    }
+
+    fn has_wavelength_dependent_coefficients(&self) -> bool {
         self.base.is_wavelength_dependent()
     }
 
@@ -248,8 +253,8 @@ impl Medium for GridMedium {
             .scaled_by_density(self.max_density)
             .sigma_t()
     }
-    fn phase(&self) -> HenyeyGreenstein {
-        self.phase
+    fn phase(&self, wavelength_nm: f64) -> HenyeyGreenstein {
+        self.phase.at(wavelength_nm)
     }
     /// Piecewise-majorant tracking samples real extinction with density σt(x) Tr(x).
     /// Null collisions only advance this internal walk. Implicit absorption gives

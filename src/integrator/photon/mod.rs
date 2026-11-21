@@ -28,7 +28,7 @@ pub fn trace_photon(
     max_events: usize,
     rng: &mut dyn rand::RngCore,
 ) -> Result<PhotonPathResult, &'static str> {
-    let medium_wavelength_nm = if job.scene.has_wavelength_dependent_medium() {
+    let medium_wavelength_nm = if job.scene.has_wavelength_dependent_medium_coefficients() {
         let nm = wavelength_nm.ok_or("wavelength-dependent photon media require a wavelength")?;
         if !(WAVELENGTH_MIN_NM..=WAVELENGTH_MAX_NM).contains(&nm) {
             return Err("photon medium wavelength must be in 380–780 nm");

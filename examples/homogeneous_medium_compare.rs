@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 max_m,
                 sigma_a: (a * density).into(),
                 sigma_s: (s * density).into(),
-                g,
+                g: g.into(),
             })
         });
         c.render.output_path = directory.join(name).join("camera_combined.png");

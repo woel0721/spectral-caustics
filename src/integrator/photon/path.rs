@@ -388,7 +388,7 @@ mod tests {
                     max_m,
                     sigma_a: sigma_a.into(),
                     sigma_s: sigma_s.into(),
-                    g: 0.7,
+                    g: 0.7.into(),
                 })
                 .unwrap(),
             )
@@ -400,7 +400,7 @@ mod tests {
             densities: vec![1.0, 3.0],
             sigma_a_base: 0.2.into(),
             sigma_s_base: 0.3.into(),
-            g: 0.7,
+            g: 0.7.into(),
         })
         .unwrap();
         // Half a metre per outside leg and three crossings of the full glass slab.
@@ -450,7 +450,7 @@ mod tests {
             fn sigma_t_majorant(&self, _: f64) -> f64 {
                 unreachable!()
             }
-            fn phase(&self) -> HenyeyGreenstein {
+            fn phase(&self, _: f64) -> HenyeyGreenstein {
                 unreachable!()
             }
             fn sample_segment(
@@ -769,7 +769,7 @@ mod tests {
                     max_m: [10.0; 3],
                     sigma_a: sigma_a.into(),
                     sigma_s: 0.0.into(),
-                    g: 0.0,
+                    g: 0.0.into(),
                 })
                 .unwrap(),
             )

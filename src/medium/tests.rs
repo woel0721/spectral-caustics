@@ -8,7 +8,7 @@ fn medium(a: f64, s: f64) -> HomogeneousMedium {
         max_m: [1.0; 3],
         sigma_a: a.into(),
         sigma_s: s.into(),
-        g: 0.0,
+        g: 0.0.into(),
     })
     .unwrap()
 }
@@ -55,7 +55,7 @@ fn beer_lambert_and_configuration_validate_physical_parameters() {
         max_m: [1.0; 3],
         sigma_a: 0.0.into(),
         sigma_s: 0.1.into(),
-        g: 0.7,
+        g: 0.7.into(),
     };
     for bad in [
         HomogeneousMediumConfig {
@@ -72,11 +72,11 @@ fn beer_lambert_and_configuration_validate_physical_parameters() {
             ..c.clone()
         },
         HomogeneousMediumConfig {
-            g: 1.0,
+            g: 1.0.into(),
             ..c.clone()
         },
         HomogeneousMediumConfig {
-            g: -1.0,
+            g: (-1.0).into(),
             ..c.clone()
         },
         HomogeneousMediumConfig {
@@ -99,7 +99,7 @@ fn homogeneous_curves_reject_bad_knots_and_combined_overflow() {
         max_m: [1.0; 3],
         sigma_a: 0.2.into(),
         sigma_s: 0.1.into(),
-        g: 0.0,
+        g: 0.0.into(),
     };
     for samples in [
         vec![],
@@ -259,6 +259,104 @@ fn hg_inverse_cdf_keeps_the_zero_sample_endpoint_near_extreme_asymmetry() {
     }
 }
 
+#[test]
+fn spectral_hg_configuration_rejects_invalid_values_and_wavelengths() {
+    use phase::SpectralHg;
+
+    for invalid in [-1.1, -1.0, 1.0, 1.1, f64::NAN, f64::INFINITY] {
+        assert!(SpectralHg::new(&invalid.into()).is_err());
+        let curve = HgAnisotropy::Curve {
+            samples: vec![[380.0, -0.4], [780.0, invalid]],
+        };
+        assert!(SpectralHg::new(&curve).is_err());
+    }
+    for samples in [
+        vec![],
+        vec![[381.0, -0.4], [780.0, 0.4]],
+        vec![[380.0, -0.4], [779.0, 0.4]],
+        vec![[380.0, -0.4], [380.0, 0.0], [780.0, 0.4]],
+        vec![[380.0, -0.4], [500.0, 0.0], [480.0, 0.0], [780.0, 0.4]],
+        vec![[0.0, -0.4], [780.0, 0.4]],
+        vec![[380.0, -0.4], [f64::NAN, 0.0], [780.0, 0.4]],
+    ] {
+        assert!(SpectralHg::new(&HgAnisotropy::Curve { samples }).is_err());
+    }
+
+    let limit = 1.0_f64.next_down();
+    let upper_nm = 780.0_f64.next_up();
+    let half_ulp = (upper_nm - 780.0) * 0.5;
+    // Both wavelength differences round to 780, so t=1 even below the knot.
+    for sign in [-1.0, 1.0] {
+        let curve = HgAnisotropy::Curve {
+            samples: vec![[half_ulp, -0.5 * sign], [upper_nm, limit * sign]],
+        };
+        let phase = SpectralHg::new(&curve).unwrap();
+        let hg = phase.at(780.0);
+        assert_eq!(hg.g(), limit * sign);
+        let pdf = hg.pdf(Vector3::z(), -Vector3::z() * sign);
+        assert!(pdf.is_finite() && pdf > 0.0);
+    }
+
+    let flat = SpectralHg::new(&HgAnisotropy::Curve {
+        samples: vec![[380.0, -0.4], [780.0, -0.4]],
+    })
+    .unwrap();
+    assert!(!flat.is_wavelength_dependent());
+    assert_eq!(flat.at(550.0).g(), -0.4);
+}
+
+#[test]
+fn configured_spectral_hg_selects_the_direction_distribution_for_each_wavelength() {
+    use serde_json::json;
+
+    for fields in [
+        json!({"sigma_a": 0.2, "sigma_s": 0.3}),
+        json!({"sigma_a_base": 0.2, "sigma_s_base": 0.3, "resolution": [2, 2, 2],
+               "densities": vec![1.0; 8]}),
+        json!({"sigma_a_base": 0.2, "sigma_s_base": 0.3, "resolution": [2, 2, 2],
+               "procedural": {"seed": 42}}),
+    ] {
+        let mut config = json!({
+            "min_m": [0.0, 0.0, 0.0], "max_m": [1.0, 1.0, 1.0],
+            "g": {"samples": [[380.0, -0.6], [580.0, 0.0], [780.0, 0.8]]}
+        });
+        config
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let config = serde_json::from_value(config).unwrap();
+        let medium = from_config(&config).unwrap();
+        assert!(medium.is_wavelength_dependent());
+        assert!(!medium.has_wavelength_dependent_coefficients());
+        let ray = ray([0.5, 0.5, 2.0], [0.0, 0.0, -1.0]);
+        let tr = medium.transmittance_ray(&ray, 3.0, 380.0);
+        let majorant = medium.sigma_t_majorant(380.0);
+        for (nm, g) in [
+            (380.0, -0.6),
+            (480.0, -0.3),
+            (580.0, 0.0),
+            (680.0, 0.4),
+            (780.0, 0.8),
+        ] {
+            assert_eq!(medium.transmittance_ray(&ray, 3.0, nm), tr);
+            assert_eq!(medium.sigma_t_majorant(nm), majorant);
+            let phase = medium.phase(nm);
+            assert_eq!(phase.g(), g);
+            let wo = Vector3::z();
+            let mut rng = StdRng::seed_from_u64(42);
+            let count = 20_000;
+            let mut mean_cosine = 0.0;
+            for _ in 0..count {
+                let s = phase.sample(wo, &mut rng);
+                assert_eq!(s.pdf, phase.eval(wo, s.wi));
+                assert_eq!(s.p, phase.pdf(wo, s.wi));
+                mean_cosine += (-wo).dot(&s.wi) / f64::from(count);
+            }
+            assert!((mean_cosine - g).abs() < 0.02, "{nm} nm: {mean_cosine}");
+        }
+    }
+}
+
 fn config(resolution: [usize; 3], densities: Vec<f64>) -> GridMediumConfig {
     GridMediumConfig {
         min_m: [0.0; 3],
@@ -267,7 +365,7 @@ fn config(resolution: [usize; 3], densities: Vec<f64>) -> GridMediumConfig {
         densities,
         sigma_a_base: 0.2.into(),
         sigma_s_base: 0.3.into(),
-        g: 0.4,
+        g: 0.4.into(),
     }
 }
 
@@ -319,7 +417,7 @@ fn grid_queries_use_world_coordinates_x_fastest_and_closed_outer_bounds() {
         m.coefficients_at(c.max_m.into(), 550.0).sigma_t(),
         m.sigma_t_majorant(550.0)
     );
-    assert_eq!(m.phase().g(), 0.4);
+    assert_eq!(m.phase(550.0).g(), 0.4);
 }
 
 #[test]
@@ -337,7 +435,7 @@ fn spectral_validation_rejects_rounding_overflow_between_finite_knots() {
         max_m: [1.0; 3],
         sigma_a: curve(0.0, near_max),
         sigma_s: curve(f64::MAX, complement),
-        g: 0.0,
+        g: 0.0.into(),
     };
     let grid = GridMediumConfig {
         sigma_a_base: curve(0.0, near_max * 0.5),
@@ -387,7 +485,7 @@ fn grid_validation_rejects_invalid_density_shape_bounds_and_scaled_overflow() {
             ..c.clone()
         },
         GridMediumConfig {
-            g: 1.0,
+            g: 1.0.into(),
             ..c.clone()
         },
         GridMediumConfig {
@@ -564,7 +662,7 @@ fn uniform_grid_degenerates_to_homogeneous_for_axes_edges_corners_and_oblique_ra
             max_m: c.max_m,
             sigma_a: (density * 0.2).into(),
             sigma_s: (density * 0.3).into(),
-            g: c.g,
+            g: c.g.clone(),
         })
         .unwrap();
         for r in [
@@ -636,7 +734,7 @@ fn dda_matches_independent_sum_of_individual_voxel_slab_integrals() {
                         max_m: bounds(1),
                         sigma_a: (density * 0.2).into(),
                         sigma_s: (density * 0.3).into(),
-                        g: c.g,
+                        g: c.g.clone(),
                     })
                     .unwrap();
                     if let Some((a, b)) = voxel.interval(&r, distance) {
@@ -785,7 +883,7 @@ fn delta_tracking_uniform_grid_and_homogeneous_have_the_same_distance_statistics
         max_m: c.max_m,
         sigma_a: (1.7 * 0.2).into(),
         sigma_s: (1.7 * 0.3).into(),
-        g: c.g,
+        g: c.g.clone(),
     })
     .unwrap();
     let r = ray([-2.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
@@ -864,7 +962,7 @@ fn homogeneous_trait_dispatch_preserves_queries_and_free_flight_rng() {
         max_m: [2.0; 3],
         sigma_a: 0.2.into(),
         sigma_s: 0.3.into(),
-        g: 0.7,
+        g: 0.7.into(),
     })
     .unwrap();
     let m: &dyn Medium = &homogeneous;

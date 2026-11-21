@@ -9,8 +9,8 @@ use spectral_caustics::geometry::{ground::Ground, ray::Ray, vertical_prism::Vert
 use spectral_caustics::integrator::photon::{integrate_xyz, trace_photon};
 use spectral_caustics::material::{dielectric::Dielectric, lambertian::Lambertian};
 use spectral_caustics::medium::{
-    GridMediumConfig, HomogeneousMedium, HomogeneousMediumConfig, Medium, MediumCoefficient,
-    MediumConfig,
+    GridMediumConfig, HgAnisotropy, HomogeneousMedium, HomogeneousMediumConfig, Medium,
+    MediumCoefficient, MediumConfig,
 };
 use spectral_caustics::optics::dispersion::{Cauchy, IorMode};
 use spectral_caustics::renderer::Renderer;
@@ -147,7 +147,7 @@ fn two_layer_photon_scene() -> (Config, GridMediumConfig, f64) {
         densities: vec![1.0, 3.0],
         sigma_a_base: 0.2.into(),
         sigma_s_base: 0.3.into(),
-        g: 0.7,
+        g: 0.7.into(),
     };
     let tr = (-0.5 * (0.1 + 0.3) * 1.0_f64.hypot(0.45)).exp();
     (c, grid, tr)
@@ -206,6 +206,40 @@ fn photon_xyz_atlas_and_direct_preview_apply_the_same_analytic_extinction() {
                 assert!((a * tr - e).abs() <= 2e-12 * a);
             }
         }
+        let mut spectral_hg = grid.clone();
+        spectral_hg.g = HgAnisotropy::Curve {
+            samples: vec![[380.0, -0.6], [780.0, 0.7]],
+        };
+        c.scene.medium = Some(MediumConfig::Grid(spectral_hg));
+        let hg = c.build().unwrap();
+        let hg_xyz = xyz(&hg);
+        same(&fog_xyz.caustics, &hg_xyz.caustics);
+        same(
+            fog_xyz.direct.as_ref().unwrap(),
+            hg_xyz.direct.as_ref().unwrap(),
+        );
+        let hg_atlas = map(&hg, &c.render, 2);
+        for layer in 0..hg_atlas.wavelength_samples().len() {
+            let fog = fog_atlas.layer_irradiance(layer).unwrap();
+            let hg = hg_atlas.layer_irradiance(layer).unwrap();
+            assert!(fog.iter().zip(hg).all(|(a, b)| a.to_bits() == b.to_bits()));
+        }
+        let land = |job| {
+            let ray = Ray::new(Vector3::z() * 3.0, -Vector3::z()).unwrap();
+            trace_photon(
+                job,
+                ray,
+                None,
+                IorMode::Constant,
+                4,
+                &mut support::TransmissionRng,
+            )
+            .unwrap()
+            .landing()
+            .unwrap()
+        };
+        assert_eq!(land(&fog), land(&hg));
+
         let mut spectral_grid = grid.clone();
         spectral_grid.sigma_a_base = MediumCoefficient::Curve {
             samples: vec![[380.0, 0.9], [780.0, 0.1]],
@@ -240,7 +274,7 @@ fn bound_five_micron_plate_attenuates_xyz_atlas_and_direct_from_each_launch_side
                 max_m: [10.0; 3],
                 sigma_a: sigma_a.into(),
                 sigma_s: 0.0.into(),
-                g: 0.0,
+                g: 0.0.into(),
             })
             .unwrap(),
         )
@@ -426,7 +460,7 @@ fn constant_ior_spectral_absorption_preserves_landings_and_filters_xyz_and_atlas
                     samples: vec![[380.0, blue], [780.0, red]],
                 },
                 sigma_s: 0.0.into(),
-                g: 0.0,
+                g: 0.0.into(),
             })
             .unwrap(),
         )
