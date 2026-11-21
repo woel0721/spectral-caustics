@@ -88,7 +88,6 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         config.render.width = size.parse()?;
         config.render.height = config.render.width;
     }
-    config.validate()?;
     let directory = args
         .get(2)
         .map(PathBuf::from)
