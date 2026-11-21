@@ -10,7 +10,7 @@ use super::{
 use crate::geometry::ray::Ray;
 use nalgebra::Vector3;
 use rand::{Rng, RngCore, distr::Open01};
-use std::borrow::Cow;
+use std::{borrow::Cow, ops::ControlFlow};
 
 mod dda;
 #[cfg(test)]
@@ -223,6 +223,100 @@ impl GridMedium {
         }
         (-tau).exp()
     }
+
+    /// Estimate beam transmittance with one Ratio Tracking sample in [0, 1].
+    /// Uses total extinction at a wavelength in 380–780 nm and clips the ray
+    /// to the medium and the given maximum distance in metres.
+    /// Use [Medium::transmittance_ray] for deterministic integration.
+    pub fn estimate_transmittance_ratio(
+        &self,
+        ray: &Ray,
+        max_distance: f64,
+        wavelength_nm: f64,
+        rng: &mut dyn RngCore,
+    ) -> Result<f64, String> {
+        let Some(interval) = self.interval(ray, max_distance) else {
+            return Ok(1.0);
+        };
+        let base = self.base.at(wavelength_nm);
+        let maximum = base.scaled_by_density(self.max_density).sigma_t();
+        if !maximum.is_finite() {
+            return Err("grid density-scaled extinction overflows".into());
+        }
+        if maximum == 0.0 {
+            return Ok(1.0);
+        }
+
+        let mut weight = 1.0;
+        let stopped = self.visit_tracking_candidates(ray, interval, base, rng, |_, c, m, _| {
+            // Subtract before dividing to retain precision near the majorant.
+            weight *= (m - c.sigma_t()) / m;
+            if weight == 0.0 {
+                return ControlFlow::Break(0.0);
+            }
+            ControlFlow::Continue(())
+        })?;
+        Ok(stopped.unwrap_or(weight))
+    }
+
+    fn visit_tracking_candidates<T>(
+        &self,
+        ray: &Ray,
+        (enter, exit): (f64, f64),
+        base: MediumCoefficients,
+        rng: &mut dyn RngCore,
+        mut visit: impl FnMut(Vector3<f64>, MediumCoefficients, f64, &mut dyn RngCore) -> ControlFlow<T>,
+    ) -> Result<Option<T>, String> {
+        if !enter.is_finite() || !exit.is_finite() {
+            return Err("grid collision interval exceeds finite ray distances".into());
+        }
+        // Carry unit-exponential optical depth, not metres, across rate changes.
+        // Draw lazily: even a nonempty ray may only cross zero-majorant blocks.
+        let mut remaining = None;
+        for segment in MajorantDda::new(self, ray, enter, exit, self.majorants.stride) {
+            // Use identical arithmetic for block and voxel extinction so rounding
+            // preserves the bound. Only the density differs.
+            let majorant = base
+                .scaled_by_density(self.majorants.max_density_at(segment.cell))
+                .sigma_t();
+            if majorant == 0.0 {
+                continue;
+            }
+            let mut t = segment.start;
+            loop {
+                let tau = remaining.get_or_insert_with(|| {
+                    let u: f64 = rng.sample(Open01);
+                    -(-u).ln_1p()
+                });
+                let depth = majorant * (segment.end - t);
+                if *tau >= depth {
+                    *tau -= depth;
+                    break;
+                }
+                let next = t + *tau / majorant;
+                if next <= t || next >= segment.end {
+                    return Err(
+                        "grid collision distance cannot advance inside segment at f64 precision"
+                            .into(),
+                    );
+                }
+                t = next;
+                let position = ray.at(t);
+                if position.iter().any(|v| !v.is_finite()) {
+                    return Err("grid collision position overflows".into());
+                }
+                let coefficients = base.scaled_by_density(self.density_at(position));
+                if coefficients.sigma_t() > majorant {
+                    return Err("rounded grid collision lies outside its local majorant".into());
+                }
+                if let ControlFlow::Break(result) = visit(position, coefficients, majorant, rng) {
+                    return Ok(Some(result));
+                }
+                remaining = None;
+            }
+        }
+        Ok(None)
+    }
 }
 
 impl Medium for GridMedium {
@@ -284,63 +378,26 @@ impl Medium for GridMedium {
                 weight: self.transmittance_interval(ray, enter, exit, base),
             });
         }
-        if !enter.is_finite() || !exit.is_finite() {
-            return Err("grid collision interval exceeds finite ray distances".into());
-        }
-        // Carry unit-exponential optical depth, not metres, across rate changes.
-        // Draw lazily: even a nonempty ray may only cross zero-majorant blocks.
-        let mut remaining = None;
-        for segment in MajorantDda::new(self, ray, enter, exit, self.majorants.stride) {
-            // Use identical arithmetic for block and voxel extinction so rounding
-            // preserves the bound. Only the density differs.
-            let majorant = base
-                .scaled_by_density(self.majorants.max_density_at(segment.cell))
-                .sigma_t();
-            if majorant == 0.0 {
-                continue;
-            }
-            let mut t = segment.start;
-            loop {
-                let tau = remaining.get_or_insert_with(|| {
-                    let u: f64 = rng.sample(Open01);
-                    -(-u).ln_1p()
-                });
-                let depth = majorant * (segment.end - t);
-                if *tau >= depth {
-                    *tau -= depth;
-                    break;
-                }
-                let next = t + *tau / majorant;
-                if next <= t || next >= segment.end {
-                    return Err(
-                        "grid collision distance cannot advance inside segment at f64 precision"
-                            .into(),
-                    );
-                }
-                t = next;
-                let position = ray.at(t);
-                if position.iter().any(|v| !v.is_finite()) {
-                    return Err("grid collision position overflows".into());
-                }
-                let coefficients = base.scaled_by_density(self.density_at(position));
+        let collision = self.visit_tracking_candidates(
+            ray,
+            (enter, exit),
+            base,
+            rng,
+            |position, coefficients, majorant, rng| {
                 let sigma_t = coefficients.sigma_t();
-                if sigma_t > majorant {
-                    return Err("rounded grid collision lies outside its local majorant".into());
-                }
                 if rng.random::<f64>() < sigma_t / majorant {
-                    return Ok(MediumSample {
+                    return ControlFlow::Break(MediumSample {
                         position: Some(position),
                         weight: coefficients.sigma_s / sigma_t,
                     });
                 }
-                // Null events stay inside this method, without a candidate cap.
-                remaining = None;
-            }
-        }
-        Ok(MediumSample {
+                ControlFlow::Continue(())
+            },
+        )?;
+        Ok(collision.unwrap_or(MediumSample {
             position: None,
             weight: 1.0,
-        })
+        }))
     }
     fn transmittance_ray(&self, ray: &Ray, max_distance: f64, wavelength_nm: f64) -> f64 {
         self.interval(ray, max_distance)

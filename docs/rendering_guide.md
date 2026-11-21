@@ -251,13 +251,16 @@ JSON 的 `scene.medium` 根据互斥字段区分均匀、显式网格和程序�
 
 只有真实散射才返回给相机，调用 HG 和 NEE，并占用 `max_volume_scatters`。当前波长在全网格的有效散射系数为零，或预算耗尽时，返回精确细体素 DDA 消光。空区间返回权重 1。这些分支和只穿过零上界块的路径均无需抽样。Packet 各 lane 持有各自的介质 RNG 副本。
 
-构造保证每块 Majorant 覆盖其局部消光；碰撞距离无法以 f64 表达在段内、区间/位置溢出或舍入后查询到的消光超出当前局部上界时返回错误，不推进 epsilon、夹紧接受概率或静默截断。细体素与粗块复用私有 DDA 步进，阴影与确定性分支仍使用精确 Tr，未引入 Ratio Tracking。改变分块布局会改变随机数消耗，版本间比较统计分布；同一设置/seed 在 1/2/4 线程下仍逐位一致。
+构造保证每块 Majorant 覆盖其局部消光；碰撞距离无法以 f64 表达在段内、区间/位置溢出或舍入后查询到的消光超出当前局部上界时返回错误，不推进 epsilon、夹紧接受概率或静默截断。细体素与粗块复用私有 DDA 步进，阴影与确定性分支使用精确 Tr。改变分块布局会改变随机数消耗，版本间比较统计分布；同一设置/seed 在 1/2/4 线程下仍逐位一致。
+
+`GridMedium::estimate_transmittance_ratio(ray, max_distance, wavelength_nm, rng)` 提供独立的随机透射率查询。它与 Delta Tracking 共用局部 Majorant 候选点生成，每个候选点把透射率权重乘以 `1 - sigma_t(x) / M_b`，返回一个 [0, 1] 内的样本。空段和零上界块无需抽样，权重为零时提前结束。当前渲染路径使用精确 DDA 消光和 Delta Tracking 碰撞采样。对照实验用同一条射线查询精确 `Medium::transmittance_ray`，按多个 seed 统计均值和方差，并在 Release 下比较查询耗时。
 
 ```sh
 cargo run --release --locked -- configs/grid_fog.json
 cargo test --locked --lib medium::
 cargo test --locked --test grid_medium
 cargo test --locked --test grid_scattering
+cargo run --release --locked --example grid_ratio_tracking_benchmark
 
 # 七组对照，固定 seed=42；参数为 SPP、宽度、输出目录、模式
 cargo run --release --locked --example grid_medium_compare -- 256 384 output/grid_compare rgb

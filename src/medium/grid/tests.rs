@@ -299,6 +299,72 @@ fn ray_crossing_only_empty_blocks_does_not_consume_rng_despite_nonzero_global_bo
             .unwrap();
         assert!(sample.position.is_none());
         assert_eq!(sample.weight, 1.0);
+        assert_eq!(
+            grid.estimate_transmittance_ratio(&r, 40.0, 550.0, &mut rng)
+                .unwrap(),
+            1.0
+        );
+    }
+    assert_eq!(rng.next_u64(), untouched.next_u64());
+}
+
+#[test]
+fn ratio_tracking_matches_analytic_spectral_layers_across_vacuum_and_partial_blocks() {
+    let mut densities = vec![0.15; 8];
+    densities[0] = 0.6;
+    densities.extend([0.0; 8]);
+    densities.push(0.8);
+    let mut c = config([17, 1, 1], densities);
+    c.sigma_s_base = MediumCoefficient::Curve {
+        samples: vec![[380.0, 0.0], [780.0, 0.25]],
+    };
+    let grid = GridMedium::try_from(&c).unwrap();
+    // Both rays include x in [0.5, 17], with clipping at different ends.
+    let rays = [
+        (ray([0.5, 0.5, 0.5], [1.0, 0.0, 0.0]), 20.0),
+        (ray([18.0, 0.5, 0.5], [-1.0, 0.0, 0.0]), 17.5),
+    ];
+    let samples = 20_000;
+    for (nm, base_extinction) in [(380.0, 0.25_f64), (780.0, 0.5)] {
+        let depth = base_extinction * (0.5 * 0.6 + 7.0 * 0.15 + 0.8);
+        let expected = (-depth).exp();
+        // For Poisson candidates, Var[Tr_hat] = Tr² expm1(∫ σt²/M ds).
+        let squared_depth = base_extinction * (0.5 * 0.6 + 7.0 * 0.15 * 0.15 / 0.6 + 0.8);
+        let variance = expected.powi(2) * squared_depth.exp_m1();
+        for (ray, limit) in &rays {
+            close(grid.transmittance_ray(ray, *limit, nm), expected);
+            let mut sum = 0.0;
+            let mut saw_fraction = false;
+            for seed in 0..samples {
+                let mut rng = StdRng::seed_from_u64(seed);
+                let weight = grid
+                    .estimate_transmittance_ratio(ray, *limit, nm, &mut rng)
+                    .unwrap();
+                assert!((0.0..=1.0).contains(&weight));
+                saw_fraction |= weight > 0.0 && weight < 1.0;
+                sum += weight;
+            }
+            assert!(saw_fraction);
+            let mean = sum / samples as f64;
+            let tolerance = 6.0 * (variance / samples as f64).sqrt();
+            assert!((mean - expected).abs() < tolerance, "{mean} vs {expected}");
+        }
+    }
+}
+
+#[test]
+fn ratio_tracking_returns_one_without_rng_for_empty_segments_and_vacuum() {
+    let solid = GridMedium::try_from(&config([1; 3], vec![1.0])).unwrap();
+    let vacuum = GridMedium::try_from(&config([1; 3], vec![0.0])).unwrap();
+    let ray = ray([-1.0, 0.5, 0.5], [1.0, 0.0, 0.0]);
+    let mut rng = StdRng::seed_from_u64(2);
+    let mut untouched = rng.clone();
+    for (grid, distance) in [(&solid, 1.0), (&vacuum, 3.0)] {
+        assert_eq!(
+            grid.estimate_transmittance_ratio(&ray, distance, 550.0, &mut rng)
+                .unwrap(),
+            1.0
+        );
     }
     assert_eq!(rng.next_u64(), untouched.next_u64());
 }
