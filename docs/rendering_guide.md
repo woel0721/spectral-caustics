@@ -275,6 +275,13 @@ cargo run --release --locked --example grid_medium_compare -- 256 384 output/gri
 cargo run --release --locked -- configs/local_procedural_fog.json
 ```
 
+[光谱程序化雾](../configs/spectral_procedural_fog.json) 使用同一密度场，分别配置吸收和散射曲线。`verify` 检查轴向探针的 Beer–Lambert 透射率，并输出三个图像区域在八组 seed 下的线性 XYZ 和色度。固定波长参考对同一组单波长辐亮度分别做 5 nm 和 2.5 nm 梯形积分。`render` 输出 Hero 和 Packet 各自的 0/1/4/8 次体散射图、无雾图及可重跑配置。两种模式的 `camera_spp` 均为每像素总光谱路径数。
+
+```sh
+cargo run --release --locked --features diagnostics --example spectral_fog_compare -- verify output/spectral_fog_compare
+cargo run --release --locked --features diagnostics --example spectral_fog_compare -- render output/spectral_fog_compare
+```
+
 ### 网格对照与性能基准
 
 `grid_medium_compare` 输出 `homogeneous`、`uniform_grid`、`layered_single`、`layered_multiple`、`clumped_extinction`、`clumped_single`、`clumped_multiple` 七组，每组包含三个分量 PNG 和可重跑的 `config.json`。均匀/分层/团块密度均归一到体积平均密度 1，系数、相机、光源、曝光与 seed 相同；散射预算分别为 0/1/8。分层与团块网格为 12×10×8 的分块常数场。均匀网格与均匀介质的随机数消耗不同，比较统计分布与能量，不要求低 SPP 图像逐位相同。`hero` 使用单波长，`packet` 使用四波长 CRN，SPP 须能被 4 整除。
