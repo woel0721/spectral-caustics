@@ -842,6 +842,16 @@ fn ground_irradiance_sampling_preserves_world_axes_centers_and_bilinear_weights(
     for (index, pixel) in map.pixels.iter_mut().enumerate() {
         *pixel = unit * (index + 1) as f64;
     }
+    let scene = neutral_ground_scene(0.8);
+    let lighting = SpectralLighting {
+        direct: None,
+        caustics: map,
+        receiver,
+        light_wi: Vector3::z(),
+        sun_irradiance_xyz: Vector3::zeros(),
+    };
+    let bound = super::ground::bind_spectral_ground_lighting(&scene, &lighting).unwrap();
+    let map = &lighting.caustics;
     for (position, scale) in [
         (Vector3::new(-1.0, 0.5, 0.0), 1.0),
         (Vector3::new(1.0, 0.5, 0.0), 2.0),
@@ -851,8 +861,9 @@ fn ground_irradiance_sampling_preserves_world_axes_centers_and_bilinear_weights(
         (Vector3::new(-0.5, 0.25, 7.0), 1.75),
         (Vector3::new(-2.0, -1.0, 0.0), 3.0),
     ] {
-        let actual = sample_ground_irradiance(&map, &receiver, position).unwrap();
+        let actual = sample_ground_irradiance(map, &receiver, position).unwrap();
         assert!((actual - unit * scale).norm() < 1e-12);
+        assert_eq!(bound.sample_irradiance(position), Some(actual));
     }
     for position in [
         Vector3::new(2.0, 0.0, 0.0),
@@ -860,10 +871,12 @@ fn ground_irradiance_sampling_preserves_world_axes_centers_and_bilinear_weights(
         Vector3::new(-2.01, 0.0, 0.0),
     ] {
         assert_eq!(
-            sample_ground_irradiance(&map, &receiver, position),
+            sample_ground_irradiance(map, &receiver, position),
             Some(Vector3::zeros())
         );
+        assert_eq!(bound.sample_irradiance(position), Some(Vector3::zeros()));
     }
+    assert!(bound.sample_irradiance(Vector3::repeat(f64::NAN)).is_none());
     let uniform = uniform_ground_map(unit);
     assert_eq!(
         sample_ground_irradiance(&uniform, &receiver, Vector3::new(-2.0, -1.0, 0.0)),

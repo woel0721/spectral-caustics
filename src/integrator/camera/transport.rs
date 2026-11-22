@@ -1,5 +1,5 @@
 //! The two camera number representations. Geometry, event order and estimators are shared.
-use super::ground::{GroundLighting, sample_ground_irradiance};
+use super::ground::GroundLighting;
 use crate::caustics::SpectralCausticsMap;
 use crate::{
     color::xyz_to_linear_srgb,
@@ -158,7 +158,8 @@ impl CameraTransport for Rgb {
         if let Caustics::Rgb(g) = map
             && hit.object_id == (g.object_id)
         {
-            let xyz = sample_ground_irradiance(g.irradiance, g.receiver, hit.coords)
+            let xyz = g
+                .sample_irradiance(hit.coords)
                 .ok_or("caustic query overflow")?;
             xyz_to_linear_srgb(xyz * (g.rho / std::f64::consts::PI)).ok_or("caustic RGB overflow")
         } else {

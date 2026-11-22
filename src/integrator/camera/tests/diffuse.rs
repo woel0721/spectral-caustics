@@ -465,16 +465,12 @@ fn secondary_bound_ground_uses_sun_once_checker_once_and_no_caustics() {
         result,
         Vector3::new(0.2, 0.5, 0.8).component_mul(&b_rgb) * 0.3,
     );
-    // Poisoned caustics cannot be read on a secondary hit.
-    let poison = Framebuffer {
-        width: 1,
-        height: 1,
-        pixels: vec![Vector3::repeat(f64::NAN)],
+    // Removing the bright map leaves secondary lighting identical.
+    let dark_lighting = SpectralLighting {
+        caustics: Framebuffer::new(1, 1).unwrap(),
+        ..lighting
     };
-    let poisoned = GroundLighting {
-        irradiance: &poison,
-        ..ground
-    };
+    let dark_ground = bind_spectral_ground_lighting(&scene, &dark_lighting).unwrap();
     close(
         continuation_radiance(
             &scene,
@@ -482,7 +478,7 @@ fn secondary_bound_ground_uses_sun_once_checker_once_and_no_caustics() {
             material,
             -Vector3::z(),
             sun(),
-            Some(&poisoned),
+            Some(&dark_ground),
             &mut SequenceRng::new(&[0.25, 0.0]),
         )
         .unwrap(),

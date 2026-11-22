@@ -11,14 +11,20 @@ use nalgebra::Vector3;
 use std::error::Error;
 use std::f64::consts::PI;
 
-/// 一次相机渲染中只读的地面绑定；反射率由现有材质 evaluate 接口读取一次。
+/// 一次 RGB 相机渲染中使用的已校验地面焦散图及光照参数。
 pub struct GroundLighting<'a> {
-    pub(super) irradiance: &'a Framebuffer,
-    pub(super) receiver: &'a GroundReceiver,
+    irradiance: &'a Framebuffer,
+    receiver: &'a GroundReceiver,
     pub(super) object_id: usize,
     pub(super) rho: f64,
     pub(super) light_wi: Vector3<f64>,
     pub(super) sun_irradiance_xyz: Vector3<f64>,
+}
+
+impl GroundLighting<'_> {
+    pub(super) fn sample_irradiance(&self, position: Vector3<f64>) -> Option<Vector3<f64>> {
+        interpolate_ground_irradiance::<false>(self.irradiance, self.receiver, position)
+    }
 }
 
 /// 按地面世界位置读取焦散图的 XYZ 辐照度，供 RGB 地面反射着色。
@@ -32,9 +38,18 @@ pub fn sample_ground_irradiance(
     receiver: &GroundReceiver,
     position: Vector3<f64>,
 ) -> Option<Vector3<f64>> {
-    if !valid_ground_map_layout(irradiance, receiver)
-        || !position.iter().all(|value| value.is_finite())
-    {
+    if !valid_ground_map_layout(irradiance, receiver) {
+        return None;
+    }
+    interpolate_ground_irradiance::<true>(irradiance, receiver, position)
+}
+
+fn interpolate_ground_irradiance<const CHECK_PIXELS: bool>(
+    irradiance: &Framebuffer,
+    receiver: &GroundReceiver,
+    position: Vector3<f64>,
+) -> Option<Vector3<f64>> {
+    if !position.iter().all(|value| value.is_finite()) {
         return None;
     }
     let Some((x, y)) = ground_to_pixel(position, irradiance.width, irradiance.height, receiver)
@@ -47,7 +62,7 @@ pub fn sample_ground_irradiance(
             continue;
         }
         let pixel = irradiance.get(px, py)?;
-        if pixel.iter().any(|value| !value.is_finite() || *value < 0.0) {
+        if CHECK_PIXELS && pixel.iter().any(|value| !value.is_finite() || *value < 0.0) {
             return None;
         }
         xyz += pixel * weight;

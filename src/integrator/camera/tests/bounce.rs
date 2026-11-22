@@ -1,5 +1,5 @@
 //! Bounded diffuse depth, Russian Roulette and current transport invariants.
-use super::super::ground::GroundLighting;
+use super::super::ground::bind_spectral_ground_lighting;
 use super::super::path::russian_roulette;
 use super::super::types::CameraPathComponents;
 use super::super::types::CameraPathRngs;
@@ -12,6 +12,7 @@ use super::support::first_hit;
 use super::support::sun;
 use super::support::two_planes;
 use super::support::uniform_hdri;
+use crate::caustics::SpectralLighting;
 use crate::color::linear_srgb_to_xyz;
 use crate::config::Config;
 use crate::config::RenderJob;
@@ -541,19 +542,16 @@ fn deep_ground_hits_never_read_caustics() {
     use crate::film::Framebuffer;
     let mut scene = two_planes(Vector3::repeat(0.8), Vector3::repeat(0.7));
     scene.photon.ground_id = Some(0);
-    let map = Framebuffer {
-        width: 1,
-        height: 1,
-        pixels: vec![Vector3::repeat(f64::NAN)],
-    };
-    let ground = GroundLighting {
-        irradiance: &map,
-        receiver: &scene.photon.receiver,
-        object_id: 0,
-        rho: 0.8,
+    let mut map = Framebuffer::new(1, 1).unwrap();
+    map.pixels_mut()[0] = Vector3::repeat(1e9);
+    let lighting = SpectralLighting {
+        direct: None,
+        caustics: map,
+        receiver: scene.photon.receiver,
         light_wi: sun().0,
         sun_irradiance_xyz: linear_srgb_to_xyz(Vector3::repeat(2.0)).unwrap(),
     };
+    let ground = bind_spectral_ground_lighting(&scene, &lighting).unwrap();
     let hit = first_hit(&scene);
     let material = scene.scene.material(hit.material_id);
     {
