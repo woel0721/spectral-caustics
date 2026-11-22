@@ -995,3 +995,115 @@ fn homogeneous_trait_dispatch_preserves_queries_and_free_flight_rng() {
     }
     assert_eq!(a.next_u64(), b.next_u64());
 }
+
+#[test]
+fn medium_sample_validate_enforces_ray_segment_bounds_and_collinearity() {
+    let r = ray([0.0, 0.0, 2.0], [0.0, 0.0, -1.0]);
+    let sample = |position| MediumSample {
+        position: Some(position),
+        weight: 1.0,
+    };
+
+    // Valid interior collisions on finite and infinite segments.
+    sample(r.at(0.5)).validate(&r, 2.0, true).unwrap();
+    sample(r.at(1e-12)).validate(&r, 2.0, true).unwrap();
+    sample(r.at(100.0))
+        .validate(&r, f64::INFINITY, true)
+        .unwrap();
+
+    // Rounded endpoints keep their dedicated error message.
+    for end in [r.origin, r.at(2.0)] {
+        assert_eq!(
+            sample(end).validate(&r, 2.0, true).unwrap_err(),
+            "medium collision rounds to a ray segment endpoint"
+        );
+    }
+
+    // Behind origin, orthogonal at origin, or past the finite segment endpoint.
+    for out_of_segment in [
+        r.at(-0.5),
+        r.at(-1e-12),
+        Vector3::new(1.0, 0.0, 2.0),
+        r.at(2.0 + 1e-12),
+        r.at(5.0),
+    ] {
+        assert_eq!(
+            sample(out_of_segment).validate(&r, 2.0, true).unwrap_err(),
+            "medium collision lies outside the ray segment"
+        );
+    }
+
+    // Off-ray collisions with 0 < t < max_distance (axis-aligned and oblique).
+    for off_ray in [
+        Vector3::new(1e-12, 0.0, 1.0),
+        Vector3::new(100.0, -50.0, 1.0),
+    ] {
+        assert_eq!(
+            sample(off_ray).validate(&r, 2.0, true).unwrap_err(),
+            "medium collision lies off the ray"
+        );
+    }
+    let oblique = ray([1.0, 2.0, 3.0], [1.0, 2.0, -2.0]);
+    let perp = Vector3::new(2.0, -1.0, 0.0).normalize();
+    sample(oblique.at(1.25))
+        .validate(&oblique, 3.0, true)
+        .unwrap();
+    assert_eq!(
+        sample(oblique.at(1.25) + perp * 1e-11)
+            .validate(&oblique, 3.0, true)
+            .unwrap_err(),
+        "medium collision lies off the ray"
+    );
+
+    // Invalid segment length or degenerate ray direction.
+    for bad_max in [0.0, -1.0, f64::NAN] {
+        assert_eq!(
+            sample(r.at(0.5)).validate(&r, bad_max, true).unwrap_err(),
+            "invalid medium sample ray segment"
+        );
+    }
+    let bad_ray = Ray {
+        origin: Vector3::zeros(),
+        direction: Vector3::zeros(),
+    };
+    assert_eq!(
+        sample(Vector3::z())
+            .validate(&bad_ray, 2.0, true)
+            .unwrap_err(),
+        "invalid medium sample ray segment"
+    );
+    // Overflowing displacement is rejected cleanly.
+    let far_ray = ray([-1e308, 0.0, 0.0], [1.0, 0.0, 0.0]);
+    assert_eq!(
+        sample(Vector3::new(1e308, 0.0, 0.0))
+            .validate(&far_ray, f64::INFINITY, true)
+            .unwrap_err(),
+        "medium collision lies outside the ray segment"
+    );
+
+    // Large origin + oblique direction: legitimate samples near origin or max_distance pass.
+    let near_origin = ray([3.0, 0.0, 0.0], [1.0, 1.0, 0.0]);
+    let p_small = near_origin.at(1e-15);
+    assert_ne!(p_small, near_origin.origin);
+    sample(p_small).validate(&near_origin, 1.0, true).unwrap();
+
+    let far_origin = ray([1000.0, 0.0, 0.0], [1.0, 1.0, 0.0]);
+    let p_near_end = far_origin.at(1.0 - 1e-14);
+    assert_ne!(p_near_end, far_origin.at(1.0));
+    sample(p_near_end).validate(&far_origin, 1.0, true).unwrap();
+    assert_eq!(
+        sample(far_origin.at(1.0 + 1e-14))
+            .validate(&far_origin, 1.0, true)
+            .unwrap_err(),
+        "medium collision lies outside the ray segment"
+    );
+
+    // Slightly non-unit ray direction permitted by CameraPathState::validate still passes.
+    let slightly_unnormalized = Ray {
+        origin: Vector3::new(0.0, 0.0, 2.0),
+        direction: Vector3::new(0.0, 0.0, -(1.0 + 4e-7)),
+    };
+    sample(slightly_unnormalized.at(1.9999999))
+        .validate(&slightly_unnormalized, 2.0, true)
+        .unwrap();
+}
