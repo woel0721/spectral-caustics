@@ -1,4 +1,4 @@
-//! Snell 折射、折射率模式与 CIE/D65 光谱积分。
+//! 介质界面光学（Snell 折射、Fresnel 反射）与色散折射率模型。
 
 pub mod dispersion;
 pub mod interface;
@@ -62,5 +62,51 @@ mod tests {
                 assert!((direction.norm() - 1.0).abs() < 1e-12);
             }
         }
+    }
+
+    #[test]
+    fn critical_angle_fresnel_refract_and_sample_dielectric_agree() {
+        use super::interface::{DielectricEvent, fresnel_dielectric, sample_dielectric};
+        use rand::{SeedableRng, rngs::StdRng};
+
+        let eta_i = 1.0;
+        let eta_t = 0.4372308018907408_f64;
+        let cos_i = 0.8993493347292696_f64;
+        let sin_i = (1.0 - cos_i * cos_i).sqrt();
+        let direction = Vector3::new(sin_i, 0.0, -cos_i);
+        let normal = Vector3::z();
+        let f = fresnel_dielectric(cos_i, eta_i, eta_t).unwrap();
+        assert!(f < 1.0);
+        let refracted = refract(direction, normal, eta_i, eta_t).unwrap();
+        assert!(refracted.iter().all(|v| v.is_finite()));
+
+        struct MaxU64Rng;
+        impl rand::RngCore for MaxU64Rng {
+            fn next_u32(&mut self) -> u32 {
+                u32::MAX
+            }
+            fn next_u64(&mut self) -> u64 {
+                u64::MAX
+            }
+            fn fill_bytes(&mut self, dest: &mut [u8]) {
+                dest.fill(255);
+            }
+        }
+        let sample = sample_dielectric(direction, normal, eta_i, eta_t, &mut MaxU64Rng).unwrap();
+        assert_eq!(sample.event, DielectricEvent::Transmission);
+        assert!(sample.direction.iter().all(|v| v.is_finite()));
+
+        let mut rng = StdRng::seed_from_u64(1);
+        assert!(sample_dielectric(Vector3::repeat(f64::NAN), normal, 1.0, 1.5, &mut rng).is_none());
+        assert!(
+            sample_dielectric(
+                Vector3::new(0.0, 0.0, -1.0),
+                Vector3::new(0.0, 0.0, f64::INFINITY),
+                1.0,
+                1.5,
+                &mut rng,
+            )
+            .is_none()
+        );
     }
 }

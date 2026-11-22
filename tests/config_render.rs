@@ -22,13 +22,12 @@ use spectral_caustics::spectrum::rgb_reflectance;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
-use support::assert_framebuffer_bits_eq;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use support::{TempDir, assert_framebuffer_bits_eq};
 
-struct TemporaryDirectory(PathBuf);
+fn temp_directory() -> TempDir {
+    TempDir::new("config-render")
+}
 
 #[test]
 fn camera_spp_from_json_controls_camera_paths_without_changing_photon_rendering() {
@@ -70,28 +69,6 @@ fn camera_spp_from_json_controls_camera_paths_without_changing_photon_rendering(
     assert_eq!(multiple.pixels(), camera_image(&config).pixels());
 }
 
-impl TemporaryDirectory {
-    fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "config-render-{}-{stamp}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-}
-impl Drop for TemporaryDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
 fn small_config() -> Config {
     let mut config = Config::default();
     config.scene.environment = None; // 原有太阳/光子回归测试显式关闭天空。
@@ -110,7 +87,7 @@ fn render(config: &Config) -> Framebuffer {
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (Renderer::new(config.render.clone()).unwrap()).settings(),
+        &config.render,
     )
     .and_then(|images| images.combined())
     .unwrap()
@@ -137,14 +114,14 @@ fn sky_from_json_is_added_once_in_all_camera_entries_without_changing_sun_or_pho
         &unlit,
         unlit.photon.caustics_object_id,
         unlit.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .unwrap();
     let photons = spectral_caustics::integrator::photon::integrate_xyz(
         &unlit,
         unlit.photon.caustics_object_id,
         unlit.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .and_then(|images| images.combined())
     .unwrap();
@@ -168,7 +145,7 @@ fn sky_from_json_is_added_once_in_all_camera_entries_without_changing_sun_or_pho
             &scene,
             scene.photon.caustics_object_id,
             scene.photon.ground_id.expect("receiver"),
-            (renderer).settings()
+            renderer.settings()
         )
         .and_then(|images| images.combined())
         .unwrap()
@@ -178,7 +155,7 @@ fn sky_from_json_is_added_once_in_all_camera_entries_without_changing_sun_or_pho
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .unwrap();
     assert_eq!(sky_lighting.sun_irradiance_xyz, lighting.sun_irradiance_xyz);
@@ -246,14 +223,14 @@ fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .unwrap();
     let photon_total = spectral_caustics::integrator::photon::integrate_xyz(
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .and_then(|images| images.combined())
     .unwrap();
@@ -312,7 +289,7 @@ fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .unwrap();
     assert_eq!(
@@ -326,7 +303,7 @@ fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
             &scene,
             scene.photon.caustics_object_id,
             scene.photon.ground_id.expect("receiver"),
-            (renderer).settings()
+            renderer.settings()
         )
         .and_then(|images| images.combined())
         .unwrap()
@@ -363,7 +340,7 @@ fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
     {
         assert!((sum - d - c).norm() < 1e-12);
     }
-    let directory = TemporaryDirectory::new();
+    let directory = temp_directory();
     for (name, image) in [
         ("direct", images.direct),
         ("caustics", images.caustics),
@@ -373,7 +350,7 @@ fn split_lighting_flows_through_fresnel_camera_paths_and_three_debug_pngs() {
         spectral_caustics::output::save_png_with_exposure(
             &image,
             &path,
-            (renderer).settings().exposure,
+            renderer.settings().exposure,
         )
         .unwrap();
         let saved = image::open(path).unwrap();
@@ -398,7 +375,7 @@ fn checkerboard_modulates_all_camera_lighting_once_without_changing_irradiance()
         &reference,
         reference.photon.caustics_object_id,
         reference.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .and_then(|images| images.combined())
     .unwrap();
@@ -406,7 +383,7 @@ fn checkerboard_modulates_all_camera_lighting_once_without_changing_irradiance()
         &reference,
         reference.photon.caustics_object_id,
         reference.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .unwrap();
     let mut ground_map = Framebuffer::new(1, 1).unwrap();
@@ -463,7 +440,7 @@ fn checkerboard_modulates_all_camera_lighting_once_without_changing_irradiance()
                 &scene,
                 scene.photon.caustics_object_id,
                 scene.photon.ground_id.expect("receiver"),
-                (renderer).settings()
+                renderer.settings()
             )
             .and_then(|images| images.combined())
             .unwrap()
@@ -493,7 +470,7 @@ fn finite_ground_keeps_lighting_beyond_receiver_and_shows_sky_beyond_its_edge() 
         &config.build().unwrap(),
         config.build().unwrap().photon.caustics_object_id,
         config.build().unwrap().photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .unwrap();
     let e_caustics = Vector3::new(0.1, 0.2, 0.4);
@@ -556,7 +533,7 @@ fn ground_larger_than_receiver_preserves_photon_energy_maps() {
                 scene.photon.ground_id.expect("receiver"),
                 &spectral_caustics::config::render::RenderSetting {
                     mode,
-                    ..(renderer).settings().clone()
+                    ..renderer.settings().clone()
                 }
             )
             .and_then(|images| images.combined())
@@ -568,7 +545,7 @@ fn ground_larger_than_receiver_preserves_photon_energy_maps() {
                 infinite_reference.photon.ground_id.expect("receiver"),
                 &spectral_caustics::config::render::RenderSetting {
                     mode,
-                    ..(renderer).settings().clone()
+                    ..renderer.settings().clone()
                 }
             )
             .and_then(|images| images.combined())
@@ -580,14 +557,14 @@ fn ground_larger_than_receiver_preserves_photon_energy_maps() {
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .unwrap();
     let infinite = spectral_caustics::integrator::photon::integrate_xyz(
         &infinite_reference,
         infinite_reference.photon.caustics_object_id,
         infinite_reference.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .unwrap();
     assert_eq!(
@@ -609,7 +586,7 @@ fn traced_prism_caustics_light_the_geometric_glass_shadow_independently() {
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .unwrap();
     let span = lighting.receiver.max_m - lighting.receiver.min_m;
@@ -1037,7 +1014,7 @@ fn configured_thread_pool_and_block_counts_preserve_results_and_flux() {
         &config.build().unwrap(),
         config.build().unwrap().photon.caustics_object_id,
         config.build().unwrap().photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .and_then(|images| images.combined())
     .unwrap();
@@ -1048,7 +1025,7 @@ fn configured_thread_pool_and_block_counts_preserve_results_and_flux() {
         &config.build().unwrap(),
         config.build().unwrap().photon.caustics_object_id,
         config.build().unwrap().photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .and_then(|images| images.combined())
     .unwrap();
@@ -1070,24 +1047,18 @@ fn camera_pixels_are_reproducible_across_configured_thread_counts() {
     config.scene.environment = Some(Default::default());
     config.scene.environment_samples = 3;
     config.scene.ground_checkerboard = Some(Default::default());
+    config.render.camera_spp = 8;
     let scene = config.build().unwrap();
-    let renderer = Renderer::new(config.render.clone()).unwrap();
     let lighting = spectral_caustics::integrator::photon::integrate_xyz(
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        &config.render,
     )
     .unwrap();
     let reference = spectral_caustics::integrator::camera::integrate_rgb(
         &scene,
-        &spectral_caustics::config::render::RenderSetting {
-            width: (renderer).settings().width,
-            height: (renderer).settings().height,
-            camera_spp: 8,
-            seed: config.render.seed,
-            ..Default::default()
-        },
+        &config.render,
         Some(&lighting),
     )
     .unwrap();
@@ -1100,18 +1071,7 @@ fn camera_pixels_are_reproducible_across_configured_thread_counts() {
             assert_eq!(renderer.thread_count(), threads);
         }
         for _ in 0..2 {
-            let images = spectral_caustics::integrator::camera::integrate_rgb(
-                &scene,
-                &spectral_caustics::config::render::RenderSetting {
-                    width: (renderer).settings().width,
-                    height: (renderer).settings().height,
-                    camera_spp: 8,
-                    seed: config.render.seed,
-                    ..Default::default()
-                },
-                Some(&lighting),
-            )
-            .unwrap();
+            let images = renderer.render(&scene).unwrap();
             for (actual, expected) in [
                 (&images.direct, &reference.direct),
                 (&images.caustics, &reference.caustics),
@@ -1131,13 +1091,19 @@ fn camera_pixels_are_reproducible_across_configured_thread_counts() {
             }
         }
         // 相机线程池和逐像素 RNG 不影响已有光源通道。
-        let photons = spectral_caustics::integrator::photon::integrate_xyz(
-            &scene,
-            scene.photon.caustics_object_id,
-            scene.photon.ground_id.expect("receiver"),
-            (renderer).settings(),
-        )
-        .unwrap();
+        let run_photons = || {
+            spectral_caustics::integrator::photon::integrate_xyz(
+                &scene,
+                scene.photon.caustics_object_id,
+                scene.photon.ground_id.expect("receiver"),
+                renderer.settings(),
+            )
+            .unwrap()
+        };
+        let photons = match threads {
+            Some(n) => support::run_in_threads(n, run_photons),
+            None => run_photons(),
+        };
         assert_eq!(
             photons.direct.as_ref().unwrap().pixels(),
             lighting.direct.as_ref().unwrap().pixels()
@@ -1164,7 +1130,7 @@ fn camera_paths_run_inside_the_configured_render_pool() {
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (Renderer::new(config.render.clone()).unwrap()).settings(),
+        &config.render,
     )
     .unwrap();
     let observed = std::sync::Arc::new(AtomicUsize::new(0));
@@ -1185,8 +1151,8 @@ fn camera_paths_run_inside_the_configured_render_pool() {
             spectral_caustics::integrator::camera::integrate_rgb(
                 &scene,
                 &spectral_caustics::config::render::RenderSetting {
-                    width: (renderer).settings().width,
-                    height: (renderer).settings().height,
+                    width: renderer.settings().width,
+                    height: renderer.settings().height,
                     camera_spp: 0,
                     seed: 42,
                     ..Default::default()
@@ -1196,7 +1162,7 @@ fn camera_paths_run_inside_the_configured_render_pool() {
             .is_err()
         );
     }
-    // 让错误发生在像素路径内，验证并行迭代和 install 两层都保留错误消息。
+    // 让错误发生在像素路径内，验证并行迭代和 Renderer::render pool.install 两层都保留错误消息。
     scene.scene.environment = None;
     scene.scene.background_color = Vector3::repeat(f64::NAN);
     scene.camera = spectral_caustics::camera::Camera::from_config(
@@ -1208,36 +1174,16 @@ fn camera_paths_run_inside_the_configured_render_pool() {
         },
     )
     .unwrap();
-    let renderer = Renderer::new(config.render).unwrap();
-    let split_error = spectral_caustics::integrator::camera::integrate_rgb(
-        &scene,
-        &spectral_caustics::config::render::RenderSetting {
-            width: (renderer).settings().width,
-            height: (renderer).settings().height,
-            camera_spp: 8,
-            seed: 42,
-            ..Default::default()
-        },
-        Some(&lighting),
-    )
-    .err()
-    .unwrap()
-    .to_string();
-    let single_error = spectral_caustics::integrator::camera::integrate_rgb(
-        &scene,
-        &spectral_caustics::config::render::RenderSetting {
-            width: 24,
-            height: 16,
-            camera_spp: 8,
-            seed: 42,
-            ..Default::default()
-        },
-        None,
-    )
-    .map(|images| images.combined)
-    .err()
-    .unwrap()
-    .to_string();
+    config.render.camera_spp = 8;
+    config.render.seed = 42;
+    let renderer = Renderer::new(config.render.clone()).unwrap();
+    let split_error = renderer.render(&scene).err().unwrap().to_string();
+    let single_error =
+        spectral_caustics::integrator::camera::integrate_rgb(&scene, &config.render, None)
+            .map(|images| images.combined)
+            .err()
+            .unwrap()
+            .to_string();
     assert!(!split_error.is_empty());
     assert_eq!(split_error, single_error);
 }
@@ -1267,7 +1213,7 @@ fn runtime_rejects_unsupported_counts_and_invalid_receiver_height() {
 
 #[test]
 fn saving_and_building_reject_degenerate_or_miswound_prisms() {
-    let directory = TemporaryDirectory::new();
+    let directory = temp_directory();
     let path = directory.0.join("scene.json");
     let valid = Config::default();
     valid.build().unwrap();
@@ -1299,7 +1245,7 @@ fn saving_and_building_reject_degenerate_or_miswound_prisms() {
 
 #[test]
 fn configured_exposure_scales_linear_color_before_aces_and_srgb_encoding() {
-    let directory = TemporaryDirectory::new();
+    let directory = temp_directory();
     let mut framebuffer = Framebuffer::new(1, 1).unwrap();
     let white = Vector3::new(0.3127 / 0.3290, 1.0, (1.0 - 0.3127 - 0.3290) / 0.3290);
     assert!(framebuffer.set(0, 0, white * 0.5));
@@ -1317,7 +1263,7 @@ fn configured_exposure_scales_linear_color_before_aces_and_srgb_encoding() {
         spectral_caustics::output::save_png_with_exposure(
             &framebuffer,
             &path,
-            (Renderer::new(config.render).unwrap()).settings().exposure,
+            config.render.exposure,
         )
         .unwrap();
         assert_eq!(
@@ -1330,7 +1276,7 @@ fn configured_exposure_scales_linear_color_before_aces_and_srgb_encoding() {
 #[cfg(feature = "diagnostics")]
 #[test]
 fn default_executable_renders_all_three_spheres_and_repeats_across_threads() {
-    let directory = TemporaryDirectory::new();
+    let directory = temp_directory();
     fs::create_dir(directory.0.join("configs")).unwrap();
     let mut config = Config::from_json(include_str!("../configs/default.json")).unwrap();
     config.render.width = 96;
@@ -1421,7 +1367,7 @@ fn default_executable_renders_all_three_spheres_and_repeats_across_threads() {
 
 #[test]
 fn executable_reads_json_and_generates_current_outputs_reproducibly() {
-    let directory = TemporaryDirectory::new();
+    let directory = temp_directory();
     let mut config = small_config();
     config.render.width = 12;
     config.render.height = 8;
@@ -1489,4 +1435,27 @@ fn executable_reads_json_and_generates_current_outputs_reproducibly() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("读取配置"));
+}
+
+#[test]
+fn all_checked_in_configs_deserialize_and_validate() {
+    let mut count = 0usize;
+    let mut entries: Vec<_> = fs::read_dir("configs")
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    entries.sort();
+    for path in entries {
+        let config = Config::load(&path)
+            .unwrap_or_else(|e| panic!("failed to load {}: {e}", path.display()));
+        config
+            .validate()
+            .unwrap_or_else(|e| panic!("failed to validate {}: {e}", path.display()));
+        count += 1;
+    }
+    assert!(
+        count >= 14,
+        "expected at least 14 checked-in configs, found {count}"
+    );
 }

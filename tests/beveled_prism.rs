@@ -5,6 +5,7 @@ use serde_json::json;
 use spectral_caustics::camera::Camera;
 use spectral_caustics::config::Config;
 use spectral_caustics::config::camera::CameraConfig;
+#[cfg(feature = "diagnostics")]
 use spectral_caustics::config::material::MaterialConfig;
 use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 use spectral_caustics::config::scene::ObjectConfig;
@@ -12,7 +13,7 @@ use spectral_caustics::geometry::beveled_prism::BeveledPrism;
 use spectral_caustics::geometry::beveled_prism::ROUND_SEGMENTS;
 use spectral_caustics::geometry::object::Hittable;
 use spectral_caustics::renderer::Renderer;
-use support::assert_camera_images_bits_eq;
+use support::{assert_camera_images_bits_eq, test_materials as materials};
 
 fn config() -> Config {
     let mut config = Config::from_json(include_str!("../configs/beveled_prism.json")).unwrap();
@@ -28,28 +29,6 @@ fn config() -> Config {
         config.render.diagnostics.target = Some(1);
     }
     config
-}
-
-fn materials() -> [MaterialConfig; 4] {
-    [
-        MaterialConfig::Dielectric {
-            ior: 1.52,
-            dispersion: None,
-        },
-        MaterialConfig::Mirror {
-            reflectance: [0.95; 3],
-        },
-        MaterialConfig::GgxMetal {
-            eta: [0.2; 3],
-            k: [3.0; 3],
-            roughness: 0.0,
-        },
-        MaterialConfig::GgxMetal {
-            eta: [0.2; 3],
-            k: [3.0; 3],
-            roughness: 0.4,
-        },
-    ]
 }
 
 #[cfg(feature = "diagnostics")]
@@ -74,7 +53,7 @@ fn json_roundtrips_builds_materials_and_keeps_debug_target_separate_from_spectra
                 (
                     scene.photon.caustics_object_id,
                     scene.photon.ground_id,
-                    scene.diagnostics.target
+                    scene.diagnostic_target
                 ),
                 (None, Some(0), Some(1))
             );
@@ -88,7 +67,7 @@ fn json_roundtrips_builds_materials_and_keeps_debug_target_separate_from_spectra
         .push(Config::default().scene.objects.remove(0));
     let scene = config.build().unwrap();
     assert_eq!(scene.photon.caustics_object_id, Some(2));
-    assert_eq!(scene.diagnostics.target, Some(1));
+    assert_eq!(scene.diagnostic_target, Some(1));
     let mut json = serde_json::to_value(config).unwrap();
     json["scene"]["objects"][1]
         .as_object_mut()
@@ -206,7 +185,7 @@ fn existing_materials_and_debug_reuse_rgb_paths_across_mis_depths_and_threads() 
             &scene,
             scene.photon.caustics_object_id,
             scene.photon.ground_id.expect("receiver"),
-            (Renderer::new(config.render.clone()).unwrap()).settings(),
+            &config.render,
         )
         .unwrap();
         assert!(

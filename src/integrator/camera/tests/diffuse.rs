@@ -169,18 +169,15 @@ fn two_plane_colored_indirect_matches_analytic_half_hemisphere_integral() {
 fn diffuse_miss_does_not_add_hdri_background() {
     let mut scene = RenderJob::new();
     scene.camera_options.max_diffuse_bounces = 1;
-    let path = std::env::temp_dir().join(format!("e1-miss-{}.hdr", std::process::id()));
-    let mut bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 1\n".to_vec();
-    bytes.extend_from_slice(&[128, 64, 32, 132]); // [8,4,2]
-    std::fs::write(&path, bytes).unwrap();
+    let hdr = super::support::TemporaryHdr::from_rgbe("e1-miss", 1, 1, &[[128, 64, 32, 132]]); // [8,4,2]
     scene.scene.environment = Some(
         Environment::try_from(&EnvironmentConfig {
-            map_path: Some(path.clone()),
+            map_path: Some(hdr.0.clone()),
             ..Default::default()
         })
         .unwrap(),
     );
-    std::fs::remove_file(path).unwrap();
+    drop(hdr);
     scene.scene.add(
         Box::new(Ground::new(0.0).unwrap()),
         Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()),
@@ -206,12 +203,7 @@ fn diffuse_miss_does_not_add_hdri_background() {
     assert!(e.norm() > 0.0);
 }
 
-struct Absorber;
-impl Material for Absorber {
-    fn evaluate_rgb(&self, _: Vector3<f64>, _: Vector3<f64>, _: Vector3<f64>) -> Vector3<f64> {
-        Vector3::zeros()
-    }
-}
+use super::support::Absorber;
 
 #[test]
 fn secondary_absorbing_unbound_and_back_faces_terminate() {

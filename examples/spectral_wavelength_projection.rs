@@ -3,10 +3,8 @@ use nalgebra::Vector3;
 use serde::Serialize;
 use spectral_caustics::color::linear_srgb_to_xyz;
 use spectral_caustics::config::Config;
-#[cfg(feature = "diagnostics")]
 use spectral_caustics::diagnostics::render_fixed_wavelength_camera;
 use spectral_caustics::film::Framebuffer;
-use spectral_caustics::renderer::Renderer;
 use spectral_caustics::spectrum::emission::d65_spectrum;
 use std::error::Error;
 use std::fs;
@@ -143,9 +141,6 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         "三张固定波长图已完成，{:.3}s",
         start.elapsed().as_secs_f64()
     );
-    let mut save_settings = config.render.clone();
-    save_settings.thread_count = None;
-    let renderer = Renderer::new(save_settings)?;
     let width = config.render.width;
     let height = config.render.height;
     let mut normalized = Vec::new();
@@ -159,7 +154,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         spectral_caustics::output::save_png_with_exposure(
             &gray,
             directory.join(format!("camera_{:.0}nm.png", image.wavelength_nm)),
-            (renderer).settings().exposure,
+            config.render.exposure,
         )?;
         normalized.push(values);
     }
@@ -176,7 +171,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     spectral_caustics::output::save_png_with_exposure(
         &overlay,
         directory.join("overlay_650_550_450.png"),
-        (renderer).settings().exposure,
+        config.render.exposure,
     )?;
 
     // 用真实主射线命中范围排除直接背景灯带；再裁掉球体两侧 20% 的反射边缘。

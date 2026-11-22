@@ -16,6 +16,7 @@ pub(super) type MajorantDda<'a> = GridDda<'a, false>;
 pub(super) struct GridDda<'a, const FINE: bool> {
     grid: &'a GridMedium,
     ray: &'a Ray,
+    inv_d: [f64; 3],
     stride: usize,
     resolution: [usize; 3],
     cell: [usize; 3],
@@ -30,10 +31,28 @@ impl<'a, const FINE: bool> GridDda<'a, FINE> {
     /// Faces use fine-grid indices, so partial edge blocks are not stretched.
     #[inline]
     pub fn new(grid: &'a GridMedium, ray: &'a Ray, enter: f64, exit: f64, stride: usize) -> Self {
+        let resolution = if FINE {
+            grid.resolution
+        } else {
+            grid.resolution.map(|n| n.div_ceil(stride))
+        };
+        Self::with_resolution(grid, ray, enter, exit, stride, resolution)
+    }
+
+    #[inline]
+    pub fn with_resolution(
+        grid: &'a GridMedium,
+        ray: &'a Ray,
+        enter: f64,
+        exit: f64,
+        stride: usize,
+        resolution: [usize; 3],
+    ) -> Self {
         if grid.resolution.iter().all(|&n| n <= stride) {
             return Self {
                 grid,
                 ray,
+                inv_d: [0.0; 3],
                 stride,
                 resolution: [1; 3],
                 cell: [0; 3],
@@ -43,15 +62,21 @@ impl<'a, const FINE: bool> GridDda<'a, FINE> {
                 finished: false,
             };
         }
+        let inv_d = std::array::from_fn(|axis| {
+            let d = ray.direction[axis];
+            if d == 0.0 {
+                0.0
+            } else {
+                let inv = 1.0 / d;
+                if inv.is_finite() { inv } else { 0.0 }
+            }
+        });
         let mut dda = Self {
             grid,
             ray,
+            inv_d,
             stride,
-            resolution: if FINE {
-                grid.resolution
-            } else {
-                grid.resolution.map(|n| n.div_ceil(stride))
-            },
+            resolution,
             cell: if FINE {
                 grid.cell_at(ray.at(enter))
             } else {
@@ -78,7 +103,9 @@ impl<'a, const FINE: bool> GridDda<'a, FINE> {
                 .saturating_mul(self.stride)
                 .min(self.grid.resolution[axis]);
         }
-        (self.grid.face(axis, face) - self.ray.origin[axis]) / d
+        let delta = self.grid.face(axis, face) - self.ray.origin[axis];
+        let inv = self.inv_d[axis];
+        if inv != 0.0 { delta * inv } else { delta / d }
     }
 }
 

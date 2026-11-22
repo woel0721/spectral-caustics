@@ -1,20 +1,43 @@
 //! RGB pixel sampling. The path walk is shared with the spectral camera.
 use super::{
+    RenderedPixel, UnusedRng,
     ground::bind_spectral_ground_lighting,
     lighting::camera_lighting_setup,
     path::trace_camera_path,
+    render_camera_pixels,
     transport::Caustics,
     types::{CameraLightingImages, CameraPathRngs, CameraPathState},
 };
 #[cfg(feature = "diagnostics")]
-use crate::diagnostics::{PathDebugBuffer, PathDebugPixel, PathDebugSample};
-use crate::{
-    caustics::SpectralLighting, color::linear_srgb_to_xyz, config::RenderJob, film::Framebuffer,
-};
+use crate::diagnostics::{PathDebugAccumulator, PathDebugSample};
+use crate::{caustics::SpectralLighting, color::linear_srgb_to_xyz, config::RenderJob};
 use nalgebra::{Vector2, Vector3};
 use rand::{Rng, SeedableRng, rngs::StdRng};
-use rayon::prelude::*;
 use std::error::Error;
+
+pub(crate) fn validate_rgb_render(
+    job: &RenderJob,
+    settings: &crate::config::render::RenderSetting,
+    has_caustics: bool,
+) -> Result<(Vector3<f64>, f64), Box<dyn Error + Send + Sync>> {
+    if job.scene.has_wavelength_dependent_medium() {
+        return Err(crate::medium::SPECTRAL_CAMERA_REQUIRED.into());
+    }
+    if settings.camera_spp == 0 {
+        return Err("camera SPP must be positive".into());
+    }
+    #[cfg(feature = "diagnostics")]
+    if job
+        .diagnostic_target
+        .is_some_and(|id| id >= job.scene.objects.len())
+    {
+        return Err("invalid diagnostic target".into());
+    }
+    if has_caustics {
+        super::ground::validate_rgb_caustics_ground(job)?;
+    }
+    camera_lighting_setup(job, settings.width, settings.height, settings.camera_spp)
+}
 
 /// Integrate RGB radiance; the optional map contributes only at the first non-delta receiver.
 pub fn integrate_rgb(
@@ -22,9 +45,7 @@ pub fn integrate_rgb(
     settings: &crate::config::render::RenderSetting,
     lighting: Option<&SpectralLighting>,
 ) -> Result<CameraLightingImages, Box<dyn Error + Send + Sync>> {
-    if job.scene.has_wavelength_dependent_medium() {
-        return Err(crate::medium::SPECTRAL_CAMERA_REQUIRED.into());
-    }
+    let (light_wi, light) = validate_rgb_render(job, settings, lighting.is_some())?;
     let (width, height, spp, seed) = (
         settings.width,
         settings.height,
@@ -37,10 +58,6 @@ pub fn integrate_rgb(
         .map(|l| bind_spectral_ground_lighting(job, l))
         .transpose()?;
     let ground = binding.as_ref();
-    if spp == 0 {
-        return Err("camera SPP must be positive".into());
-    }
-    let (light_wi, light) = camera_lighting_setup(job, width, height, spp)?;
     // Sun color uses the source's quadrature even without a caustics target.
     // Previously the high-level pipeline obtained this white from the photon preview.
     let sun_color = if ground.is_none() && light > 0.0 {
@@ -56,128 +73,81 @@ pub fn integrate_rgb(
         Vector3::repeat(1.0)
     };
 
-    #[cfg(feature = "diagnostics")]
-    if job
-        .diagnostics
-        .target
-        .is_some_and(|id| id >= job.scene.objects.len())
-    {
-        return Err("invalid diagnostic target".into());
-    }
-    let mut images = CameraLightingImages {
-        direct: Framebuffer::new(width, height)?,
-        caustics: Framebuffer::new(width, height)?,
-        combined: Framebuffer::new(width, height)?,
+    let has_environment = job.scene.environment.is_some();
+    let has_medium = job.scene.medium.is_some();
+    let caustics_map = ground.map_or(Caustics::None, Caustics::Rgb);
+    render_camera_pixels(
+        width,
+        height,
         #[cfg(feature = "diagnostics")]
-        path_debug: debug_path.then(|| PathDebugBuffer::new(width, height, job.diagnostics.target)),
-    };
-    struct Pixel {
-        direct: Vector3<f64>,
-        caustics: Vector3<f64>,
-        #[cfg(feature = "diagnostics")]
-        statistics: Option<PathDebugPixel>,
-    }
-    let pixel = |index: usize| -> Result<Pixel, String> {
-        let mut camera = StdRng::seed_from_u64(pixel_seed(seed, index, CAMERA_STREAM));
-        let mut environment = StdRng::seed_from_u64(pixel_seed(seed, index, ENVIRONMENT_STREAM));
-        let mut medium =
-            StdRng::seed_from_u64(pixel_seed(seed, index, crate::sampling::rng::MEDIUM_STREAM));
-        let mut continuation = StdRng::seed_from_u64(pixel_seed(seed, index, DIFFUSE_STREAM));
-        let (mut d, mut c) = (Vector3::zeros(), Vector3::zeros());
-        #[cfg(feature = "diagnostics")]
-        let mut statistics = debug_path.then(PathDebugPixel::default);
-        for _ in 0..spp {
-            let offset = Vector2::new(camera.random::<f64>(), camera.random::<f64>());
-            let ray = job
-                .camera
-                .ray_for_pixel_sample(index % width, index / width, width, height, offset)
-                .ok_or("invalid camera ray")?;
-            let mut state = CameraPathState::new(ray, job.camera_options.max_diffuse_bounces);
-            state.transport.sun_color = sun_color;
-            let mut rngs = CameraPathRngs {
-                camera: &mut camera,
-                environment: &mut environment,
-                diffuse: &mut continuation,
-                medium: &mut medium,
-            };
+        debug_path.then_some(job.diagnostic_target),
+        |index: usize| -> Result<RenderedPixel, String> {
+            let mut camera = StdRng::seed_from_u64(pixel_seed(seed, index, CAMERA_STREAM));
+            let mut environment = has_environment
+                .then(|| StdRng::seed_from_u64(pixel_seed(seed, index, ENVIRONMENT_STREAM)));
+            let mut medium = has_medium.then(|| {
+                StdRng::seed_from_u64(pixel_seed(seed, index, crate::sampling::rng::MEDIUM_STREAM))
+            });
+            let mut continuation = StdRng::seed_from_u64(pixel_seed(seed, index, DIFFUSE_STREAM));
+            let mut unused_environment = UnusedRng;
+            let mut unused_medium = UnusedRng;
+            let (mut d, mut c) = (Vector3::zeros(), Vector3::zeros());
             #[cfg(feature = "diagnostics")]
-            let mut sample = PathDebugSample::default();
-            trace_camera_path(
-                job,
-                &mut state,
-                &mut rngs,
-                light_wi,
-                light,
-                ground.map_or(Caustics::None, Caustics::Rgb),
-                crate::optics::dispersion::IorMode::Constant,
+            let mut statistics = debug_path.then(PathDebugAccumulator::default);
+            for _ in 0..spp {
+                let offset = Vector2::new(camera.random::<f64>(), camera.random::<f64>());
+                let ray = job
+                    .camera
+                    .ray_for_pixel_sample(index % width, index / width, width, height, offset)
+                    .ok_or("invalid camera ray")?;
+                let mut state = CameraPathState::new(ray, job.camera_options.max_diffuse_bounces);
+                state.transport.sun_color = sun_color;
+                let mut rngs = CameraPathRngs {
+                    camera: &mut camera,
+                    environment: match &mut environment {
+                        Some(rng) => rng,
+                        None => &mut unused_environment,
+                    },
+                    diffuse: &mut continuation,
+                    medium: match &mut medium {
+                        Some(rng) => rng,
+                        None => &mut unused_medium,
+                    },
+                };
                 #[cfg(feature = "diagnostics")]
-                statistics.as_ref().map(|_| &mut sample),
-            )
-            .map_err(|e| e.to_string())?;
-            #[cfg(feature = "diagnostics")]
-            if let Some(stats) = &mut statistics {
-                stats.record(&sample, job.diagnostics.target)?;
+                let mut sample = PathDebugSample::default();
+                trace_camera_path(
+                    job,
+                    &mut state,
+                    &mut rngs,
+                    light_wi,
+                    light,
+                    caustics_map,
+                    crate::optics::dispersion::IorMode::Constant,
+                    #[cfg(feature = "diagnostics")]
+                    statistics.as_ref().map(|_| &mut sample),
+                )
+                .map_err(|e| e.to_string())?;
+                #[cfg(feature = "diagnostics")]
+                if let Some(stats) = &mut statistics {
+                    stats.record(&sample, job.diagnostic_target)?;
+                }
+                d += state.radiance.direct / spp as f64;
+                c += state.radiance.caustics / spp as f64;
             }
-            d += state.radiance.direct / spp as f64;
-            c += state.radiance.caustics / spp as f64;
-        }
-        Ok(Pixel {
-            direct: linear_srgb_to_xyz(d).ok_or("RGB integration overflow")?,
-            caustics: linear_srgb_to_xyz(c).ok_or("RGB integration overflow")?,
-            #[cfg(feature = "diagnostics")]
-            statistics,
-        })
-    };
-    let write =
-        |(index, (d, c)): (usize, (&mut Vector3<f64>, &mut Vector3<f64>))| -> Result<(), String> {
-            let p = pixel(index)?;
-            *d = p.direct;
-            *c = p.caustics;
-            Ok(())
-        };
-    #[cfg(feature = "diagnostics")]
-    if let Some(debug) = &mut images.path_debug {
-        images
-            .direct
-            .pixels
-            .par_iter_mut()
-            .zip(images.caustics.pixels.par_iter_mut())
-            .zip(debug.pixels.par_iter_mut())
-            .enumerate()
-            .try_for_each(|(i, ((d, c), stats))| -> Result<(), String> {
-                let p = pixel(i)?;
-                *d = p.direct;
-                *c = p.caustics;
-                *stats = p.statistics.expect("enabled observer");
-                Ok(())
-            })?;
-    } else {
-        images
-            .direct
-            .pixels
-            .par_iter_mut()
-            .zip(images.caustics.pixels.par_iter_mut())
-            .enumerate()
-            .try_for_each(write)?;
-    }
-    #[cfg(not(feature = "diagnostics"))]
-    images
-        .direct
-        .pixels
-        .par_iter_mut()
-        .zip(images.caustics.pixels.par_iter_mut())
-        .enumerate()
-        .try_for_each(write)?;
-    for ((d, c), combined) in images
-        .direct
-        .pixels
-        .iter()
-        .zip(&images.caustics.pixels)
-        .zip(&mut images.combined.pixels)
-    {
-        *combined = d + c;
-    }
-    Ok(images)
+            let direct = linear_srgb_to_xyz(d).ok_or("RGB integration overflow")?;
+            let caustics = linear_srgb_to_xyz(c).ok_or("RGB integration overflow")?;
+            if (direct + caustics).iter().any(|v| !v.is_finite()) {
+                return Err("RGB integration overflow".into());
+            }
+            Ok(RenderedPixel {
+                direct,
+                caustics,
+                #[cfg(feature = "diagnostics")]
+                statistics: statistics.map(PathDebugAccumulator::finish),
+            })
+        },
+    )
 }
 
 use crate::sampling::rng::{CAMERA_STREAM, DIFFUSE_STREAM, ENVIRONMENT_STREAM, pixel_seed};

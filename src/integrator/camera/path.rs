@@ -1,7 +1,7 @@
 //! One bounded camera walk for RGB and hero-wavelength radiance.
 use super::{
     lighting::area::AreaLightSampler,
-    lighting::environment::environment_lighting,
+    lighting::environment::environment_lighting_with_interface,
     lighting::{transmittance_to_light, volume::volume_lighting},
     surface_ray_origin,
     transport::{CameraTransport, Caustics},
@@ -32,6 +32,26 @@ pub enum StopReason {
     DeltaBudgetExhausted,
     AllBudgetsExhausted,
     ZeroThroughput,
+}
+
+#[cfg(feature = "diagnostics")]
+impl StopReason {
+    pub(crate) const ALL: [Self; 10] = [
+        Self::EnvironmentEscape,
+        Self::BackgroundEscape,
+        Self::NoScatteringComponents,
+        Self::Backface,
+        Self::SampleRejected,
+        Self::RussianRoulette,
+        Self::NonDeltaBudgetExhausted,
+        Self::DeltaBudgetExhausted,
+        Self::AllBudgetsExhausted,
+        Self::ZeroThroughput,
+    ];
+
+    pub(crate) const fn index(self) -> usize {
+        self as usize
+    }
 }
 
 pub const MAX_DELTA_EVENTS: usize = 32;
@@ -72,6 +92,29 @@ pub fn sample_scatter_ray<T: CameraTransport>(
     ior: IorMode,
     rng: &mut dyn rand::RngCore,
 ) -> Result<Option<ScatterRay<T::Value>>, Box<dyn Error + Send + Sync>> {
+    sample_scatter_ray_with_interface(
+        job,
+        job.scene.has_medium_interface(),
+        hit,
+        m,
+        wo,
+        transport,
+        ior,
+        rng,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_scatter_ray_with_interface<T: CameraTransport>(
+    job: &RenderJob,
+    has_medium_interface: bool,
+    hit: &Hit,
+    m: &dyn Material,
+    wo: Vector3<f64>,
+    transport: T,
+    ior: IorMode,
+    rng: &mut dyn rand::RngCore,
+) -> Result<Option<ScatterRay<T::Value>>, Box<dyn Error + Send + Sync>> {
     let normal = unit_vector(hit.normal).ok_or("invalid surface normal")?;
     let Some(sample) = transport.sample(m, wo, normal, ior, rng) else {
         return Ok(None);
@@ -97,8 +140,11 @@ pub fn sample_scatter_ray<T: CameraTransport>(
         return Ok(None);
     }
     let side = if normal.dot(&wi) >= 0.0 { 1.0 } else { -1.0 };
-    let ray = Ray::new(surface_ray_origin(&job.scene, hit.coords, normal, side), wi)
-        .ok_or("surface ray overflow")?;
+    let ray = Ray::new(
+        surface_ray_origin(has_medium_interface, hit.coords, normal, side),
+        wi,
+    )
+    .ok_or("surface ray overflow")?;
     Ok(Some(ScatterRay {
         ray,
         throughput: weight,
@@ -122,6 +168,7 @@ pub fn trace_camera_path<T: CameraTransport>(
     if state.volume_scatters > job.camera_options.max_volume_scatters {
         return Err("initial volume scatters exceed camera budget".into());
     }
+    let has_medium_interface = job.scene.has_medium_interface();
     let mut region = job
         .scene
         .initial_medium_region(state.ray.origin, state.medium_region)?;
@@ -130,7 +177,7 @@ pub fn trace_camera_path<T: CameraTransport>(
     let wavelength_nm = transport.wavelength_nm();
     let medium_wavelength_nm = wavelength_nm.unwrap_or(ACHROMATIC_QUERY_NM);
     let (sun_wi, sun) = transport.sunlight(light_wi, light, map)?;
-    let mut area = AreaLightSampler::new(job, rngs.camera);
+    let mut area = AreaLightSampler::new(job, rngs.camera, has_medium_interface);
     let mut from_volume = false;
     let _termination = loop {
         if state.throughput == T::Value::default() {
@@ -157,6 +204,12 @@ pub fn trace_camera_path<T: CameraTransport>(
             )?;
             sample.validate(&state.ray, distance, allow_scattering)?;
             state.throughput = state.throughput * sample.weight;
+            if !transport.finite(state.throughput) {
+                return Err("medium throughput overflow".into());
+            }
+            if state.throughput == T::Value::default() {
+                break StopReason::ZeroThroughput;
+            }
             if let Some(position) = sample.position {
                 let wo = -state.ray.direction;
                 let phase = medium.phase(medium_wavelength_nm);
@@ -173,7 +226,6 @@ pub fn trace_camera_path<T: CameraTransport>(
                 )?;
                 state.radiance.direct += transport.multiply(state.throughput, direct);
                 let sample = phase.sample(wo, rngs.medium);
-                state.throughput = state.throughput * (sample.p / sample.pdf);
                 state.volume_scatters += 1;
                 // The local environment estimator owns phase-to-environment escape.
                 // A subsequent surface delta chain may still reach the environment.
@@ -182,9 +234,6 @@ pub fn trace_camera_path<T: CameraTransport>(
                 state.ray = Ray::new(position, sample.wi).ok_or("invalid phase ray")?;
                 from_volume = true;
                 continue;
-            }
-            if state.throughput == T::Value::default() {
-                break StopReason::ZeroThroughput;
             }
         }
         let Some(hit) = hit else {
@@ -256,6 +305,7 @@ pub fn trace_camera_path<T: CameraTransport>(
                     * (cosine
                         * transmittance_to_light(
                             job,
+                            has_medium_interface,
                             hit.coords,
                             normal,
                             sun_wi,
@@ -268,8 +318,17 @@ pub fn trace_camera_path<T: CameraTransport>(
             } else {
                 &mut *rngs.environment
             };
-            direct +=
-                environment_lighting(job, &hit, material, wo, env_rng, transport, ior, medium)?;
+            direct += environment_lighting_with_interface(
+                job,
+                has_medium_interface,
+                &hit,
+                material,
+                wo,
+                env_rng,
+                transport,
+                ior,
+                medium,
+            )?;
             direct += area.lighting(job, &hit, material, wo, transport, medium)?;
             state.radiance.direct += transport.multiply(state.throughput, direct) * scale;
             if !state.has_non_delta_vertex && state.non_delta_bounces == 0 {
@@ -304,7 +363,17 @@ pub fn trace_camera_path<T: CameraTransport>(
         } else {
             &mut *rngs.diffuse
         };
-        let Some(next) = sample_scatter_ray(job, &hit, material, wo, transport, ior, rng)? else {
+        let Some(next) = sample_scatter_ray_with_interface(
+            job,
+            has_medium_interface,
+            &hit,
+            material,
+            wo,
+            transport,
+            ior,
+            rng,
+        )?
+        else {
             break StopReason::SampleRejected;
         };
         if next.event.is_delta() && !delta_budget || !next.event.is_delta() && !continuous_budget {
@@ -317,7 +386,7 @@ pub fn trace_camera_path<T: CameraTransport>(
         let continues = state.apply_scatter(next.event, next.throughput)?;
         #[cfg(feature = "diagnostics")]
         if let Some(o) = observer.as_deref_mut() {
-            o.scatter(next.event, material, wo, hit.normal);
+            o.scatter(next.event, material, wo, hit.normal, wavelength_nm, ior);
         }
         if !continues {
             break StopReason::ZeroThroughput;

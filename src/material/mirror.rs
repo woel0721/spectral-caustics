@@ -50,7 +50,7 @@ impl Material for Mirror {
             event: sample.event,
         })
     }
-    /// 按输入 mode 返回零 BSDF：理想镜面贡献属于离散方向，只能通过 sample 的反射记录计算。
+    /// 返回零 BSDF：理想镜面贡献属于离散方向，只能通过 sample 的反射记录计算。
     fn evaluate_rgb(&self, _: Vector3<f64>, _: Vector3<f64>, _: Vector3<f64>) -> Vector3<f64> {
         Vector3::zeros()
     }

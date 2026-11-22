@@ -12,7 +12,7 @@
     "seed": 42,
     "thread_count": null,
     "max_spectral_blocks": 16,
-    "output_path": "output/beveled_prism/lighting.png"
+    "output_path": "output/beveled_prism/camera_combined.png"
   },
   "scene": {
     "camera": {

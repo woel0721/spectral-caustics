@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if args.next().is_some() {
         return Err("用法：sphere_materials [SPP] [正方形边长] [输出目录]".into());
     }
+    let renderer = Renderer::new(config.render.clone())?;
     for (name, material) in [
         (
             "dielectric",
@@ -74,7 +75,6 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         config.render.output_path = output.join("camera_combined.png");
         config.save(output.join("config.json"))?;
         let scene = config.build()?;
-        let renderer = Renderer::new(config.render.clone())?;
         let images = renderer.render(&scene)?;
         output::save_components(&images, &config.render.output_path, config.render.exposure)?;
         #[cfg(feature = "diagnostics")]

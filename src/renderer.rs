@@ -35,14 +35,17 @@ impl Renderer {
     ) -> Result<CameraLightingImages, Box<dyn Error + Send + Sync>> {
         let work = || match self.settings.camera_mode {
             CameraMode::Spectral => {
+                camera::validate_spectral_render(job, &self.settings)?;
                 let atlas = crate::integrator::photon::integrate_spectral(job, &self.settings)?;
                 camera::integrate_spectral(job, &self.settings, atlas.as_ref())
             }
             CameraMode::Rgb => {
+                camera::validate_rgb_render(
+                    job,
+                    &self.settings,
+                    job.photon.caustics_object_id.is_some(),
+                )?;
                 if let Some(target) = job.photon.caustics_object_id {
-                    if job.scene.has_wavelength_dependent_medium() {
-                        return Err(crate::medium::SPECTRAL_CAMERA_REQUIRED.into());
-                    }
                     let lighting = crate::integrator::photon::integrate_camera_xyz(
                         job,
                         target,

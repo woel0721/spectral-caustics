@@ -1,10 +1,9 @@
 //! 可保存为 JSON 的场景描述；几何数据在运行时再转换为 Hittable 对象。
 
 use super::camera::CameraConfig;
-pub use super::light::DiskAreaLightConfig;
-pub use super::light::LightConfig;
+use super::light::LightConfig;
 use super::material::MaterialConfig;
-use crate::{medium::MediumConfig, scene::MediumInterface};
+use crate::{caustics::GroundReceiver, medium::MediumConfig, scene::MediumInterface};
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -26,7 +25,7 @@ pub(crate) fn validate_volume_scatters(count: usize) -> Result<(), String> {
 pub(crate) fn validate_diffuse_bounces(count: usize) -> Result<(), String> {
     if count > MAX_DIFFUSE_BOUNCES {
         return Err(format!(
-            "scene.camera_options.max_diffuse_bounces 不能超过 {MAX_DIFFUSE_BOUNCES}"
+            "scene.max_diffuse_bounces 不能超过 {MAX_DIFFUSE_BOUNCES}"
         ));
     }
     Ok(())
@@ -52,7 +51,7 @@ pub struct SceneConfig {
     /// HDRI 多样本 MIS 权重；省略字段时缺省为 Balance。
     #[serde(default)]
     pub environment_mis_heuristic: EnvironmentMisHeuristic,
-    /// 相机额外 Lambertian 反弹数；缺省为 0，运行时上限见 MAX_DIFFUSE_BOUNCES。
+    /// 相机额外连续表面反弹数（含漫反射与粗糙微表面）；缺省为 0，运行时上限见 MAX_DIFFUSE_BOUNCES。
     #[serde(default)]
     pub max_diffuse_bounces: usize,
     /// 相机端体散射事件预算，独立于表面预算；0 仅计算消光，缺省为 1。
@@ -64,7 +63,7 @@ pub struct SceneConfig {
     /// 地面矩形相对 receiver 各边向外扩展的米数，须为正。
     #[serde(default = "default_ground_margin_m")]
     pub ground_margin_m: f64,
-    /// Debug AOV 的首次命中目标（objects 的零基下标）；省略/null 自动选择三棱镜。
+    /// 场景物体列表，按索引分配运行时 object_id。
     pub objects: Vec<ObjectConfig>,
     pub light: LightConfig,
     pub receiver: GroundReceiverConfig,
@@ -154,10 +153,10 @@ impl EnvironmentConfig {
     /// 输入：self；输出：有效时 Ok(())，非有限参数、负颜色或负强度时 Err；不在此读取 HDR 文件。
     pub fn validate(&self) -> Result<(), String> {
         if !self.rotation_degrees.is_finite() {
-            return Err("scene.scene.environment.rotation_degrees 必须有限".into());
+            return Err("scene.environment.rotation_degrees 必须有限".into());
         }
         if !self.intensity.is_finite() || self.intensity < 0.0 {
-            return Err("scene.scene.environment.intensity 必须有限且非负".into());
+            return Err("scene.environment.intensity 必须有限且非负".into());
         }
         if self
             .horizon_linear_rgb
@@ -165,7 +164,7 @@ impl EnvironmentConfig {
             .chain(self.zenith_linear_rgb.iter())
             .any(|value| !value.is_finite() || *value < 0.0)
         {
-            return Err("scene.scene.environment 的天空辐亮度和背景颜色必须有限且非负".into());
+            return Err("scene.environment 的天空辐亮度和背景颜色必须有限且非负".into());
         }
         Ok(())
     }
@@ -179,6 +178,13 @@ pub struct MediumInterfaceConfig {
 }
 
 impl MediumInterfaceConfig {
+    pub(super) fn validate(&self) -> Result<(), String> {
+        if let Some(interior) = &self.interior {
+            interior.validate()?;
+        }
+        Ok(())
+    }
+
     pub(super) fn build(&self) -> Result<MediumInterface, String> {
         let interior = self
             .interior
@@ -208,7 +214,7 @@ pub enum ObjectConfig {
     /// 与 Prism 当前默认顶点顺序一致，长度单位为米；面连接方式由运行时 Prism 定义。
     Prism {
         vertices_m: [[f64; 3]; 6],
-        /// 旧三棱镜配置默认开启；显式 false 可将焦散目标切换到球体。
+        /// 默认关闭；显式设为 true 时作为光源焦散目标。
         #[serde(default)]
         caustics: bool,
         #[serde(default = "MaterialConfig::default_glass")]
@@ -246,6 +252,16 @@ pub enum ObjectConfig {
 }
 
 impl ObjectConfig {
+    pub fn material(&self) -> &MaterialConfig {
+        match self {
+            Self::Prism { material, .. }
+            | Self::VerticalPrism { material, .. }
+            | Self::Sphere { material, .. }
+            | Self::BeveledPrism { material, .. }
+            | Self::Ground { material, .. } => material,
+        }
+    }
+
     pub(super) fn medium_interface(&self) -> Option<(&MediumInterfaceConfig, &MaterialConfig)> {
         match self {
             Self::Sphere {
@@ -266,20 +282,6 @@ impl ObjectConfig {
             _ => None,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ParallelLightConfig {
-    /// 平行光从水平发射孔径出发，长度单位为米。
-    pub height_m: f64,
-    /// 原始方向向量，由运行时光线构造器归一化。
-    pub direction: [f64; 3],
-    pub aperture_min_m: [f64; 2],
-    pub aperture_max_m: [f64; 2],
-    /// 穿过水平发射窗口的相对通量 Phi；默认 8/16=0.5 为水平面辐照度。
-    /// 光束法向辐照度为 Phi/(窗口面积*|归一化 direction.z|)，无瓦特标定。
-    pub total_flux: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -331,19 +333,6 @@ impl Default for SceneConfig {
     }
 }
 
-impl Default for ParallelLightConfig {
-    /// 返回内置平行光配置：发射高度 3 m、方向 [0.45,0,-1]、4×4 m 窗口及相对通量 8。
-    fn default() -> Self {
-        Self {
-            height_m: 3.0,
-            direction: [0.45, 0.0, -1.0],
-            aperture_min_m: [-2.0; 2],
-            aperture_max_m: [2.0; 2],
-            total_flux: 8.0,
-        }
-    }
-}
-
 impl Default for GroundReceiverConfig {
     /// 返回内置地面接收范围：XY 两轴均为 [-2,2) m，供焦散图保存和查询。
     fn default() -> Self {
@@ -355,6 +344,18 @@ impl Default for GroundReceiverConfig {
 }
 
 impl SceneConfig {
+    pub(crate) fn has_wavelength_dependent_medium(&self) -> bool {
+        self.medium
+            .as_ref()
+            .is_some_and(MediumConfig::is_wavelength_dependent)
+            || self.objects.iter().any(|object| {
+                object
+                    .medium_interface()
+                    .and_then(|(interface, _)| interface.interior.as_ref())
+                    .is_some_and(MediumConfig::is_wavelength_dependent)
+            })
+    }
+
     /// 在焦散接收区域外增加边距，得到用于实际求交的有限地面范围。
     ///
     /// 输入：self.receiver 与正边距 m=ground_margin_m（米）；输出：GroundReceiverConfig，非法或扩展失效时 Err。
@@ -362,7 +363,7 @@ impl SceneConfig {
     /// 公式：ground.min=receiver.min-m，ground.max=receiver.max+m，使实体地面完整包住焦散查询范围。
     pub fn ground_bounds(&self) -> Result<GroundReceiverConfig, String> {
         validate_bounds(self.receiver.min_m, self.receiver.max_m)
-            .map_err(|message| format!("scene.photon.receiver 接收区域：{message}"))?;
+            .map_err(|message| format!("scene.receiver 接收区域：{message}"))?;
         if !self.ground_margin_m.is_finite() || self.ground_margin_m <= 0.0 {
             return Err("scene.ground_margin_m 必须有限且大于零".into());
         }
@@ -390,16 +391,16 @@ impl SceneConfig {
     pub fn validate(&self) -> Result<(), String> {
         self.camera.validate()?;
         if let Some(medium) = &self.medium {
-            crate::medium::from_config(medium)?;
+            medium.validate()?;
         }
         if let Some(environment) = &self.environment {
             environment.validate()?;
         }
         if self.environment_samples == 0 {
-            return Err("scene.camera_options.environment_samples 必须大于零".into());
+            return Err("scene.environment_samples 必须大于零".into());
         }
         if self.light_samples == 0 {
-            return Err("scene.camera_options.light_samples 必须大于零".into());
+            return Err("scene.light_samples 必须大于零".into());
         }
         validate_diffuse_bounces(self.max_diffuse_bounces)?;
         validate_volume_scatters(self.max_volume_scatters)?;
@@ -414,6 +415,7 @@ impl SceneConfig {
             return Err("scene.background_linear_rgb 必须有限且非负".into());
         }
         let mut caustics_count = 0;
+        let mut ground_count = 0;
         let mut has_medium_interface = false;
         for (index, object) in self.objects.iter().enumerate() {
             if let Some((interface, material)) = object.medium_interface() {
@@ -425,11 +427,11 @@ impl SceneConfig {
                     return Err(format!("{field} 要求理想 Dielectric 材质"));
                 }
                 interface
-                    .build()
+                    .validate()
                     .map_err(|error| format!("{field}.interior {error}"))?;
                 has_medium_interface = true;
             }
-            let selected_material = match object {
+            let selected_caustics = match object {
                 ObjectConfig::Sphere {
                     caustics: true,
                     material,
@@ -450,11 +452,11 @@ impl SceneConfig {
                             "scene.objects[{index}].caustics 要求理想 Dielectric 材质"
                         ));
                     }
-                    Some(material)
+                    true
                 }
-                _ => None,
+                _ => false,
             };
-            if selected_material.is_some_and(|m| matches!(m, MaterialConfig::Dielectric { .. })) {
+            if selected_caustics {
                 caustics_count += 1;
                 if caustics_count > 1 {
                     return Err(
@@ -462,17 +464,17 @@ impl SceneConfig {
                     );
                 }
             }
+            object
+                .material()
+                .validate()
+                .map_err(|message| format!("scene.objects[{index}].{message}"))?;
             match object {
                 ObjectConfig::VerticalPrism {
                     cross_section_m,
                     z_min_m,
                     z_max_m,
-                    material,
                     ..
                 } => {
-                    material
-                        .validate()
-                        .map_err(|message| format!("scene.objects[{index}].{message}"))?;
                     if crate::geometry::vertical_prism::VerticalPrism::new(
                         cross_section_m.map(Into::into),
                         *z_min_m,
@@ -485,33 +487,28 @@ impl SceneConfig {
                         ));
                     }
                 }
-                ObjectConfig::Prism {
-                    vertices_m,
-                    material,
-                    ..
-                } => {
-                    material
-                        .validate()
-                        .map_err(|message| format!("scene.objects[{index}].{message}"))?;
+                ObjectConfig::Prism { vertices_m, .. } => {
                     super::build::build_prism(*vertices_m, index)?;
                 }
-                ObjectConfig::Ground { height_m, material } => {
-                    material
-                        .validate()
-                        .map_err(|message| format!("scene.objects[{index}].{message}"))?;
+                ObjectConfig::Ground { height_m, .. } => {
                     if !height_m.is_finite() {
                         return Err("scene 地面高度必须有限".into());
                     }
+                    ground_count += 1;
+                    if ground_count > 1 {
+                        return Err("当前场景只支持一个接收地面".into());
+                    }
+                    if self
+                        .light
+                        .as_parallel()
+                        .is_some_and(|light| *height_m >= light.height_m)
+                    {
+                        return Err("光源发射面必须高于接收地面".into());
+                    }
                 }
                 ObjectConfig::Sphere {
-                    center_m,
-                    radius_m,
-                    material,
-                    ..
+                    center_m, radius_m, ..
                 } => {
-                    material
-                        .validate()
-                        .map_err(|message| format!("scene.objects[{index}].{message}"))?;
                     if crate::geometry::sphere::Sphere::new((*center_m).into(), *radius_m).is_none()
                     {
                         return Err(format!(
@@ -524,11 +521,8 @@ impl SceneConfig {
                     y_min_m,
                     y_max_m,
                     bevel_size_m,
-                    material,
+                    ..
                 } => {
-                    material
-                        .validate()
-                        .map_err(|message| format!("scene.objects[{index}].{message}"))?;
                     if crate::geometry::beveled_prism::BeveledPrism::new(
                         cross_section_m.map(Into::into),
                         *y_min_m,
@@ -543,6 +537,9 @@ impl SceneConfig {
                     }
                 }
             }
+        }
+        if ground_count == 0 {
+            return Err("场景必须包含一个 ground 接收地面".into());
         }
         self.light.validate()?;
         self.ground_bounds()?;
@@ -575,14 +572,11 @@ fn default_environment_intensity() -> f64 {
 ///
 /// 公式：跨度 s=max-min，面积 A=s_x·s_y。
 pub(super) fn validate_bounds(min: [f64; 2], max: [f64; 2]) -> Result<(), &'static str> {
-    let spans = [max[0] - min[0], max[1] - min[1]];
-    let area = spans[0] * spans[1];
-    if min.iter().chain(max.iter()).any(|v| !v.is_finite())
-        || spans.iter().any(|v| !v.is_finite() || *v <= 0.0)
-        || !area.is_finite()
-        || area <= 0.0
-    {
-        return Err("边界必须有限，且每轴跨度和面积须有限、为正");
+    GroundReceiver {
+        min_m: min.into(),
+        max_m: max.into(),
     }
-    Ok(())
+    .checked_area()
+    .map(|_| ())
+    .map_err(|_| "边界必须有限，且每轴跨度和面积须有限、为正")
 }

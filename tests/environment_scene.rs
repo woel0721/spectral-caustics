@@ -22,46 +22,17 @@ use spectral_caustics::material::ScatterType;
 use spectral_caustics::renderer::Renderer;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 use support::assert_camera_images_bits_eq;
 
-struct TemporaryHdr(PathBuf);
+struct TemporaryHdr(PathBuf, #[allow(dead_code)] support::TempDir);
 
 impl TemporaryHdr {
     fn new(uniform: bool) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "environment-scene-{}-{stamp}-{}.hdr",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = support::TempDir::new("environment-scene");
         // 手写 4x2 RGBE，宽度小于 8 使用非 RLE 像素；没有外部资源或编码器依赖。
         // 顶行四列分别为 [2,1,0.5]、[2,4,1]、[2,4,8]、[16,4,8]，底行翻倍。
-        let mut bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 4\n".to_vec();
-        for row in 0..2 {
-            for mut pixel in [
-                [128, 64, 32, 130],
-                [64, 128, 32, 131],
-                [32, 64, 128, 132],
-                [128, 32, 64, 133],
-            ] {
-                if uniform {
-                    pixel = [128, 64, 32, 132]; // [8,4,2]，全方向恒定。
-                } else {
-                    pixel[3] += row;
-                }
-                bytes.extend_from_slice(&pixel);
-            }
-        }
-        fs::write(&path, bytes).unwrap();
-        Self(path)
+        let path = dir.write_rgbe_4x2_hdr("test.hdr", uniform, true);
+        Self(path, dir)
     }
 
     fn config(&self) -> EnvironmentConfig {
@@ -69,12 +40,6 @@ impl TemporaryHdr {
             map_path: Some(self.0.clone()),
             ..Default::default()
         }
-    }
-}
-
-impl Drop for TemporaryHdr {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
     }
 }
 
@@ -421,14 +386,14 @@ fn all_camera_entries_integrate_hdr_with_lambertian_without_changing_photon_ligh
         &solar,
         solar.photon.caustics_object_id,
         solar.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .unwrap();
     let lighting_after = spectral_caustics::integrator::photon::integrate_xyz(
         &with_environment,
         with_environment.photon.caustics_object_id,
         with_environment.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .unwrap();
     assert_eq!(
@@ -448,7 +413,7 @@ fn all_camera_entries_integrate_hdr_with_lambertian_without_changing_photon_ligh
             &solar,
             solar.photon.caustics_object_id,
             solar.photon.ground_id.expect("receiver"),
-            (renderer).settings()
+            renderer.settings()
         )
         .and_then(|images| images.combined())
         .unwrap()
@@ -457,7 +422,7 @@ fn all_camera_entries_integrate_hdr_with_lambertian_without_changing_photon_ligh
             &with_environment,
             with_environment.photon.caustics_object_id,
             with_environment.photon.ground_id.expect("receiver"),
-            (renderer).settings()
+            renderer.settings()
         )
         .and_then(|images| images.combined())
         .unwrap()
@@ -471,7 +436,7 @@ fn all_camera_entries_integrate_hdr_with_lambertian_without_changing_photon_ligh
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        renderer.settings(),
     )
     .unwrap();
     let expected = linear_srgb_to_xyz(Vector3::new(8.0, 4.0, 2.0) * (0.8 * 0.25)).unwrap();
@@ -867,19 +832,18 @@ fn mixed_hdri_camera_is_thread_independent_and_preserves_caustics() {
         thread_count: Some(1),
         ..Default::default()
     };
-    let renderer = Renderer::new(settings.clone()).unwrap();
     let lighting = spectral_caustics::integrator::photon::integrate_xyz(
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        &settings,
     )
     .unwrap();
     let solar_lighting = spectral_caustics::integrator::photon::integrate_xyz(
         &without_environment,
         without_environment.photon.caustics_object_id,
         without_environment.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        &settings,
     )
     .unwrap();
     assert_eq!(
@@ -899,51 +863,39 @@ fn mixed_hdri_camera_is_thread_independent_and_preserves_caustics() {
         for samples in [1, 2, 3, 4, 8] {
             scene.camera_options.environment_samples = samples;
             for seed in [0, 42] {
+                let camera_settings = RenderSetting {
+                    camera_spp: 16,
+                    seed,
+                    ..settings.clone()
+                };
                 let baseline = spectral_caustics::integrator::camera::integrate_rgb(
                     &scene,
-                    &spectral_caustics::config::render::RenderSetting {
-                        width: (renderer).settings().width,
-                        height: (renderer).settings().height,
-                        camera_spp: 16,
-                        seed,
-                        ..Default::default()
-                    },
+                    &camera_settings,
                     Some(&lighting),
                 )
                 .unwrap();
                 let solar = spectral_caustics::integrator::camera::integrate_rgb(
                     &without_environment,
-                    &spectral_caustics::config::render::RenderSetting {
-                        width: (renderer).settings().width,
-                        height: (renderer).settings().height,
-                        camera_spp: 16,
-                        seed,
-                        ..Default::default()
-                    },
+                    &camera_settings,
                     Some(&solar_lighting),
                 )
                 .unwrap();
                 assert_eq!(baseline.caustics.pixels(), solar.caustics.pixels());
                 assert_ne!(baseline.direct.pixels(), solar.direct.pixels());
                 for threads in [1, 2, 4] {
-                    let parallel = Renderer::new(RenderSetting {
+                    let parallel_settings = RenderSetting {
                         thread_count: Some(threads),
-                        ..settings.clone()
-                    })
-                    .unwrap();
+                        ..camera_settings.clone()
+                    };
                     for _ in 0..2 {
-                        let images = spectral_caustics::integrator::camera::integrate_rgb(
-                            &scene,
-                            &spectral_caustics::config::render::RenderSetting {
-                                width: (parallel).settings().width,
-                                height: (parallel).settings().height,
-                                camera_spp: 16,
-                                seed,
-                                ..Default::default()
-                            },
-                            Some(&lighting),
-                        )
-                        .unwrap();
+                        let images = support::run_in_threads(threads, || {
+                            spectral_caustics::integrator::camera::integrate_rgb(
+                                &scene,
+                                &parallel_settings,
+                                Some(&lighting),
+                            )
+                            .unwrap()
+                        });
                         assert_camera_images_bits_eq(&images, &baseline);
                         for ((direct, caustics), combined) in images
                             .direct

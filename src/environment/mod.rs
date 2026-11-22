@@ -29,6 +29,7 @@ pub struct Environment {
     map: Option<EnvironmentMap>,
     /// 构建时缓存正旋转角的 (sin, cos)，查询时使用其逆变换。
     rotation_sin_cos: (f64, f64),
+    has_rotation: bool,
 }
 
 impl TryFrom<&EnvironmentConfig> for Environment {
@@ -58,12 +59,14 @@ impl TryFrom<&EnvironmentConfig> for Environment {
             .rem_euclid(360.0)
             .to_radians()
             .sin_cos();
+        let has_rotation = rotation_sin_cos.0 != 0.0 || rotation_sin_cos.1 != 1.0;
         Ok(Self {
             horizon_color: Vector3::from(config.horizon_linear_rgb),
             zenith_color: Vector3::from(config.zenith_linear_rgb),
             intensity: config.intensity,
             map,
             rotation_sin_cos,
+            has_rotation,
         })
     }
 }
@@ -72,6 +75,39 @@ impl Environment {
     /// 返回是否已加载 HDR 贴图；积分器据此选择环境与材质的混合方向采样。
     pub fn has_map(&self) -> bool {
         self.map.is_some()
+    }
+
+    fn rotate_to_local(&self, unit_direction: Vector3<f64>) -> Vector3<f64> {
+        if !self.has_rotation {
+            return unit_direction;
+        }
+        let (sin, cos) = self.rotation_sin_cos;
+        Vector3::new(
+            cos * unit_direction.x + sin * unit_direction.y,
+            -sin * unit_direction.x + cos * unit_direction.y,
+            unit_direction.z,
+        )
+    }
+
+    fn rotate_to_world(&self, local: Vector3<f64>) -> Option<Vector3<f64>> {
+        if !self.has_rotation {
+            return Some(local);
+        }
+        let (sin, cos) = self.rotation_sin_cos;
+        map::normalized_direction(Vector3::new(
+            cos * local.x - sin * local.y,
+            sin * local.x + cos * local.y,
+            local.z,
+        ))
+    }
+
+    /// 仅抽取世界空间单位方向（跳过多余的 PDF 查询），供 NEE 热路径配合 radiance_and_pdf 使用。
+    pub(crate) fn sample_direction_only(&self, rng: &mut dyn RngCore) -> Option<Vector3<f64>> {
+        let Some(map) = &self.map else {
+            return Some(map::sample_uniform_sphere(rng).direction);
+        };
+        let local = map.sample_direction_unit(rng);
+        self.rotate_to_world(local)
     }
 
     /// 从环境分布抽取一个方向，供环境直接光积分使用。
@@ -83,13 +119,8 @@ impl Environment {
         let Some(map) = &self.map else {
             return Some(map::sample_uniform_sphere(rng));
         };
-        let local = map.sample_direction(rng)?.direction;
-        let (sin, cos) = self.rotation_sin_cos;
-        let direction = map::normalized_direction(Vector3::new(
-            cos * local.x - sin * local.y,
-            sin * local.x + cos * local.y,
-            local.z,
-        ))?;
+        let local = map.sample_direction_unit(rng);
+        let direction = self.rotate_to_world(local)?;
         Some(EnvironmentSample {
             direction,
             pdf: self.pdf_direction(direction)?,
@@ -105,12 +136,27 @@ impl Environment {
         let Some(map) = &self.map else {
             return Some(map::UNIFORM_SPHERE_PDF);
         };
-        let (sin, cos) = self.rotation_sin_cos;
-        map.pdf_direction(Vector3::new(
-            cos * direction.x + sin * direction.y,
-            -sin * direction.x + cos * direction.y,
-            direction.z,
-        ))
+        map.pdf_direction(self.rotate_to_local(direction))
+    }
+
+    /// 一次方向映射同时返回环境的线性 RGB 辐亮度与采样 PDF（sr⁻¹）。
+    pub(crate) fn radiance_and_pdf(&self, direction: Vector3<f64>) -> Option<(Vector3<f64>, f64)> {
+        let (sampled, pdf) = if let Some(map) = &self.map {
+            let direction = map::normalized_direction(direction)?;
+            let local = self.rotate_to_local(direction);
+            map.radiance_and_pdf(local)?
+        } else {
+            let direction = unit_vector(direction)?;
+            let t = direction.z.clamp(0.0, 1.0);
+            (
+                self.horizon_color * (1.0 - t) + self.zenith_color * t,
+                map::UNIFORM_SPHERE_PDF,
+            )
+        };
+        let rgb = sampled * self.intensity;
+        rgb.iter()
+            .all(|value| value.is_finite())
+            .then_some((rgb, pdf))
     }
 
     pub fn horizon_color(&self) -> Vector3<f64> {
@@ -118,9 +164,6 @@ impl Environment {
     }
     pub fn zenith_color(&self) -> Vector3<f64> {
         self.zenith_color
-    }
-    pub fn intensity(&self) -> f64 {
-        self.intensity
     }
     /// Validate an external intensity change without reloading the HDR map.
     pub fn set_intensity(&mut self, intensity: f64) -> Result<(), &'static str> {
@@ -154,22 +197,8 @@ impl Environment {
     /// L=intensity·[(1-t)·horizon+t·zenith]，下半球保持地平线颜色；不加曝光或显示编码。
     pub fn radiance(&self, direction: Vector3<f64>) -> Option<Vector3<f64>> {
         let sampled = if let Some(map) = &self.map {
-            if !direction.iter().all(|value| value.is_finite()) {
-                return None;
-            }
-            let scale = direction.amax();
-            if scale == 0.0 {
-                return None;
-            }
-            // 先缩放再归一化，避免旋转巨大/极小有限方向时上溢或下溢。
-            let direction = direction / scale;
-            let direction = direction / direction.norm();
-            let (sin, cos) = self.rotation_sin_cos;
-            let local = Vector3::new(
-                cos * direction.x + sin * direction.y,
-                -sin * direction.x + cos * direction.y,
-                direction.z,
-            );
+            let direction = map::normalized_direction(direction)?;
+            let local = self.rotate_to_local(direction);
             if !local.iter().all(|value| value.is_finite()) {
                 return None;
             }

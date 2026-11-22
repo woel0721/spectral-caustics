@@ -48,7 +48,7 @@ impl Checkerboard {
         {
             return None;
         }
-        Some(if x.rem_euclid(2.0) == y.rem_euclid(2.0) {
+        Some(if ((x as i64) ^ (y as i64)) & 1 == 0 {
             self.even_scale
         } else {
             self.odd_scale
@@ -62,8 +62,7 @@ impl RenderJob {
     /// 输入：Hit；输出：地面棋盘格倍率，非地面或未开纹理返回 Some(1)，坐标无效时 None。
     /// 倍率只作用一次于反射率，不写回表示入射辐照度的焦散图。
     pub fn ground_reflectance_scale(&self, hit: &Hit) -> Option<f64> {
-        if self.photon.ground_id.is_some()
-            && Some(hit.object_id) == self.photon.ground_id
+        if Some(hit.object_id) == self.photon.ground_id
             && let Some(checkerboard) = &self.ground_checkerboard
         {
             return checkerboard.scale_at(hit.coords);

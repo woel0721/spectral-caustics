@@ -15,7 +15,7 @@ main: Config::load → Config::build → Renderer::new → Renderer::render
 - [RenderJob](../src/config/job.rs) 组合 Scene、Camera、相机采样选项、光子接收区/目标绑定和棋盘格；[config/build](../src/config/build.rs) 负责从配置构造这些运行时对象。
 - [Renderer](../src/renderer.rs) 持有 RenderSetting 和可选 Rayon 线程池，提供唯一高层 `render(&RenderJob)`，选择 Pipeline 并调度；不实现 BSDF、Fresnel、路径循环或编码。
 - [Camera Path](../src/integrator/camera/path.rs) 共享求交、即时着色、续追、预算、RR 和分量归属。[CameraTransport](../src/integrator/camera/transport.rs) 提供 RGB/标量运算及材质/光照适配；[rgb](../src/integrator/camera/rgb.rs) 和 [spectral](../src/integrator/camera/spectral.rs) 保留各自像素/波长采样。
-- [Photon generation](../src/integrator/photon/generation.rs) 负责发射、首交点缓存、标量沉积、XYZ 积分和 Eλ 图集；[Photon Path](../src/integrator/photon/path.rs) 负责单条 Forward 路径。无焦散目标时相机不需要图集；正常相机 Pipeline 不生成光子 Direct 预览缓冲。
+- [Photon emission](../src/integrator/photon/emission.rs) 负责发射分块、首交缓存、静态预计算与标量沉积；[Photon integrate](../src/integrator/photon/integrate.rs) 负责逐波长追踪块、XYZ 积分和 Eλ 图集；[Photon Path](../src/integrator/photon/path.rs) 负责单条 Forward 路径。无焦散目标时相机不需要图集；正常相机 Pipeline 不生成光子 Direct 预览缓冲。
 - [Material](../src/material/mod.rs) 拥有 BSDF 求值、采样、方向 PDF 和事件能力；[optics/interface](../src/optics/interface.rs) 共享 Snell/Fresnel/界面事件，保留 radiance/flux 权重区别。光源与环境提供自己的发射/采样分布，相机 [lighting](../src/integrator/camera/lighting/mod.rs) 负责局部 NEE、MIS、阴影和介质透射率。
 - [Framebuffer](../src/film.rs) 保存线性 XYZ；[color](../src/color.rs) 做颜色转换；[output](../src/output.rs) 做曝光、ACES、display sRGB 和 PNG。不能在传输或焦散图中提前做显示变换。
 

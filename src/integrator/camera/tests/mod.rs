@@ -240,13 +240,7 @@ fn gradient_environment_converges_to_the_cosine_weighted_integral() {
 
 #[test]
 fn environment_visibility_keeps_blocked_samples_in_the_denominator() {
-    struct HalfPlane(Ground);
-    impl Hittable for HalfPlane {
-        fn intersect(&self, ray: &Ray) -> Option<GeometryHit> {
-            let hit = self.0.intersect(ray)?;
-            (hit.coords.y > 0.0).then_some(hit)
-        }
-    }
+    use support::HalfPlane;
     let mut scene = RenderJob::new();
     let li = Vector3::new(0.25, 0.5, 1.0);
     scene.scene.environment = Some(

@@ -33,6 +33,25 @@ impl Scene {
         self.intersect_objects(ray, |_, _| false)
     }
 
+    pub(crate) fn is_occluded(&self, ray: &Ray, max_distance: f64) -> bool {
+        self.objects.iter().any(|o| {
+            o.geometry
+                .intersect(ray)
+                .is_some_and(|h| h.distance < max_distance)
+        })
+    }
+
+    pub(crate) fn is_occluded_from_volume(&self, ray: &Ray, max_distance: f64) -> bool {
+        self.objects.iter().any(|o| {
+            let hit = if o.medium_interface.is_some() {
+                o.geometry.intersect_from_volume(ray)
+            } else {
+                o.geometry.intersect(ray)
+            };
+            hit.is_some_and(|h| h.distance < max_distance)
+        })
+    }
+
     pub(crate) fn intersect_from_volume(&self, ray: &Ray) -> Option<Hit> {
         self.intersect_from_volume_with_objects(ray, &[])
     }

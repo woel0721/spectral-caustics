@@ -86,7 +86,6 @@ impl Framebuffer {
         let Some(i) = self.index(x, y) else {
             return false;
         };
-        // set 覆盖原颜色；需要累加光子能量时使用下面的 accumulate。
         self.pixels[i] = xyz;
         true
     }

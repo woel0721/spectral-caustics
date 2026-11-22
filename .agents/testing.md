@@ -12,8 +12,10 @@
 cargo fmt
 cargo fmt --check
 cargo build --locked --all-targets
-cargo test --locked
+cargo test --locked --all-targets
+cargo test --locked --doc
 cargo test --locked --all-targets --features diagnostics
+cargo test --locked --doc --features diagnostics
 cargo clippy --locked --all-targets -- -D warnings
 cargo clippy --locked --all-targets --features diagnostics -- -D warnings
 git diff --check
@@ -29,16 +31,16 @@ git diff --check
 | --- | --- |
 | 共享 Camera Path、throughput、RNG、并行 | [path](../src/integrator/camera/tests/path.rs)、[bounce](../src/integrator/camera/tests/bounce.rs)、[config_render](../tests/config_render.rs)：即时着色、深度 0/1/多次、RR 补偿、Delta/连续预算、首次焦散、分量相加和独立流；覆盖 RGB/Hero/Packet 与 1/2/4 线程 |
 | BSDF、环境、NEE/MIS、光源 | 材质本地数学测试、[environment](../src/integrator/camera/tests/environment.rs)、[environment_scene](../tests/environment_scene.rs)、[disk_area_light](../tests/disk_area_light.rs)：求值/采样/PDF 一致，Balance/Power、N=1/偶数/奇数、零/拒绝样本、遮挡、有限阴影段、独立积分与环境逃逸不重计 |
-| 折射界面、光子、焦散沉积 | [photon/path](../src/integrator/photon/path.rs) 本地测试、[forward_photons](../tests/forward_photons.rs)、[sphere_caustics](../tests/sphere_caustics.rs)、[vertical_prism](../tests/vertical_prism.rs)：Snell/Fresnel、TIR、eta 权重、棱边续追、事件截断、空间通量、XYZ/Eλ 重积分及确定性、段消光解析对照、独立 Direct 光子预览 |
+| 折射界面、光子、焦散沉积 | [photon/tests](../src/integrator/photon/tests/mod.rs) 本地测试、[forward_photons](../tests/forward_photons.rs)、[sphere_caustics](../tests/sphere_caustics.rs)、[vertical_prism](../tests/vertical_prism.rs)：Snell/Fresnel、TIR、eta 权重、棱边续追、事件截断、空间通量、XYZ/Eλ 重积分及确定性、段消光解析对照、独立 Direct 光子预览 |
 | 波长、色散、光谱/颜色数据 | [spectral_camera](../tests/spectral_camera.rs)、[spectral_caustics](../tests/spectral_caustics.rs) 和 spectrum 本地测试：波长层覆盖、400/SPP、Packet/CRN、lane 独立、D65/重建、Constant/Dispersion、光谱 GGX 拒绝；对照独立细波长积分而非强求 RGB 完全一致 |
 | 几何或材质绑定 | 相应 geometry 本地测试及 [sphere_transport](../tests/sphere_transport.rs)、[beveled_prism](../tests/beveled_prism.rs)、[material_transport](../tests/material_transport.rs)：命中/法线、退化/极值、有效编号、背面、材质能力及焦散绑定限制 |
-| 均匀介质与体照明 | [medium/tests](../src/medium/tests.rs)、[volume](../tests/volume.rs)、[spectral 本地测试](../src/integrator/camera/spectral.rs)：盒段裁剪、Beer–Lambert、自由程概率/权重、HG 归一化/符号/抽样、独立单次散射积分、0/1/多次预算、纯吸收、均匀环境能量、RGB/Hero/Packet CRN、MIS/线程 |
+| 均匀介质、介质界面与体照明 | [medium/tests](../src/medium/tests.rs)、[volume](../tests/volume.rs)、[medium_interface](../tests/medium_interface.rs)、[spectral 本地测试](../src/integrator/camera/spectral.rs)：盒段裁剪、Beer–Lambert、自由程概率/权重、HG 归一化/符号/抽样、独立单次散射积分、0/1/多次预算、纯吸收、玻璃内外介质区域切换、均匀环境能量、RGB/Hero/Packet CRN、MIS/线程 |
 | 网格密度与确定性消光 | [medium/tests](../src/medium/tests.rs) 覆盖密度索引、全局 Majorant、裁剪、边角与反向射线、均匀退化和双层解析解。生产 `VoxelDda` 的最终 Tr 与逐体素独立盒积分对照。纯吸收、全零密度和预算耗尽有精确 Tr 与 RNG 回归。 |
 | 局部 Majorant 与随机碰撞 | [grid 内部测试](../src/medium/grid/tests.rs) 核对局部上界、非整除尾块、跨块剩余光学深度、零上界块 RNG 和分层碰撞 CDF。逐段 slab 对照调用 `MajorantDda`，步长为 1 时仍走粗块特化。[medium/tests](../src/medium/tests.rs) 另测生存概率、隐式吸收权重和候选距离无法推进时的错误。 |
-| 网格体散射与相机接入 | [grid_scattering](../tests/grid_scattering.rs) 对照单次散射独立积分、多次散射均匀环境能量和独立预算。[grid_medium](../tests/grid_medium.rs) 覆盖自定义介质、RGB/Hero/Packet 的 1/2/4 线程分量比较；[spectral 本地测试](../src/integrator/camera/spectral.rs) 对照均匀及网格介质的 Packet CRN。 |
+| 网格/程序化体散射与相机接入 | [grid_scattering](../tests/grid_scattering.rs) 对照单次散射独立积分、多次散射均匀环境能量和独立预算。[grid_medium](../tests/grid_medium.rs) 与 [procedural_medium](../tests/procedural_medium.rs) 覆盖自定义介质、程序化雾场确定性与 RGB/Hero/Packet 的 1/2/4 线程分量比较；[spectral 本地测试](../src/integrator/camera/spectral.rs) 对照均匀及网格介质的 Packet CRN。 |
 | 配置、输出、Diagnostics | config/output 本地测试、[config_render](../tests/config_render.rs)、[diagnostics_feature](../tests/diagnostics_feature.rs)、[path_debug](../tests/path_debug.rs)：解析/构造分界、旧字段拒绝、文件名冲突、编码、feature 开关、观察器不改变物理分量/RNG、lane 计数与 Release 行为 |
 
-按目的选择入口：[CLI 玻璃球配置命令](../docs/rendering_guide.md#示例与验证)查看三个分量；[camera_parallel_benchmark](../examples/camera_parallel_benchmark.rs) 看线程结果；[spectral_camera_compare](../examples/spectral_camera_compare.rs) 看 Constant/Dispersion；[spectral_packet_compare](../examples/spectral_packet_compare.rs) 看 Packet；[homogeneous_medium_compare](../examples/homogeneous_medium_compare.rs) 看无介质/吸收/散射；[grid_medium_compare](../examples/grid_medium_compare.rs) 看均匀/分层/团块密度与 0/1/8 体预算。参数先读示例或 README，不把一次缩小渲染当作长期性能基准。局部上界性能使用 [grid_majorant_benchmark](../examples/grid_majorant_benchmark.rs) 和 grid 内部 ignored Release 分块基准；时间不作 CI 断言，须分别报告采样/整图收益、均匀场景开销、缓存内存与构造成本。测量条件见 [基准记录](../docs/medium_majorant_benchmark.md)。
+按目的选择入口：[CLI 玻璃球配置命令](../docs/rendering_guide.md#示例与验证)查看三个分量；[camera_parallel_benchmark](../examples/camera_parallel_benchmark.rs) 看线程结果；[spectral_camera_compare](../examples/spectral_camera_compare.rs) 看 Constant/Dispersion；[spectral_packet_compare](../examples/spectral_packet_compare.rs) 看 Packet；[homogeneous_medium_compare](../examples/homogeneous_medium_compare.rs) 看无介质/吸收/散射；[grid_medium_compare](../examples/grid_medium_compare.rs) 看均匀/分层/团块密度与 0/1/8 体预算；[spectral_fog_compare](../examples/spectral_fog_compare.rs)（需 `--features diagnostics`）做光谱程序化雾的透射率校验与 5 nm/2.5 nm 固定波长色度对照。参数先读示例或 README，不把一次缩小渲染当作长期性能基准。局部上界与 Ratio Tracking 性能使用 [grid_majorant_benchmark](../examples/grid_majorant_benchmark.rs)、[grid_ratio_tracking_benchmark](../examples/grid_ratio_tracking_benchmark.rs) 和 grid 内部 ignored Release 分块基准；时间不作 CI 断言，须分别报告采样/整图收益、均匀场景开销、缓存内存与构造成本。测量条件见 [基准记录](../docs/medium_majorant_benchmark.md)。
 
 ## 如何解释结果
 
@@ -50,7 +52,7 @@ git diff --check
 
 ## 当前验证限制
 
-- [Diagnostics::internal_tir](../src/diagnostics/mod.rs) 用 `material.ior()` 常数做 TIR 标签判定，未接收当前波长 IOR；不应将光谱 TIR 标签当作波长精确的物理真值。观察器不扰动路径的测试不能证明此标签准确。
+- 性能基准（`grid_majorant_benchmark`、`grid_ratio_tracking_benchmark`、`camera_parallel_benchmark` 等）耗时受主机负载与环境影响，只作手工对照报告，不作为 CI 断言。
 
 ## 交付证据
 

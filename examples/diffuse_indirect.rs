@@ -50,32 +50,18 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let renderer = Renderer::new(RenderSetting {
         width: 320,
         height: 240,
+        camera_spp: spp,
+        seed: 42,
         ..Default::default()
     })?;
-    let lighting = spectral_caustics::integrator::photon::integrate_xyz(
-        &scene,
-        scene.photon.caustics_object_id,
-        scene.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
-    )?;
     for bounces in [0, 1, 4] {
         scene.camera_options.max_diffuse_bounces = bounces;
-        let images = spectral_caustics::integrator::camera::integrate_rgb(
-            &scene,
-            &spectral_caustics::config::render::RenderSetting {
-                width: (renderer).settings().width,
-                height: (renderer).settings().height,
-                camera_spp: spp,
-                seed: 42,
-                ..Default::default()
-            },
-            Some(&lighting),
-        )?;
+        let images = renderer.render(&scene)?;
         let path = format!("output/diffuse_{bounces}.png");
         spectral_caustics::output::save_png_with_exposure(
             &images.combined,
             &path,
-            (renderer).settings().exposure,
+            renderer.settings().exposure,
         )?;
         println!("{path}: SPP={spp}, max_diffuse_bounces={bounces}");
     }

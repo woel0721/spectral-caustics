@@ -22,13 +22,14 @@ BUILD_FILES = {
     "rustfmt.toml", ".rustfmt.toml", "clippy.toml", ".clippy.toml", ".gitignore",
 }
 AREAS = {
-    "Camera Integrator": ("camera", "src/environment/", "src/light/"),
+    "Camera Integrator": ("camera", "environment", "light", "src/sampling/"),
     "Photon Integrator": ("photon", "caustic"),
     "Material / BSDF": ("material", "bsdf"),
     "Optics": ("optics", "refract", "dispersion"),
     "Spectrum": ("spectrum", "spectral", "wavelength", "assets/color/", "src/color.rs"),
     "Medium": ("medium", "volume", "fog"),
-    "Geometry": ("geometry", "prism", "sphere"),
+    "Geometry / Scene": ("geometry", "prism", "sphere", "src/scene/"),
+    "Diagnostics": ("diagnostics", "path_debug"),
     "Configuration / Output": (
         "src/config/", "configs/", "output", "src/film.rs", ".cargo/",
         "cargo.toml", "cargo.lock", "rust-toolchain", ".github/workflows/", ".gitignore", "src/renderer.rs",

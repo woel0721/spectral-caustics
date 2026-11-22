@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         spectral_caustics::output::save_png_with_exposure(
             &image,
             &config.render.output_path,
-            (renderer).settings().exposure,
+            renderer.settings().exposure,
         )?;
         println!(
             "{name}: {}，{}×{}，{} SPP，{:.3}s",

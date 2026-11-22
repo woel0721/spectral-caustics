@@ -10,7 +10,7 @@ use nalgebra::Vector3;
 #[derive(Debug)]
 pub struct Prism {
     /// 三角形与缓存法线由 Triangle 管理，外部不能单独修改顶点。
-    faces: Vec<Triangle>,
+    faces: [Triangle; 8],
     /// 构造时已验证位于每个有向面的内侧。
     center: Vector3<f64>,
 }
@@ -53,19 +53,54 @@ impl Prism {
             [2, 3, 0],
         ];
 
-        // collect 将多个 Option<Triangle> 合并成 Option<Vec<Triangle>>。
-        // 任意一个面失败，? 就让整个构造函数返回 None。
-        let faces = indices
-            .iter()
-            .map(|&[a, b, c]| Triangle::new(vertices[a], vertices[b], vertices[c]))
-            .collect::<Option<Vec<_>>>()?;
+        let faces = [
+            Triangle::new(
+                vertices[indices[0][0]],
+                vertices[indices[0][1]],
+                vertices[indices[0][2]],
+            )?,
+            Triangle::new(
+                vertices[indices[1][0]],
+                vertices[indices[1][1]],
+                vertices[indices[1][2]],
+            )?,
+            Triangle::new(
+                vertices[indices[2][0]],
+                vertices[indices[2][1]],
+                vertices[indices[2][2]],
+            )?,
+            Triangle::new(
+                vertices[indices[3][0]],
+                vertices[indices[3][1]],
+                vertices[indices[3][2]],
+            )?,
+            Triangle::new(
+                vertices[indices[4][0]],
+                vertices[indices[4][1]],
+                vertices[indices[4][2]],
+            )?,
+            Triangle::new(
+                vertices[indices[5][0]],
+                vertices[indices[5][1]],
+                vertices[indices[5][2]],
+            )?,
+            Triangle::new(
+                vertices[indices[6][0]],
+                vertices[indices[6][1]],
+                vertices[indices[6][2]],
+            )?,
+            Triangle::new(
+                vertices[indices[7][0]],
+                vertices[indices[7][1]],
+                vertices[indices[7][2]],
+            )?,
+        ];
 
         let center = vertices
             .iter()
             .fold(Vector3::zeros(), |sum, v| sum + v / 6.0);
-        for [a, b, c] in indices {
-            let cross = (vertices[b] - vertices[a]).cross(&(vertices[c] - vertices[a]));
-            let normal = cross / cross.norm();
+        for (face, [a, _, _]) in faces.iter().zip(indices) {
+            let normal = face.normal();
             let inside = (center - vertices[a]).dot(&normal);
             if !inside.is_finite() || inside >= -1e-10 {
                 return None;
@@ -119,11 +154,16 @@ impl Prism {
     /// 取 min(t) 而非第一个命中的面，使结果与面存储顺序无关。
     fn intersect_after(&self, ray: &Ray, min_distance: f64) -> Option<Hit> {
         // Triangle 已检查距离下限和非有限值。
-        // 必须检查所有面再比较距离，索引靠前的面不一定离光线起点最近。
-        self.faces
-            .iter()
-            .filter_map(|face| face.intersect_after(ray, min_distance))
-            .min_by(|a, b| a.distance.total_cmp(&b.distance))
+        // 必须检查所有面再比较距离，索引靠前的面不一定离光线起点最近；传入当前最近距离上界剪枝。
+        let mut best: Option<Hit> = None;
+        let mut max_distance = f64::INFINITY;
+        for face in &self.faces {
+            if let Some(hit) = face.intersect_between(ray, min_distance, max_distance) {
+                max_distance = hit.distance;
+                best = Some(hit);
+            }
+        }
+        best
     }
 }
 
@@ -231,5 +271,36 @@ mod tests {
             bad_direction.direction.z = value;
             assert!(prism.intersect(&bad_direction).is_none());
         }
+    }
+
+    #[test]
+    fn translated_prism_classifies_boundary_and_interior_points() {
+        let shift = Vector3::new(1e6, -2e6, 3e6);
+        let vertices = [
+            Vector3::new(-0.5, -1.0, 1.0) + shift,
+            Vector3::new(0.5, -1.0, 1.0) + shift,
+            Vector3::new(0.0, -1.0, 1.8) + shift,
+            Vector3::new(-0.5, 1.0, 1.0) + shift,
+            Vector3::new(0.5, 1.0, 1.0) + shift,
+            Vector3::new(0.0, 1.0, 1.8) + shift,
+        ];
+        let prism = Prism::from_vertices(vertices).unwrap();
+        let interior = Vector3::new(0.0, 0.0, 1.2) + shift;
+        assert_eq!(
+            prism.classify_point(interior).unwrap(),
+            PointLocation::Inside
+        );
+        // A point on the slanted face computed via ray intersection.
+        let hit = prism
+            .intersect(&Ray::new(interior, Vector3::new(1.0, 0.2, 0.3)).unwrap())
+            .unwrap();
+        assert_eq!(
+            prism.classify_point(hit.coords).unwrap(),
+            PointLocation::OnBoundary
+        );
+        assert_eq!(
+            prism.classify_point(hit.coords + hit.normal * 0.1).unwrap(),
+            PointLocation::Outside
+        );
     }
 }

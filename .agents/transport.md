@@ -46,7 +46,7 @@
 
 ## 光谱积分与发射归一化
 
-[光子 generation](../src/integrator/photon/generation.rs)、[光源](../src/light/mod.rs) 与 [光谱相机](../src/integrator/camera/spectral.rs) 的权重分工：
+[光子发射](../src/integrator/photon/emission.rs)、[光子积分](../src/integrator/photon/integrate.rs)、[光源](../src/light/mod.rs) 与 [光谱相机](../src/integrator/camera/spectral.rs) 的权重分工：
 
 | 环节 | 权重与边界 |
 | --- | --- |

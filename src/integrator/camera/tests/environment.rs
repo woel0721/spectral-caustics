@@ -1,4 +1,3 @@
-use crate::geometry::hit::GeometryHit;
 // Current environment PDF, MIS and independent numerical references.
 
 use super::super::lighting::environment::environment_lighting;
@@ -8,7 +7,6 @@ use crate::config::RenderJob;
 use crate::config::scene::EnvironmentMisHeuristic;
 use crate::geometry::hit::Hit;
 use crate::geometry::ray::INTERSECTION_EPSILON;
-use crate::geometry::ray::Ray;
 use crate::material::BsdfSample;
 use crate::material::Material;
 use crate::material::unit_vector;
@@ -20,78 +18,14 @@ use std::f64::consts::PI;
 
 use crate::camera::Camera;
 use crate::config::camera::CameraConfig;
-use crate::config::scene::EnvironmentConfig;
-use crate::environment::Environment;
 use crate::geometry::ground::Ground;
-use crate::geometry::object::Hittable;
 use crate::material::lambertian::Lambertian;
-use image::Rgb;
-use image::codecs::hdr::HdrEncoder;
 use rand::RngCore;
 use std::collections::VecDeque;
-use std::fs;
-use std::fs::File;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
-struct TemporaryHdr(PathBuf);
-
-impl TemporaryHdr {
-    fn new(width: usize, height: usize, pixels: Vec<[f32; 3]>) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "environment-test-{}-{stamp}-{}.hdr",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let pixels: Vec<_> = pixels.into_iter().map(Rgb).collect();
-        HdrEncoder::new(File::create_new(&path).unwrap())
-            .encode(&pixels, width, height)
-            .unwrap();
-        Self(path)
-    }
-
-    fn uniform(rgb: [f32; 3]) -> Self {
-        Self::new(4, 2, vec![rgb; 8])
-    }
-
-    fn high_contrast() -> Self {
-        let mut pixels = vec![[0.125; 3]; 64 * 32];
-        // 上半球约 0.22% 球面积的 2x2 高亮块；其余区域保持暗灰。
-        for row in 7..9 {
-            for col in 31..33 {
-                pixels[row * 64 + col] = [1024.0; 3];
-            }
-        }
-        Self::new(64, 32, pixels)
-    }
-
-    fn scene(&self, rotation_degrees: f64) -> RenderJob {
-        let mut scene = RenderJob::new();
-        scene.scene.environment = Some(
-            Environment::try_from(&EnvironmentConfig {
-                map_path: Some(self.0.clone()),
-                rotation_degrees,
-                ..Default::default()
-            })
-            .unwrap(),
-        );
-        scene
-    }
-}
-
-impl Drop for TemporaryHdr {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
+use super::support::{HalfPlane, TemporaryHdr};
 
 #[derive(Clone)]
 struct FirstWordRng {
@@ -389,13 +323,6 @@ fn back_hemisphere_and_blocked_hdri_samples_keep_the_total_denominator() {
     .unwrap();
     assert!((actual - Vector3::repeat(0.64)).norm() < 1e-12);
     assert!(rng.0.is_empty());
-    struct HalfPlane(Ground);
-    impl Hittable for HalfPlane {
-        fn intersect(&self, ray: &Ray) -> Option<GeometryHit> {
-            let hit = self.0.intersect(ray)?;
-            (hit.coords.y > 0.0).then_some(hit)
-        }
-    }
     scene.scene.add(
         Box::new(Ground::new(0.0).unwrap()),
         Box::new(
@@ -883,7 +810,6 @@ mod power {
 }
 
 mod stratified {
-    use crate::geometry::hit::GeometryHit;
     // Fixed-quota Balance MIS and independent integration references.
 
     use super::*;
@@ -915,15 +841,6 @@ mod stratified {
             for chunk in dest.chunks_mut(8) {
                 chunk.copy_from_slice(&self.next_u64().to_le_bytes()[..chunk.len()]);
             }
-        }
-    }
-
-    struct HalfPlane(Ground);
-
-    impl Hittable for HalfPlane {
-        fn intersect(&self, ray: &Ray) -> Option<GeometryHit> {
-            let hit = self.0.intersect(ray)?;
-            (hit.coords.y > 0.0).then_some(hit)
         }
     }
 
@@ -1216,6 +1133,7 @@ mod stratified {
                 let wi = Vector3::new(radius * phi.cos(), radius * phi.sin(), z);
                 if transmittance_to_light(
                     scene,
+                    scene.scene.has_medium_interface(),
                     position,
                     Vector3::z(),
                     wi,

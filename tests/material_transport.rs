@@ -145,12 +145,8 @@ fn mirror_and_ggx_components_repeat_bitwise_across_threads_mis_depths_and_seeds(
     use spectral_caustics::config::scene::EnvironmentConfig;
     use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 
-    let settings = RenderSetting {
-        width: 16,
-        height: 12,
-        samples_per_pixel_axis: 1,
-        ..Default::default()
-    };
+    let temp = support::TempDir::new("material-transport");
+    let hdr = temp.write_rgbe_4x2_hdr("env.hdr", false, true);
     for material in [
         MaterialConfig::Mirror {
             reflectance: [0.9, 0.5, 0.2],
@@ -168,7 +164,7 @@ fn mirror_and_ggx_components_repeat_bitwise_across_threads_mis_depths_and_seeds(
     ] {
         let mut config = SceneConfig {
             environment: Some(EnvironmentConfig {
-                map_path: Some("assets/HDRI/autoshop_01_4k.hdr".into()),
+                map_path: Some(hdr.clone()),
                 ..Default::default()
             }),
             environment_samples: 3,
@@ -186,20 +182,7 @@ fn mirror_and_ggx_components_repeat_bitwise_across_threads_mis_depths_and_seeds(
             }
         }
         let mut scene = RenderJob::from_config(&config).unwrap();
-        let lighting = integrate_xyz(
-            &scene,
-            scene.photon.caustics_object_id,
-            scene.photon.ground_id.unwrap(),
-            &settings,
-        )
-        .unwrap();
-        assert!(
-            lighting
-                .caustics
-                .pixels()
-                .iter()
-                .all(|p| *p == Vector3::zeros())
-        );
+        assert!(scene.photon.caustics_object_id.is_none());
         for heuristic in [
             EnvironmentMisHeuristic::Balance,
             EnvironmentMisHeuristic::Power,
@@ -210,24 +193,20 @@ fn mirror_and_ggx_components_repeat_bitwise_across_threads_mis_depths_and_seeds(
                 for seed in [42, 123] {
                     let mut reference = None;
                     for threads in [1, 2, 4, 1] {
-                        let images = rayon::ThreadPoolBuilder::new()
-                            .num_threads(threads)
-                            .build()
+                        let images = support::run_in_threads(threads, || {
+                            spectral_caustics::integrator::camera::integrate_rgb(
+                                &scene,
+                                &spectral_caustics::config::render::RenderSetting {
+                                    width: 16,
+                                    height: 12,
+                                    camera_spp: 8,
+                                    seed,
+                                    ..Default::default()
+                                },
+                                None,
+                            )
                             .unwrap()
-                            .install(|| {
-                                spectral_caustics::integrator::camera::integrate_rgb(
-                                    &scene,
-                                    &spectral_caustics::config::render::RenderSetting {
-                                        width: 16,
-                                        height: 12,
-                                        camera_spp: 8,
-                                        seed,
-                                        ..Default::default()
-                                    },
-                                    Some(&lighting),
-                                )
-                                .unwrap()
-                            });
+                        });
                         for i in 0..images.combined.pixels().len() {
                             assert!(
                                 (images.direct.pixels()[i] + images.caustics.pixels()[i]
@@ -312,7 +291,6 @@ fn ggx_ground_is_supported_by_rgb_camera_and_rejected_by_irradiance_binding() {
 fn caustics_selection_requires_dielectric_and_defaults_off_for_all_supported_shapes() {
     use spectral_caustics::config::Config;
     for source in [
-        include_str!("../configs/vertical_prism_caustics.json"),
         include_str!("../configs/sphere_spectral.json"),
         include_str!("../configs/vertical_prism_spectral_caustics.json"),
     ] {

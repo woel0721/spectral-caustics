@@ -41,12 +41,9 @@ use spectral_caustics::spectrum::emission::rgb_emission;
 use spectral_caustics::spectrum::rgb_reflectance;
 use std::f64::consts::PI;
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 use support::assert_framebuffer_bits_eq;
 
 struct FixedRng {
@@ -960,43 +957,23 @@ fn packet_setting_preserves_rgb_camera_and_source_caustic_components() {
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (one).settings(),
+        one.settings(),
     )
     .unwrap();
     let b = spectral_caustics::integrator::photon::integrate_xyz(
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (four).settings(),
+        four.settings(),
     )
     .unwrap();
     assert_framebuffer_bits_eq(a.direct.as_ref().unwrap(), b.direct.as_ref().unwrap());
     assert_framebuffer_bits_eq(&a.caustics, &b.caustics);
     assert!(a.caustics.pixels().iter().any(|p| p.y > 0.0));
-    let a = spectral_caustics::integrator::camera::integrate_rgb(
-        &scene,
-        &spectral_caustics::config::render::RenderSetting {
-            width: (one).settings().width,
-            height: (one).settings().height,
-            camera_spp: 8,
-            seed: c.render.seed,
-            ..Default::default()
-        },
-        Some(&a),
-    )
-    .unwrap();
-    let b = spectral_caustics::integrator::camera::integrate_rgb(
-        &scene,
-        &spectral_caustics::config::render::RenderSetting {
-            width: (four).settings().width,
-            height: (four).settings().height,
-            camera_spp: 8,
-            seed: c.render.seed,
-            ..Default::default()
-        },
-        Some(&b),
-    )
-    .unwrap();
+    let a = spectral_caustics::integrator::camera::integrate_rgb(&scene, one.settings(), Some(&a))
+        .unwrap();
+    let b = spectral_caustics::integrator::camera::integrate_rgb(&scene, four.settings(), Some(&b))
+        .unwrap();
     for (x, y) in [
         (&a.direct, &b.direct),
         (&a.caustics, &b.caustics),
@@ -1432,27 +1409,13 @@ fn camera_modes_repeat_bitwise_across_threads_and_renderer_uses_integrators() {
     );
 }
 
-struct Temp(PathBuf);
-impl Temp {
-    fn new() -> Self {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let p = std::env::temp_dir().join(format!("spectral-hero-{}-{stamp}", std::process::id()));
-        fs::create_dir_all(&p).unwrap();
-        Self(p)
-    }
-}
-impl Drop for Temp {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
+fn temp_dir() -> support::TempDir {
+    support::TempDir::new("spectral-hero")
 }
 
 #[test]
 fn spectral_hdri_balance_power_and_odd_quotas_converge_to_a_uniform_emitter() {
-    let dir = Temp::new();
+    let dir = temp_dir();
     let path = dir.0.join("white.hdr");
     image::codecs::hdr::HdrEncoder::new(fs::File::create(&path).unwrap())
         .encode(&[image::Rgb([4.0_f32; 3]); 8], 4, 2)
@@ -1536,7 +1499,7 @@ fn spectral_config_defaults_roundtrips_rejects_ggx_and_cli_renders_xyz_output() 
     c.render.height = 12;
     c.render.camera_spp = 16;
     c.scene.environment.as_mut().unwrap().map_path = None;
-    let dir = Temp::new();
+    let dir = temp_dir();
     c.render.output_path = dir.0.join("camera.png");
     c.save(dir.0.join("scene.json")).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_spectral-caustics"))
@@ -1676,7 +1639,7 @@ fn spectral_invalid_workloads_and_path_states_fail_explicitly() {
 
 #[test]
 fn colored_hdr_odd_mis_with_glass_occlusion_matches_independent_hemisphere_quadrature() {
-    let dir = Temp::new();
+    let dir = temp_dir();
     let path = dir.0.join("colored.hdr");
     let pixels: Vec<_> = (0..32)
         .map(|i| {

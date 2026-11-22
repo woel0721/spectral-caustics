@@ -14,7 +14,7 @@ pub mod medium;
 pub mod optics;
 pub mod output;
 pub mod renderer;
-pub mod sampling;
+pub(crate) mod sampling;
 pub mod scene;
 pub mod spectrum;
 

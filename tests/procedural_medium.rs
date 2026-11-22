@@ -107,8 +107,12 @@ fn disk_lights_local_fog_and_parallel_renders_agree() {
     ] {
         config.render.camera_mode = mode;
         config.render.spectral_packet_size = packet;
+        let built = config.build().unwrap();
         config.render.thread_count = Some(1);
-        let reference = render(&config);
+        let reference = Renderer::new(config.render.clone())
+            .unwrap()
+            .render(&built)
+            .unwrap();
         for (d, (c, combined)) in reference.direct.pixels().iter().zip(
             reference
                 .caustics
@@ -120,7 +124,10 @@ fn disk_lights_local_fog_and_parallel_renders_agree() {
         }
         for threads in [2, 4] {
             config.render.thread_count = Some(threads);
-            let parallel = render(&config);
+            let parallel = Renderer::new(config.render.clone())
+                .unwrap()
+                .render(&built)
+                .unwrap();
             assert_camera_images_bits_eq(&parallel, &reference);
         }
 

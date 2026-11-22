@@ -8,9 +8,6 @@ pub use disk::DiskDirectSample;
 pub use disk::DiskEmissionSample;
 pub use disk::DiskPositionSample;
 
-use crate::geometry::ray::Ray;
-
-use nalgebra::Vector2;
 use nalgebra::Vector3;
 
 #[derive(Debug, Clone)]
@@ -89,23 +86,6 @@ impl Light {
     pub fn analytic_sun(&self) -> Result<Option<(Vector3<f64>, f64)>, String> {
         self.validate_emission()?;
         Ok(self.sunlight())
-    }
-    /// 根据采样坐标生成一条从光源出发的射线，供批量光子追踪。
-    ///
-    /// 输入：位置样本 position_u 和方向样本 direction_u，各轴应在 [0,1)。
-    ///
-    /// 输出：Ray，构造失败时 None；平行光只用位置，圆盘还按余弦半球采方向。
-    /// 本函数不返回通量；调用方按匹配的发射分布赋每条 Φ/N，再施加光谱密度。
-    pub fn emission_ray(&self, position_u: [f64; 2], direction_u: [f64; 2]) -> Option<Ray> {
-        match self {
-            Self::Parallel(light) => {
-                let span = light.aperture_max_m - light.aperture_min_m;
-                let p = light.aperture_min_m
-                    + Vector2::new(position_u[0] * span.x, position_u[1] * span.y);
-                Ray::new(Vector3::new(p.x, p.y, light.height_m), light.direction)
-            }
-            Self::DiskArea(light) => Some(light.sample_emission(position_u, direction_u)?.ray),
-        }
     }
     /// 返回每条发射射线需要的随机维数：平行光为位置 2 维，圆盘为位置加方向共 4 维，用于定位采样块。
     pub(crate) fn emission_dimensions(&self) -> usize {

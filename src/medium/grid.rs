@@ -25,6 +25,7 @@ struct MajorantGrid {
     stride: usize,
     resolution: [usize; 3],
     max_densities: Vec<f64>,
+    has_empty_blocks: bool,
 }
 
 impl MajorantGrid {
@@ -37,30 +38,42 @@ impl MajorantGrid {
             .try_reserve_exact(count)
             .map_err(|_| "cannot allocate local majorants")?;
         max_densities.resize(count, 0.0_f64);
-        for (i, &density) in densities.iter().enumerate() {
-            let cell = [
-                i % fine[0],
-                (i / fine[0]) % fine[1],
-                i / (fine[0] * fine[1]),
-            ]
-            .map(|v| v / stride);
-            let index = cell[0] + resolution[0] * (cell[1] + resolution[1] * cell[2]);
-            max_densities[index] = max_densities[index].max(density);
+        let [fx, fy, fz] = fine;
+        let [rx, ry, _] = resolution;
+        let mut offset = 0;
+        for z in 0..fz {
+            let cz_base = (z / stride) * ry;
+            for y in 0..fy {
+                let cy_base = (cz_base + y / stride) * rx;
+                let row = &densities[offset..offset + fx];
+                offset += fx;
+                for (cx, chunk) in row.chunks(stride).enumerate() {
+                    let mut m = max_densities[cy_base + cx];
+                    for &density in chunk {
+                        m = m.max(density);
+                    }
+                    max_densities[cy_base + cx] = m;
+                }
+            }
         }
         // Equal block maxima give identical bounds at every wavelength.
         if max_densities.iter().all(|&m| m == max_densities[0]) {
+            let has_empty_blocks = max_densities[0] == 0.0;
             max_densities.truncate(1);
             max_densities.shrink_to_fit();
             return Ok(Self {
                 stride: *fine.iter().max().unwrap(),
                 resolution: [1; 3],
                 max_densities,
+                has_empty_blocks,
             });
         }
+        let has_empty_blocks = max_densities.contains(&0.0);
         Ok(Self {
             stride,
             resolution,
             max_densities,
+            has_empty_blocks,
         })
     }
 
@@ -73,7 +86,9 @@ impl MajorantGrid {
 pub struct GridMedium {
     min: Vector3<f64>,
     max: Vector3<f64>,
+    inv_extent: Vector3<f64>,
     resolution: [usize; 3],
+    faces: [Vec<f64>; 3],
     densities: Vec<f64>,
     base: SpectralCoefficients,
     max_density: f64,
@@ -109,6 +124,64 @@ impl TryFrom<&ProceduralMediumConfig> for GridMedium {
     }
 }
 
+pub(super) fn validate_grid_layout(
+    min: [f64; 3],
+    max: [f64; 3],
+    resolution: [usize; 3],
+) -> Result<usize, String> {
+    if !valid_bounds(min, max) {
+        return Err("grid medium requires finite bounds min < max".into());
+    }
+    let count = resolution
+        .iter()
+        .try_fold(1usize, |n, &r| if r == 0 { None } else { n.checked_mul(r) })
+        .filter(|&n| {
+            n.checked_mul(std::mem::size_of::<f64>())
+                .is_some_and(|bytes| bytes <= isize::MAX as usize)
+        })
+        .ok_or("grid resolution must be positive and not overflow")?;
+    for axis in 0..3 {
+        let n = resolution[axis];
+        n.checked_add(1)
+            .ok_or("grid resolution must be positive and not overflow")?;
+        let extent = max[axis] - min[axis];
+        let mut previous = min[axis];
+        for i in 1..=n {
+            let face = if i == n {
+                max[axis]
+            } else {
+                min[axis] + extent * (i as f64 / n as f64)
+            };
+            if face <= previous {
+                return Err("grid voxel width is below world-coordinate precision".into());
+            }
+            previous = face;
+        }
+    }
+    Ok(count)
+}
+
+pub(super) fn validate_densities(
+    densities: &[f64],
+    count: usize,
+    base: &SpectralCoefficients,
+) -> Result<f64, String> {
+    if count != densities.len() {
+        return Err("grid resolution must match densities length".into());
+    }
+    let mut max_density = 0.0_f64;
+    for &d in densities {
+        if !d.is_finite() || d < 0.0 {
+            return Err("grid densities must be nonnegative and finite".into());
+        }
+        max_density = max_density.max(d);
+    }
+    if !base.has_finite_extinction(max_density) {
+        return Err("grid density-scaled extinction overflows".into());
+    }
+    Ok(max_density)
+}
+
 impl GridMedium {
     fn build<'a>(
         min: [f64; 3],
@@ -118,25 +191,28 @@ impl GridMedium {
         g: &HgAnisotropy,
         density_source: impl FnOnce(usize) -> Result<Cow<'a, [f64]>, String>,
     ) -> Result<Self, String> {
-        if !valid_bounds(min, max) {
-            return Err("grid medium requires finite bounds min < max".into());
-        }
-        let count = resolution
-            .iter()
-            .try_fold(1usize, |n, &r| if r == 0 { None } else { n.checked_mul(r) })
-            .ok_or("grid resolution must be positive and not overflow")?;
+        let count = validate_grid_layout(min, max, resolution)?;
         let phase = SpectralHg::new(g)?;
+        let min_vec = Vector3::from(min);
+        let max_vec = Vector3::from(max);
+        let extent = max_vec - min_vec;
+        let inv_extent = Vector3::new(1.0 / extent.x, 1.0 / extent.y, 1.0 / extent.z);
+        let mut faces: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for axis in 0..3 {
+            let n = resolution[axis];
+            let mut axis_faces = Vec::new();
+            axis_faces
+                .try_reserve_exact(n + 1)
+                .map_err(|_| "cannot allocate grid voxel faces")?;
+            axis_faces.push(min_vec[axis]);
+            for i in 1..n {
+                axis_faces.push(min_vec[axis] + extent[axis] * (i as f64 / n as f64));
+            }
+            axis_faces.push(max_vec[axis]);
+            faces[axis] = axis_faces;
+        }
         let densities = density_source(count)?;
-        if count != densities.len() {
-            return Err("grid resolution must match densities length".into());
-        }
-        if densities.iter().any(|d| !d.is_finite() || *d < 0.0) {
-            return Err("grid densities must be nonnegative and finite".into());
-        }
-        let max_density = densities.iter().copied().fold(0.0, f64::max);
-        if !base.has_finite_extinction(max_density) {
-            return Err("grid density-scaled extinction overflows".into());
-        }
+        let max_density = validate_densities(&densities, count, &base)?;
         let densities = match densities {
             Cow::Owned(densities) => densities,
             Cow::Borrowed(source) => {
@@ -149,52 +225,40 @@ impl GridMedium {
             }
         };
         let majorants = MajorantGrid::new(resolution, &densities, MAJORANT_BLOCK_EDGE)?;
-        let m = Self {
-            min: min.into(),
-            max: max.into(),
+        Ok(Self {
+            min: min_vec,
+            max: max_vec,
+            inv_extent,
             resolution,
+            faces,
             densities,
             base,
             max_density,
             majorants,
             phase,
-        };
-        // Reject cells collapsed by world-coordinate rounding. DDA must always
-        // advance a voxel index, and each configured cell must have positive width.
-        for axis in 0..3 {
-            let mut previous = m.min[axis];
-            for i in 1..=m.resolution[axis] {
-                let face = m.face(axis, i);
-                if face <= previous {
-                    return Err("grid voxel width is below world-coordinate precision".into());
-                }
-                previous = face;
-            }
-        }
-        Ok(m)
+        })
     }
+    #[inline]
     fn face(&self, axis: usize, i: usize) -> f64 {
-        if i == self.resolution[axis] {
-            self.max[axis]
-        } else {
-            self.min[axis]
-                + (self.max[axis] - self.min[axis]) * (i as f64 / self.resolution[axis] as f64)
-        }
+        self.faces[axis][i]
     }
+    #[inline]
     fn index(&self, cell: [usize; 3]) -> usize {
         cell[0] + self.resolution[0] * (cell[1] + self.resolution[1] * cell[2])
     }
+    #[inline]
     fn cell_at(&self, position: Vector3<f64>) -> [usize; 3] {
         std::array::from_fn(|axis| {
-            let q = (position[axis] - self.min[axis]) / (self.max[axis] - self.min[axis]);
-            let mut i = ((q * self.resolution[axis] as f64).floor() as usize)
-                .min(self.resolution[axis] - 1);
+            let n = self.resolution[axis];
+            let faces = &self.faces[axis];
+            let q = (position[axis] - self.min[axis]) * self.inv_extent[axis];
+            let mut i = ((q * n as f64).floor() as usize).min(n - 1);
             // Use the same rounded world-space faces as DDA, including for
             // non-binary cell sizes where division can round to the other side.
-            while i + 1 < self.resolution[axis] && position[axis] >= self.face(axis, i + 1) {
+            while i + 1 < n && position[axis] >= faces[i + 1] {
                 i += 1;
             }
-            while i > 0 && position[axis] < self.face(axis, i) {
+            while i > 0 && position[axis] < faces[i] {
                 i -= 1;
             }
             i
@@ -212,13 +276,58 @@ impl GridMedium {
         exit: f64,
         base: MediumCoefficients,
     ) -> f64 {
+        if self.max_density == 0.0 || base.sigma_t() == 0.0 {
+            return 1.0;
+        }
         let mut tau = 0.0;
-        for segment in VoxelDda::new(self, ray, enter, exit, 1) {
-            let density = self.densities[self.index(segment.cell)];
-            let sigma_t = base.scaled_by_density(density).sigma_t();
-            // Vacuum contributes zero even if the exit distance overflows.
-            if sigma_t > 0.0 {
-                tau += sigma_t * (segment.end - segment.start);
+        let accumulate = |start: f64, end: f64, tau: &mut f64| -> bool {
+            for segment in VoxelDda::new(self, ray, start, end, 1) {
+                let density = self.densities[self.index(segment.cell)];
+                // Vacuum contributes zero even if the exit distance overflows.
+                if density > 0.0 {
+                    let sigma_t = base.scaled_by_density(density).sigma_t();
+                    if sigma_t > 0.0 {
+                        *tau += sigma_t * (segment.end - segment.start);
+                        // exp(-746) underflows to exact 0.0 in IEEE-754 f64.
+                        if *tau >= 746.0 {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        };
+        if !self.majorants.has_empty_blocks {
+            if accumulate(enter, exit, &mut tau) {
+                return 0.0;
+            }
+        } else {
+            let mut active: Option<(f64, f64)> = None;
+            for coarse in MajorantDda::with_resolution(
+                self,
+                ray,
+                enter,
+                exit,
+                self.majorants.stride,
+                self.majorants.resolution,
+            ) {
+                if self.majorants.max_density_at(coarse.cell) == 0.0 {
+                    if let Some((start, end)) = active.take()
+                        && accumulate(start, end, &mut tau)
+                    {
+                        return 0.0;
+                    }
+                    continue;
+                }
+                match &mut active {
+                    Some((_, end)) => *end = coarse.end,
+                    None => active = Some((coarse.start, coarse.end)),
+                }
+            }
+            if let Some((start, end)) = active
+                && accumulate(start, end, &mut tau)
+            {
+                return 0.0;
             }
         }
         (-tau).exp()
@@ -273,7 +382,14 @@ impl GridMedium {
         // Carry unit-exponential optical depth, not metres, across rate changes.
         // Draw lazily: even a nonempty ray may only cross zero-majorant blocks.
         let mut remaining = None;
-        for segment in MajorantDda::new(self, ray, enter, exit, self.majorants.stride) {
+        for segment in MajorantDda::with_resolution(
+            self,
+            ray,
+            enter,
+            exit,
+            self.majorants.stride,
+            self.majorants.resolution,
+        ) {
             // Use identical arithmetic for block and voxel extinction so rounding
             // preserves the bound. Only the density differs.
             let majorant = base
@@ -282,6 +398,8 @@ impl GridMedium {
             if majorant == 0.0 {
                 continue;
             }
+            let inv_majorant = 1.0 / majorant;
+            let use_inv = inv_majorant.is_finite();
             let mut t = segment.start;
             loop {
                 let tau = remaining.get_or_insert_with(|| {
@@ -293,7 +411,11 @@ impl GridMedium {
                     *tau -= depth;
                     break;
                 }
-                let next = t + *tau / majorant;
+                let next = if use_inv {
+                    t + *tau * inv_majorant
+                } else {
+                    t + *tau / majorant
+                };
                 if next <= t || next >= segment.end {
                     return Err(
                         "grid collision distance cannot advance inside segment at f64 precision"

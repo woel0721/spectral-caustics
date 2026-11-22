@@ -14,7 +14,6 @@ use spectral_caustics::material::Material;
 use spectral_caustics::material::dielectric::Dielectric;
 use spectral_caustics::optics::dispersion::Cauchy;
 use spectral_caustics::optics::dispersion::IorMode;
-use spectral_caustics::renderer::Renderer;
 use spectral_caustics::spectrum::d65_normalization;
 use spectral_caustics::spectrum::d65_spd;
 use spectral_caustics::spectrum::wavelength_to_xyz;
@@ -96,7 +95,7 @@ fn selection_follows_object_flags_and_rejects_ambiguous_or_non_dielectric_target
         let scene = c.build().unwrap();
         assert_eq!(scene.photon.caustics_object_id, Some(usize::from(reverse)));
         assert_eq!(scene.photon.ground_id, Some(usize::from(!reverse)));
-        assert_eq!(scene.diagnostics.target, Some(1));
+        assert_eq!(scene.diagnostic_target, Some(1));
     }
     let c = config();
     let mut value = serde_json::to_value(&c).unwrap();
@@ -125,7 +124,7 @@ fn selection_follows_object_flags_and_rejects_ambiguous_or_non_dielectric_target
             &scene,
             scene.photon.caustics_object_id,
             scene.photon.ground_id.expect("receiver"),
-            (Renderer::new(no_target.render).unwrap()).settings()
+            &no_target.render,
         )
         .unwrap()
         .caustics
@@ -187,7 +186,7 @@ fn spectral_sphere_matches_independent_constant_ior_renders_integrated_in_xyz() 
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (Renderer::new(c.render.clone()).unwrap()).settings(),
+        &c.render,
     )
     .unwrap();
     let mut expected = vec![Vector3::zeros(); c.render.width * c.render.height];
@@ -196,11 +195,12 @@ fn spectral_sphere_matches_independent_constant_ior_renders_integrated_in_xyz() 
     let k = d65_normalization(&samples).unwrap();
     for (nm, delta_nm) in samples {
         set_glass(&mut c, Cauchy::default().ior(nm).unwrap(), None);
+        let mono_scene = c.build().unwrap();
         let mono = spectral_caustics::integrator::photon::integrate_xyz(
-            &c.build().unwrap(),
-            c.build().unwrap().photon.caustics_object_id,
-            c.build().unwrap().photon.ground_id.expect("receiver"),
-            (Renderer::new(c.render.clone()).unwrap()).settings(),
+            &mono_scene,
+            mono_scene.photon.caustics_object_id,
+            mono_scene.photon.ground_id.expect("receiver"),
+            &c.render,
         )
         .unwrap();
         let xyz = wavelength_to_xyz(nm, d65_spd(nm).unwrap(), delta_nm, k).unwrap();
@@ -238,7 +238,7 @@ fn photon_flux_is_normalized_once_across_spatial_and_wavelength_sample_counts() 
                 &scene,
                 scene.photon.caustics_object_id,
                 scene.photon.ground_id.expect("receiver"),
-                (Renderer::new(c.render.clone()).unwrap()).settings(),
+                &c.render,
             )
             .unwrap();
             let pixel_area =
@@ -262,7 +262,7 @@ fn photon_flux_is_normalized_once_across_spatial_and_wavelength_sample_counts() 
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (Renderer::new(c.render).unwrap()).settings(),
+        &c.render,
     )
     .unwrap();
     let flux: f64 = lighting
@@ -293,26 +293,24 @@ fn sphere_components_are_additive_colored_and_repeat_across_threads_mis_and_dept
                 let mut reference = None;
                 for threads in [1, 2, 4, 1] {
                     c.render.thread_count = Some(threads);
-                    let renderer = Renderer::new(c.render.clone()).unwrap();
-                    let lighting = spectral_caustics::integrator::photon::integrate_xyz(
-                        &scene,
-                        scene.photon.caustics_object_id,
-                        scene.photon.ground_id.expect("receiver"),
-                        (renderer).settings(),
-                    )
-                    .unwrap();
-                    let images = spectral_caustics::integrator::camera::integrate_rgb(
-                        &scene,
-                        &spectral_caustics::config::render::RenderSetting {
-                            width: (renderer).settings().width,
-                            height: (renderer).settings().height,
-                            camera_spp: 4,
-                            seed: 42,
-                            ..Default::default()
-                        },
-                        Some(&lighting),
-                    )
-                    .unwrap();
+                    c.render.camera_spp = 4;
+                    c.render.seed = 42;
+                    let (lighting, images) = support::run_in_threads(threads, || {
+                        let lighting = spectral_caustics::integrator::photon::integrate_xyz(
+                            &scene,
+                            scene.photon.caustics_object_id,
+                            scene.photon.ground_id.expect("receiver"),
+                            &c.render,
+                        )
+                        .unwrap();
+                        let images = spectral_caustics::integrator::camera::integrate_rgb(
+                            &scene,
+                            &c.render,
+                            Some(&lighting),
+                        )
+                        .unwrap();
+                        (lighting, images)
+                    });
                     assert!(images.caustics.pixels().iter().any(|p| p.y > 0.0));
                     for ((direct, caustics), combined) in images
                         .direct
@@ -358,12 +356,11 @@ fn changing_light_dispersion_preserves_camera_direct_and_rgb_paths() {
     ] {
         set_glass(&mut c, 1.52, dispersion);
         let scene = c.build().unwrap();
-        let renderer = Renderer::new(c.render.clone()).unwrap();
         let lighting = spectral_caustics::integrator::photon::integrate_xyz(
             &scene,
             scene.photon.caustics_object_id,
             scene.photon.ground_id.expect("receiver"),
-            (renderer).settings(),
+            &c.render,
         )
         .unwrap();
         let white = lighting.sun_irradiance_xyz / lighting.sun_irradiance_xyz.y;
@@ -382,8 +379,8 @@ fn changing_light_dispersion_preserves_camera_direct_and_rgb_paths() {
         let images = spectral_caustics::integrator::camera::integrate_rgb(
             &scene,
             &spectral_caustics::config::render::RenderSetting {
-                width: (renderer).settings().width,
-                height: (renderer).settings().height,
+                width: c.render.width,
+                height: c.render.height,
                 camera_spp: 4,
                 seed: 42,
                 ..Default::default()

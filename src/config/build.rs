@@ -1,4 +1,4 @@
-//! Scene 的默认构建、JSON 转换与几何/材质实例化。
+//! RenderJob 的默认构建、JSON 转换与几何/材质实例化。
 
 use super::{
     RenderJob,
@@ -29,23 +29,23 @@ pub(super) fn build_prism(vertices_m: [[f64; 3]; 6], index: usize) -> Result<Pri
 }
 
 impl Default for RenderJob {
-    /// 返回与 Scene::new 相同的空运行时场景；几何物体需后续添加。
+    /// 返回与 RenderJob::new 相同的空运行时任务；几何物体需后续添加。
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl RenderJob {
-    /// 创建使用默认共享参数的空场景，供示例和测试手工添加几何。
+    /// 创建使用默认共享参数的空运行时任务，供示例和测试手工添加几何。
     ///
-    /// 输入：无；输出：带相机、环境、光源和接收范围的 Scene，物体/材质表为空。
+    /// 输入：无；输出：带相机、环境、光源和接收范围的 RenderJob，物体/材质表为空。
     pub fn new() -> Self {
         Self::empty_from_config(&SceneConfig::default()).expect("内置默认场景参数必须有效")
     }
 
-    /// 从配置初始化场景的共享参数，供完整场景构建复用。
+    /// 从配置初始化运行时任务的共享参数，供完整场景构建复用。
     ///
-    /// 输入：由调用方负责校验的 SceneConfig；输出：尚无物体/材质的 Scene，相机/光源构建或 HDR 加载失败返回 Err。
+    /// 输入：由调用方负责校验的 SceneConfig；输出：尚无物体/材质的 RenderJob，相机/光源构建或 HDR 加载失败返回 Err。
     fn empty_from_config(config: &SceneConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let medium = config
             .medium
@@ -87,13 +87,13 @@ impl RenderJob {
                 .map(Checkerboard::try_from)
                 .transpose()?,
             #[cfg(feature = "diagnostics")]
-            diagnostics: Default::default(),
+            diagnostic_target: None,
         })
     }
 
-    /// 将场景配置构建为可求交、可照明的运行时场景。
+    /// 将场景配置构建为可求交、可照明的运行时渲染任务。
     ///
-    /// 输入：SceneConfig；输出：含相机、光源、几何、材质和编号绑定的 Scene，配置/几何/HDR 构建失败时 Err。
+    /// 输入：SceneConfig；输出：含相机、光源、几何、材质和编号绑定的 RenderJob，配置/几何/HDR 构建失败时 Err。
     /// 要求一个接收地面；可显式选择一个理想介质 Sphere/Prism/VerticalPrism 作为光源焦散目标。
     pub fn from_config(config: &SceneConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
         crate::config::scene::validate_diffuse_bounces(config.max_diffuse_bounces)?;
@@ -108,8 +108,89 @@ impl RenderJob {
         {
             return Err("invalid background radiance".into());
         }
-        let mut scene = Self::empty_from_config(config)?;
+        config.camera.validate()?;
+        config.light.validate()?;
+        if let Some(medium) = &config.medium {
+            medium.validate()?;
+        }
+        if let Some(environment) = &config.environment {
+            environment.validate()?;
+        }
+        if let Some(checkerboard) = &config.ground_checkerboard {
+            checkerboard.validate()?;
+        }
         let ground_bounds = config.ground_bounds()?;
+        let mut ground_count = 0usize;
+        let mut caustics_count = 0usize;
+        let mut has_medium_interface = false;
+        for (index, object) in config.objects.iter().enumerate() {
+            if let Some((interface, mat)) = object.medium_interface() {
+                let field = format!("scene.objects[{index}].medium_interface");
+                if has_medium_interface {
+                    return Err(format!("{field} 一个场景仅支持一个介质界面").into());
+                }
+                if !matches!(mat, super::material::MaterialConfig::Dielectric { .. }) {
+                    return Err(format!("{field} 要求理想 Dielectric 材质").into());
+                }
+                interface
+                    .validate()
+                    .map_err(|error| format!("{field}.interior {error}"))?;
+                has_medium_interface = true;
+            }
+            object
+                .material()
+                .validate()
+                .map_err(|message| format!("scene.objects[{index}].{message}"))?;
+            match object {
+                ObjectConfig::Ground { height_m, .. } => {
+                    if !height_m.is_finite() {
+                        return Err("地面高度或范围无效".into());
+                    }
+                    ground_count += 1;
+                    if ground_count > 1 {
+                        return Err("当前场景只支持一个接收地面".into());
+                    }
+                    if config
+                        .light
+                        .as_parallel()
+                        .is_some_and(|light| *height_m >= light.height_m)
+                    {
+                        return Err("光源发射面必须高于接收地面".into());
+                    }
+                }
+                ObjectConfig::Sphere {
+                    caustics: true,
+                    material,
+                    ..
+                }
+                | ObjectConfig::Prism {
+                    caustics: true,
+                    material,
+                    ..
+                }
+                | ObjectConfig::VerticalPrism {
+                    caustics: true,
+                    material,
+                    ..
+                } => {
+                    if !matches!(material, super::material::MaterialConfig::Dielectric { .. }) {
+                        return Err("焦散物体必须是接收地面以外的理想 Dielectric".into());
+                    }
+                    caustics_count += 1;
+                    if caustics_count > 1 {
+                        return Err(
+                            "当前只支持一个焦散物体，请仅为一个 Sphere/Prism/VerticalPrism 启用 caustics"
+                                .into(),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        if ground_count == 0 {
+            return Err("场景必须包含一个 ground 接收地面".into());
+        }
+        let mut scene = Self::empty_from_config(config)?;
         for (index, object) in config.objects.iter().enumerate() {
             let (id, caustics) = match object {
                 ObjectConfig::VerticalPrism {

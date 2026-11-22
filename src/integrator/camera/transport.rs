@@ -6,10 +6,7 @@ use crate::{
     geometry::hit::Hit,
     material::{BsdfSample, Material},
     optics::dispersion::IorMode,
-    spectrum::{
-        cie_xyz,
-        emission::{d65_spectrum, rgb_emission},
-    },
+    spectrum::emission::{d65_spectrum, rgb_emission},
 };
 use nalgebra::Vector3;
 use rand::RngCore;
@@ -83,7 +80,6 @@ pub trait CameraTransport: Copy {
         wo: Vector3<f64>,
         map: Caustics<'_>,
     ) -> Result<Self::Value, &'static str>;
-    fn xyz(self, v: Self::Value) -> Option<Vector3<f64>>;
     fn valid(self) -> bool {
         true
     }
@@ -115,16 +111,17 @@ impl CameraTransport for Rgb {
         map: Caustics<'_>,
     ) -> Result<(Vector3<f64>, Self::Value), &'static str> {
         if let Caustics::Rgb(g) = map {
-            Ok((
-                g.light_wi,
-                xyz_to_linear_srgb(g.sun_irradiance_xyz).ok_or("sun XYZ overflow")?,
-            ))
+            Ok((g.light_wi, g.sun_irradiance_rgb))
         } else {
             Ok((wi, self.sun_color * strength))
         }
     }
     fn disk_emission(self) -> Self::Value {
-        xyz_to_linear_srgb(crate::spectrum::emission::d65_white_xyz()).expect("embedded D65 white")
+        static WHITE_RGB: std::sync::LazyLock<Vector3<f64>> = std::sync::LazyLock::new(|| {
+            xyz_to_linear_srgb(crate::spectrum::emission::d65_white_xyz())
+                .expect("embedded D65 white")
+        });
+        *WHITE_RGB
     }
     fn evaluate(
         self,
@@ -156,18 +153,18 @@ impl CameraTransport for Rgb {
         map: Caustics<'_>,
     ) -> Result<Self::Value, &'static str> {
         if let Caustics::Rgb(g) = map
-            && hit.object_id == (g.object_id)
+            && hit.object_id == g.object_id
         {
             let xyz = g
                 .sample_irradiance(hit.coords)
                 .ok_or("caustic query overflow")?;
+            if xyz == Vector3::zeros() {
+                return Ok(Vector3::zeros());
+            }
             xyz_to_linear_srgb(xyz * (g.rho / std::f64::consts::PI)).ok_or("caustic RGB overflow")
         } else {
             Ok(Vector3::zeros())
         }
-    }
-    fn xyz(self, v: Self::Value) -> Option<Vector3<f64>> {
-        crate::color::linear_srgb_to_xyz(v)
     }
 }
 impl CameraTransport for Spectral {
@@ -239,15 +236,27 @@ impl CameraTransport for Spectral {
         if let Caustics::Spectral(g) = map
             && hit.object_id == g.ground_id()
         {
-            Ok(self.evaluate(m, hit.normal, wo, hit.normal)
-                * g.sample(hit.coords, self.wavelength_nm)
-                    .ok_or("caustic spectral query overflow")?)
+            if m.irradiance_reflectance().is_none() {
+                return Err("caustics receiver ground must be Lambertian");
+            }
+            let irradiance = g
+                .sample(hit.coords, self.wavelength_nm)
+                .ok_or("caustic spectral query overflow")?;
+            if irradiance == 0.0 {
+                return Ok(0.0);
+            }
+            let f = self.evaluate(m, hit.normal, wo, hit.normal);
+            if !self.valid_weight(f) {
+                return Err("invalid caustic BSDF");
+            }
+            let radiance = f * irradiance;
+            if !radiance.is_finite() {
+                return Err("caustic spectral overflow");
+            }
+            Ok(radiance)
         } else {
             Ok(0.0)
         }
-    }
-    fn xyz(self, v: f64) -> Option<Vector3<f64>> {
-        cie_xyz(self.wavelength_nm).map(|cmf| cmf * v)
     }
     fn valid(self) -> bool {
         (380.0..=780.0).contains(&self.wavelength_nm)

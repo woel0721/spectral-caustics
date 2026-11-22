@@ -1,7 +1,6 @@
 //! 单面、均匀 Lambertian 发光圆盘；通量采用项目的 D65/Y 相对标尺。
 
 use crate::geometry::ray::Ray;
-use crate::material::to_world;
 use crate::material::unit_vector;
 use nalgebra::Vector3;
 use std::f64::consts::PI;
@@ -13,12 +12,15 @@ pub struct DiskAreaLight {
     pub(crate) center: Vector3<f64>,
     /// 指向发光半球的法线，构造时归一化。
     pub(crate) normal: Vector3<f64>,
+    tangent: Vector3<f64>,
+    bitangent: Vector3<f64>,
     /// 圆盘半径，单位米；面积 A=π·radius²。
     pub(crate) radius: f64,
     /// 单面发出的相对总通量 Φ，采用 D65/Y 标尺，未标定为瓦特。
     pub(crate) total_flux: f64,
-    area: f64,
+    inv_area: f64,
     radiance: f64,
+    flux_over_pi: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -78,12 +80,14 @@ impl DiskAreaLight {
     ) -> Result<Self, String> {
         let normal = unit_vector(normal).ok_or("disk normal must be finite and nonzero")?;
         let area = PI * radius * radius;
+        let inv_area = area.recip();
         let radiance = (total_flux / area) / PI;
+        let flux_over_pi = total_flux / PI;
         if !radius.is_finite()
             || radius <= 0.0
             || !area.is_finite()
             || area <= 0.0
-            || !area.recip().is_finite()
+            || !inv_area.is_finite()
             || !total_flux.is_finite()
             || total_flux < 0.0
             || !radiance.is_finite()
@@ -93,13 +97,24 @@ impl DiskAreaLight {
         {
             return Err("invalid disk geometry, area, flux or radiance".into());
         }
+        let helper = if normal.x.abs() > normal.y.abs() {
+            Vector3::y()
+        } else {
+            Vector3::x()
+        };
+        let bitangent = unit_vector(normal.cross(&helper))
+            .ok_or("disk tangent frame must be finite and nonzero")?;
+        let tangent = bitangent.cross(&normal);
         Ok(Self {
             center,
             normal,
+            tangent,
+            bitangent,
             radius,
             total_flux,
-            area,
+            inv_area,
             radiance,
+            flux_over_pi,
         })
     }
     pub fn center(&self) -> Vector3<f64> {
@@ -108,14 +123,8 @@ impl DiskAreaLight {
     pub fn normal(&self) -> Vector3<f64> {
         self.normal
     }
-    pub fn radius(&self) -> f64 {
-        self.radius
-    }
     pub fn total_flux(&self) -> f64 {
         self.total_flux
-    }
-    pub fn area(&self) -> f64 {
-        self.area
     }
     /// Le=Φ/(πA), without spectral density. Cached at construction.
     pub fn radiance(&self) -> f64 {
@@ -131,17 +140,16 @@ impl DiskAreaLight {
         if !valid_uv(u) {
             return None;
         }
-        let n = self.normal;
         let r = self.radius * u[0].sqrt();
-        let phi = TAU * u[1];
-        let position = self.center + to_world(Vector3::new(r * phi.cos(), r * phi.sin(), 0.0), n)?;
+        let (sin, cos) = (TAU * u[1]).sin_cos();
+        let position = self.center + (self.tangent * (r * cos) + self.bitangent * (r * sin));
         position
             .iter()
             .all(|v| v.is_finite())
             .then_some(DiskPositionSample {
                 position,
-                normal: n,
-                pdf_area: self.area.recip(),
+                normal: self.normal,
+                pdf_area: self.inv_area,
             })
     }
 
@@ -161,9 +169,11 @@ impl DiskAreaLight {
         }
         let p = self.sample_position(position_u)?;
         let r = direction_u[0].sqrt();
-        let phi = TAU * direction_u[1];
-        let local = Vector3::new(r * phi.cos(), r * phi.sin(), (1.0 - direction_u[0]).sqrt());
-        let ray = Ray::new(p.position, to_world(local, p.normal)?)?;
+        let (sin, cos) = (TAU * direction_u[1]).sin_cos();
+        let direction = self.tangent * (r * cos)
+            + self.bitangent * (r * sin)
+            + self.normal * (1.0 - direction_u[0]).sqrt();
+        let ray = Ray::new(p.position, direction)?;
         let pdf_direction = p.normal.dot(&ray.direction).max(0.0) / PI;
         (pdf_direction > 0.0 && pdf_direction.is_finite()).then_some(DiskEmissionSample {
             ray,
@@ -199,7 +209,7 @@ impl DiskAreaLight {
             return Ok(None);
         }
         // Le/p_A = Φ/π；先消去面积可避免小圆盘的巨大 Le 与巨大 PDF 相除。
-        let incident_weight = (self.total_flux / PI) * cosine_light / distance_squared;
+        let incident_weight = self.flux_over_pi * cosine_light / distance_squared;
         if !incident_weight.is_finite() || incident_weight < 0.0 {
             return Err("圆盘 NEE 几何权重溢出".into());
         }

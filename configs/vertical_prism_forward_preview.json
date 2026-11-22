@@ -11,7 +11,7 @@
     "wavelength_step_nm": 10.0,
     "exposure": 8.0,
     "seed": 42,
-    "thread_count": 4,
+    "thread_count": null,
     "max_spectral_blocks": 16,
     "output_path": "output/forward_preview/prism/camera_combined.png",
     "camera_mode": "spectral",

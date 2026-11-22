@@ -58,4 +58,22 @@ impl GroundReceiver {
         let span = self.max_m - self.min_m;
         span.x * span.y
     }
+
+    /// 校验矩形边界与正有限面积，返回 `(span, area)`。
+    pub(crate) fn checked_area(&self) -> Result<(Vector2<f64>, f64), &'static str> {
+        let span = self.max_m - self.min_m;
+        let area = span.x * span.y;
+        if self
+            .min_m
+            .iter()
+            .chain(self.max_m.iter())
+            .any(|v| !v.is_finite())
+            || span.iter().any(|v| !v.is_finite() || *v <= 0.0)
+            || !area.is_finite()
+            || area <= 0.0
+        {
+            return Err("invalid photon receiver bounds");
+        }
+        Ok((span, area))
+    }
 }

@@ -1023,20 +1023,23 @@ mod environment_escape {
 
     #[test]
     fn mixed_escape_queries_rotated_hdri_with_intensity_without_new_rng_draws() {
-        let path = std::env::temp_dir().join(format!("f2b-escape-{}.hdr", std::process::id()));
-        let mut bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 4\n".to_vec();
-        for _ in 0..2 {
-            for rgb in [
+        let hdr = super::super::support::TemporaryHdr::from_rgbe(
+            "f2b-escape",
+            4,
+            2,
+            &[
                 [128, 32, 16, 132],
                 [16, 128, 32, 132],
                 [32, 16, 128, 132],
                 [64, 64, 64, 132],
-            ] {
-                bytes.extend_from_slice(&rgb);
-            }
-        }
-        std::fs::write(&path, bytes).unwrap();
-        let map = EnvironmentMap::load(&path).unwrap();
+                [128, 32, 16, 132],
+                [16, 128, 32, 132],
+                [32, 16, 128, 132],
+                [64, 64, 64, 132],
+            ],
+        );
+        let path = &hdr.0;
+        let map = EnvironmentMap::load(path).unwrap();
         let direction = Vector3::new(-0.5, 0.0, 0.75_f64.sqrt());
         let mut results = Vec::new();
         for rotation in [0.0_f64, 90.0] {
@@ -1129,7 +1132,6 @@ mod environment_escape {
                 }
             }
         }
-        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1586,4 +1588,113 @@ mod materials {
             (Vector3::new(0.2, 0.5, 0.8) + Vector3::new(0.9, 0.6, 0.3)).component_mul(&sky) * 0.5;
         assert!((sum / 16384.0 - expected).norm() < 0.03);
     }
+}
+
+#[test]
+fn path_state_validate_rejects_non_unit_or_overflowing_ray_direction() {
+    let mut state = CameraPathState::new(Ray::new(Vector3::z(), -Vector3::z()).unwrap(), 0);
+    assert!(state.validate().is_ok());
+    for bad in [
+        Vector3::new(2.0, 0.0, 0.0),
+        Vector3::new(0.5, 0.0, 0.0),
+        Vector3::repeat(1e200),
+    ] {
+        state.ray.direction = bad;
+        assert!(state.validate().is_err());
+    }
+}
+
+#[test]
+fn camera_path_detects_medium_throughput_overflow_and_short_circuits_zero_weight() {
+    use crate::config::RenderJob;
+    use crate::medium::{Medium, MediumCoefficients, MediumSample, phase::HenyeyGreenstein};
+    use rand::{SeedableRng, rngs::StdRng};
+    struct ExtremeMedium(f64);
+    impl Medium for ExtremeMedium {
+        fn density_at(&self, _: Vector3<f64>) -> f64 {
+            1.0
+        }
+        fn coefficients_at(&self, _: Vector3<f64>, _: f64) -> MediumCoefficients {
+            MediumCoefficients {
+                sigma_a: 0.0,
+                sigma_s: 1.0,
+            }
+        }
+        fn sigma_t_majorant(&self, _: f64) -> f64 {
+            1.0
+        }
+        fn phase(&self, _: f64) -> HenyeyGreenstein {
+            HenyeyGreenstein::new(0.0).unwrap()
+        }
+        fn transmittance_ray(&self, _: &Ray, _: f64, _: f64) -> f64 {
+            1.0
+        }
+        fn sample_segment(
+            &self,
+            ray: &Ray,
+            _: f64,
+            _: f64,
+            allow_scattering: bool,
+            _: &mut dyn rand::RngCore,
+        ) -> Result<MediumSample, String> {
+            Ok(MediumSample {
+                position: allow_scattering.then(|| ray.at(0.5)),
+                weight: self.0,
+            })
+        }
+    }
+
+    // Overflow when multiplying throughput * sample.weight
+    let mut scene = RenderJob::new();
+    scene.scene.environment = None;
+    scene.scene.medium = Some(Box::new(ExtremeMedium(1e200)));
+    let mut state = CameraPathState::new(Ray::new(Vector3::z(), -Vector3::z()).unwrap(), 0);
+    state.throughput = Vector3::repeat(1e200);
+    let mut rng = StdRng::seed_from_u64(1);
+    let mut rng2 = StdRng::seed_from_u64(2);
+    let mut rng3 = StdRng::seed_from_u64(3);
+    let mut rng4 = StdRng::seed_from_u64(4);
+    assert!(
+        trace_camera_path(
+            &scene,
+            &mut state,
+            &mut CameraPathRngs {
+                camera: &mut rng,
+                environment: &mut rng2,
+                diffuse: &mut rng3,
+                medium: &mut rng4,
+            },
+            sun().0,
+            sun().1,
+            Caustics::None,
+            crate::optics::dispersion::IorMode::Constant,
+            #[cfg(feature = "diagnostics")]
+            None,
+        )
+        .is_err()
+    );
+
+    // Zero weight with Some(position) short-circuits without consuming phase/volume work
+    scene.scene.medium = Some(Box::new(ExtremeMedium(0.0)));
+    let mut state = CameraPathState::new(Ray::new(Vector3::z(), -Vector3::z()).unwrap(), 0);
+    let mut medium_rng = SequenceRng::new(&[]);
+    trace_camera_path(
+        &scene,
+        &mut state,
+        &mut CameraPathRngs {
+            camera: &mut rng,
+            environment: &mut rng2,
+            diffuse: &mut rng3,
+            medium: &mut medium_rng,
+        },
+        sun().0,
+        sun().1,
+        Caustics::None,
+        crate::optics::dispersion::IorMode::Constant,
+        #[cfg(feature = "diagnostics")]
+        None,
+    )
+    .unwrap();
+    assert_eq!(state.volume_scatters, 0);
+    assert_eq!(medium_rng.draws, 0);
 }

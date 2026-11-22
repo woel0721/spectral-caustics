@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 | `integrator/camera/path.rs` | RGB / Hero 共用的路径主循环、预算、RR、分量归属 |
 | `integrator/camera/{rgb,spectral,transport,types}.rs` | 像素 / 波长采样，数值表示与状态 |
 | `integrator/camera/lighting/` | 表面 / 体散射 NEE、环境 MIS、几何遮挡与介质透射率 |
-| `integrator/photon/{generation,path}.rs` | 共享发射 / 沉积内核、光谱积分及单光子 Forward 循环 |
+| `integrator/photon/{emission,integrate,path}.rs` | 发射分块与首交缓存、XYZ/Eλ 积分及单光子 Forward 循环 |
 | `caustics/` | 接收区、只读 XYZ / Eλ 数据、空间 / 波长插值 |
 | `sampling/` | 确定性随机流派生 |
 | `spectrum/` | 可追溯 CIE / D65 数据及 RGB 光谱近似 |
@@ -127,9 +127,10 @@ cargo run --release --locked --example refract_ray
 
 cargo fmt --check
 cargo build --locked --all-targets
-cargo test --locked
-cargo test --locked --features diagnostics
+cargo test --locked --all-targets
+cargo test --locked --doc
 cargo test --locked --all-targets --features diagnostics
+cargo test --locked --doc --features diagnostics
 cargo clippy --locked --all-targets -- -D warnings
 cargo clippy --locked --all-targets --features diagnostics -- -D warnings
 git diff --check
@@ -192,7 +193,7 @@ cargo test --locked --test volume
 
 每个对照子目录包含三个分量 PNG 和可独立重跑的 `config.json`。纯吸收组把相同总消光全部设为 `sigma_a`；两个散射组保持相同 `sigma_a/sigma_s`，只改变 g。密度倍率同时缩放两个系数，0 等价于无介质。
 
-相机预算截断后丢弃更高阶散射。焦散图记录未发生体散射的源端通量，由相机在符合条件的地面交点读取。平行光沿用无限解析太阳模型，发射窗口只裁剪光子发射位置。
+相机预算截断后丢弃更高阶散射。焦散图由相机在符合条件的地面交点读取；光子体散射由 `render.photon_max_volume_scatters` 独立控制（缺省为 0，仅在玻璃前缀后启用）。平行光沿用无限解析太阳模型，发射窗口只裁剪光子发射位置。
 
 ### 玻璃介质界面
 
@@ -310,5 +311,3 @@ GRID_BENCHMARK_CONFIG=output/grid_bench64/sparse_clumps/config.json cargo test -
 ```
 
 基准覆盖均匀、稀疏团块、单体素尖峰，输出 `benchmark.json`；整图开启时另存三个分量和可重跑配置。候选数通过该采样器每个候选的两次 u64 RNG 调用统计，不向相机或 `MediumSample` 添加统计字段。8³ 的选择、缓存成本、测量条件和局限见 [Phase 3.3 基准记录](medium_majorant_benchmark.md)。
-
-Phase 3.1 及此前的文件迁移、清理统计与验收明细见 [重构记录](refactor.md)。

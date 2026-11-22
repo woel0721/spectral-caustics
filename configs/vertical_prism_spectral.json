@@ -13,7 +13,7 @@
     "seed": 42,
     "thread_count": null,
     "max_spectral_blocks": 16,
-    "output_path": "output/vertical_prism/through/camera.png",
+    "output_path": "output/vertical_prism/through/camera_combined.png",
     "camera_mode": "spectral"
   },
   "scene": {

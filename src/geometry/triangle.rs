@@ -33,7 +33,7 @@ impl Triangle {
             * self
                 .normal
                 .abs()
-                .dot(&(vertices[0].abs() + direction.abs()));
+                .dot(&(point.abs() + self.vertices[0].abs()));
         if !distance.is_finite() || !tolerance.is_finite() {
             return Err("non-finite face-plane distance");
         }
@@ -41,12 +41,13 @@ impl Triangle {
             return Ok(PointLocation::Outside);
         }
         // 外向绕序保证每个径向侧面的叉积指向第三个顶点。共享面包含在两侧。
+        let side_scale = direction.abs().sup(&(point.abs() + center.abs()));
         for i in 0..3 {
             let a = vertices[i];
             let b = vertices[(i + 1) % 3];
             let normal = a.cross(&b);
             let side = normal.dot(&direction);
-            let roundoff = 8.0 * f64::EPSILON * normal.abs().dot(&direction.abs());
+            let roundoff = 8.0 * f64::EPSILON * normal.abs().dot(&side_scale);
             if !side.is_finite() || !roundoff.is_finite() {
                 return Err("non-finite tetrahedron side");
             }
@@ -95,9 +96,17 @@ impl Hittable for Triangle {
     fn intersect(&self, ray: &Ray) -> Option<Hit> {
         self.intersect_after(ray, INTERSECTION_EPSILON)
     }
+
+    fn intersect_from_volume(&self, ray: &Ray) -> Option<Hit> {
+        self.intersect_after(ray, 0.0)
+    }
 }
 
 impl Triangle {
+    pub(super) fn normal(&self) -> Vector3<f64> {
+        self.normal
+    }
+
     /// 求光线与三角形的最近正向交点，两面都能命中，供封闭玻璃寻找入射面和出射面。
     ///
     /// 输入：世界空间 Ray；输出：坐标、距离和原始几何法线组成的 Hit，未命中或数值无效返回 None。
@@ -105,6 +114,15 @@ impl Triangle {
     /// 公式：解 o+t·d=v0+u·e1+v·e2；仅接受 u≥0、v≥0、u+v≤1 和 t>min_distance。
     /// 使用 Möller–Trumbore 的叉积与点积求 t/u/v；法线不随光线方向翻转。
     pub(super) fn intersect_after(&self, ray: &Ray, min_distance: f64) -> Option<Hit> {
+        self.intersect_between(ray, min_distance, f64::INFINITY)
+    }
+
+    pub(super) fn intersect_between(
+        &self,
+        ray: &Ray,
+        min_distance: f64,
+        max_distance: f64,
+    ) -> Option<Hit> {
         if !ray.origin.iter().all(|c| c.is_finite()) || !ray.direction.iter().all(|c| c.is_finite())
         {
             return None;
@@ -118,6 +136,7 @@ impl Triangle {
         }
 
         // 解 origin + t * direction = v0 + u * edge1 + v * edge2。
+        // 延迟除 det：未命中零除法，仅命中三角内部时执行一次除法。
         let p = ray.direction.cross(&self.edge2);
         let det = self.edge1.dot(&p);
         if !det.is_finite() || det == 0.0 {
@@ -125,19 +144,24 @@ impl Triangle {
         }
 
         let offset = ray.origin - self.vertices[0];
-        let u = offset.dot(&p) / det;
-        if !u.is_finite() || !(0.0..=1.0).contains(&u) {
+        let u_det = offset.dot(&p);
+        // 负行列式取反，使正反两面共用同一套无分支范围判断。
+        let (abs_det, u_scaled, sign) = if det > 0.0 {
+            (det, u_det, 1.0)
+        } else {
+            (-det, -u_det, -1.0)
+        };
+        if !(0.0..=abs_det).contains(&u_scaled) {
             return None;
         }
-
         let q = offset.cross(&self.edge1);
-        let v = ray.direction.dot(&q) / det;
-        if !v.is_finite() || v < 0.0 || u + v > 1.0 {
+        let v_scaled = ray.direction.dot(&q) * sign;
+        if !(v_scaled >= 0.0 && u_scaled + v_scaled <= abs_det) {
             return None;
         }
 
         let distance = self.edge2.dot(&q) / det;
-        if !distance.is_finite() || distance <= min_distance {
+        if !distance.is_finite() || distance <= min_distance || distance >= max_distance {
             return None;
         }
         let coords = ray.at(distance);
@@ -342,5 +366,15 @@ mod tests {
 
         assert!((hit.distance - 1.0).abs() < 1e-12);
         assert!((hit.coords - Vector3::new(0.25 * size, 0.25 * size, 0.0)).norm() < 1e-20);
+    }
+
+    #[test]
+    fn intersect_from_volume_accepts_sub_epsilon_positive_hits() {
+        let triangle = unit_triangle();
+        let near = INTERSECTION_EPSILON * 0.25;
+        let ray = downward_ray(0.25, 0.25, near);
+        assert!(triangle.intersect(&ray).is_none());
+        let hit = triangle.intersect_from_volume(&ray).unwrap();
+        assert!((hit.distance - near).abs() < 1e-18);
     }
 }

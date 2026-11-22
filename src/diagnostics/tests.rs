@@ -23,7 +23,7 @@ fn surface(material: Box<dyn Material>) -> RenderJob {
     scene.scene.environment = None;
     scene.ground_checkerboard = None;
     scene.camera_options.max_diffuse_bounces = 1;
-    scene.diagnostics.target = Some(
+    scene.diagnostic_target = Some(
         scene
             .scene
             .add(Box::new(Ground::new(0.0).unwrap()), material),
@@ -76,7 +76,7 @@ fn mirror_reflection_records_first_geometry_and_has_no_tir_or_extra_rng() {
     let mut scene = surface(Box::new(Mirror::new(Vector3::repeat(0.95)).unwrap()));
     scene.scene.environment = RenderJob::new().scene.environment;
     let (debug, state, draws) = trace(&scene, downward(), &[], &[], &[]);
-    assert_eq!(debug.first_hit_object_id, scene.diagnostics.target);
+    assert_eq!(debug.first_hit_object_id, scene.diagnostic_target);
     assert_eq!(debug.first_hit_normal, Some([0.0, 0.0, 1.0]));
     assert_eq!(debug.events.specular_reflection, 1);
     assert_eq!(debug.events.specular_transmission, 0);
@@ -124,7 +124,7 @@ fn dielectric_internal_supercritical_ray_records_real_tir_without_rng() {
 fn glass_sphere() -> RenderJob {
     let mut scene = RenderJob::new();
     scene.ground_checkerboard = None;
-    scene.diagnostics.target = Some(scene.scene.add(
+    scene.diagnostic_target = Some(scene.scene.add(
         Box::new(Sphere::new(Vector3::zeros(), 1.0).unwrap()),
         Box::new(Dielectric::new(1.5).unwrap()),
     ));
@@ -155,8 +155,9 @@ fn sphere_camera_double_transmission_records_outward_entry_and_environment_once(
     assert_eq!(draws, [2, 0, 0]);
     let normal = Vector3::from(debug.first_hit_normal.unwrap());
     assert!((normal - Vector3::new(-0.8, 0.6, 0.0)).norm() < 1e-12);
-    let mut pixel = PathDebugPixel::default();
-    pixel.record(&debug, scene.diagnostics.target).unwrap();
+    let mut acc = PathDebugAccumulator::default();
+    acc.record(&debug, scene.diagnostic_target).unwrap();
+    let pixel = acc.finish();
     assert_eq!(pixel.target_samples, 1);
     assert_eq!(pixel.escaped_environment, 1);
     for (actual, expected) in aov_pixel(&pixel, 3).into_iter().zip([26, 204, 128]) {
@@ -164,8 +165,9 @@ fn sphere_camera_double_transmission_records_outward_entry_and_environment_once(
         assert!(actual.abs_diff(expected) <= 1);
     }
     // 同一真实路径对其他物体过滤时，不得冒用 prism_id 或纳入事件。
-    let mut masked = PathDebugPixel::default();
-    masked.record(&debug, Some(1)).unwrap();
+    let mut masked_acc = PathDebugAccumulator::default();
+    masked_acc.record(&debug, Some(1)).unwrap();
+    let masked = masked_acc.finish();
     assert_eq!(masked.target_samples, 0);
     assert_eq!(aov_pixel(&masked, 0), [0; 3]);
 }
@@ -185,8 +187,9 @@ fn sphere_internal_tir_repeats_until_delta_budget_without_rng_or_escape() {
     assert_eq!(state.throughput, Vector3::repeat(1.0));
     assert_eq!(state.radiance.direct, Vector3::zeros());
     assert!(state.ray.origin.norm() < 1.0);
-    let mut pixel = PathDebugPixel::default();
-    pixel.record(&debug, scene.diagnostics.target).unwrap();
+    let mut acc = PathDebugAccumulator::default();
+    acc.record(&debug, scene.diagnostic_target).unwrap();
+    let pixel = acc.finish();
     assert_eq!(aov_pixel(&pixel, 0), [0, 0, 255]);
     assert_eq!(
         pixel.terminations.values().sum::<u64>(),
@@ -229,7 +232,7 @@ fn ggx_records_glossy_or_delta_and_preserves_rejected_ndf_samples() {
 #[test]
 fn ground_visit_and_geometric_environment_escape_are_independent_of_radiance_termination() {
     let mut scene = surface(Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()));
-    scene.photon.ground_id = scene.diagnostics.target;
+    scene.photon.ground_id = scene.diagnostic_target;
     scene.scene.environment = RenderJob::new().scene.environment;
     scene.camera_options.environment_samples = 1;
     let (debug, state, draws) = trace(&scene, downward(), &[], &[0.25, 0.0], &[0.0, 0.0]);
@@ -307,7 +310,7 @@ fn rr_budget_backface_missing_material_and_zero_weight_have_distinct_reasons() {
 #[test]
 fn coplanar_prism_triangles_produce_identical_first_hit_geometric_normals() {
     let mut scene = RenderJob::new();
-    scene.diagnostics.target = Some(scene.scene.add(
+    scene.diagnostic_target = Some(scene.scene.add(
         Box::new(Prism::new().unwrap()),
         Box::new(Mirror::new(Vector3::repeat(0.95)).unwrap()),
     ));
@@ -342,7 +345,7 @@ fn coplanar_prism_triangles_produce_identical_first_hit_geometric_normals() {
             );
             let actual = Vector3::from(debug.first_hit_normal.unwrap());
             assert!((actual - normal).norm() < 1e-14);
-            assert_eq!(debug.first_hit_object_id, scene.diagnostics.target);
+            assert_eq!(debug.first_hit_object_id, scene.diagnostic_target);
             normals.push(actual);
         }
         assert!((normals[0] - normals[1]).norm() < 1e-14);
@@ -404,7 +407,7 @@ fn mixed_both_budgets_and_absent_components_are_not_reported_as_sample_rejection
 
 #[test]
 fn pixel_statistics_average_all_spp_and_mask_each_non_target_subsample() {
-    let mut pixel = PathDebugPixel::default();
+    let mut acc = PathDebugAccumulator::default();
     let a = PathDebugSample {
         first_hit_object_id: Some(2),
         first_hit_normal: Some([1.0, 0.0, 0.0]),
@@ -435,8 +438,9 @@ fn pixel_statistics_average_all_spp_and_mask_each_non_target_subsample() {
         ..Default::default()
     };
     for sample in [a, b, other, PathDebugSample::default()] {
-        pixel.record(&sample, Some(2)).unwrap();
+        acc.record(&sample, Some(2)).unwrap();
     }
+    let pixel = acc.finish();
     assert_eq!(pixel.samples, 4);
     assert_eq!(pixel.target_samples, 2);
     assert_eq!(pixel.first_hit_objects, BTreeMap::from([(2, 2), (3, 1)]));
@@ -450,9 +454,61 @@ fn pixel_statistics_average_all_spp_and_mask_each_non_target_subsample() {
     assert_eq!(count_byte(1.0), 51);
     assert_eq!(count_byte(32.0), 255);
     assert_eq!(count_byte(64.0), 255);
-    let mut overflow = PathDebugPixel {
+    let mut overflow = PathDebugAccumulator {
         samples: u64::MAX,
         ..Default::default()
     };
     assert!(overflow.record(&PathDebugSample::default(), None).is_err());
+}
+
+#[test]
+fn dispersive_spectral_internal_tir_uses_wavelength_ior() {
+    use crate::optics::dispersion::{Cauchy, IorMode};
+    // Constant ior = 1.52 (sin_c ≈ 0.6579); Cauchy at 400 nm has n ≈ 1.546 (sin_c ≈ 0.6467),
+    // at 700 nm has n ≈ 1.515 (sin_c ≈ 0.6602). Choose sin_i = 0.652 between blue and constant/red.
+    let cauchy = Cauchy {
+        a: 1.5046,
+        b_um2: 0.0067,
+    };
+    let glass = Dielectric::with_dispersion(1.52, Some(cauchy)).unwrap();
+    let n_blue = cauchy.ior(400.0).unwrap();
+    let n_red = cauchy.ior(700.0).unwrap();
+    let sin_i = 0.5 * (1.0 / n_blue + 1.0 / 1.52);
+    assert!(sin_i > 1.0 / n_blue && sin_i < 1.0 / 1.52 && sin_i < 1.0 / n_red);
+    let cos_i = (1.0 - sin_i * sin_i).sqrt();
+    let scene = surface(Box::new(glass));
+    let ray = Ray::new(-Vector3::z(), Vector3::new(sin_i, 0.0, cos_i)).unwrap();
+
+    for (nm, mode, expect_tir, rng_values) in [
+        (400.0, IorMode::Dispersion, true, &[][..]),
+        (700.0, IorMode::Dispersion, false, &[0.0][..]),
+        (400.0, IorMode::Constant, false, &[0.0][..]),
+    ] {
+        let mut state = CameraPathState::spectral(ray, nm, 0).unwrap();
+        let mut camera = SequenceRng::new(rng_values);
+        let mut environment = SequenceRng::new(&[]);
+        let mut diffuse = SequenceRng::new(&[]);
+        let mut debug = PathDebugSample::default();
+        trace_camera_path(
+            &scene,
+            &mut state,
+            &mut CameraPathRngs {
+                camera: &mut camera,
+                environment: &mut environment,
+                diffuse: &mut diffuse,
+                medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
+            },
+            sun().0,
+            sun().1,
+            Caustics::None,
+            mode,
+            Some(&mut debug),
+        )
+        .unwrap();
+        assert_eq!(debug.events.specular_reflection, 1);
+        assert_eq!(
+            debug.total_internal_reflection, expect_tir,
+            "nm={nm}, mode={mode:?}"
+        );
+    }
 }

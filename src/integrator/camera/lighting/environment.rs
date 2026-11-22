@@ -1,7 +1,7 @@
 //! 环境方向积分、固定配额 Balance/Power MIS 与方向贡献。
 
 use super::super::transport::CameraTransport;
-use super::transmittance_to_light;
+use super::{mis_weighted_value, transmittance_to_light};
 use crate::config::RenderJob;
 use crate::config::scene::EnvironmentMisHeuristic;
 use crate::geometry::hit::Hit;
@@ -14,7 +14,7 @@ use rand::Rng;
 use std::error::Error;
 
 // HDRI 环境的方向策略概率；Environment 内部的 95%/5% 分布已经包含在 p_env 中。
-pub(in crate::integrator::camera) const ENVIRONMENT_BSDF_FRACTION: f64 = 0.5;
+const ENVIRONMENT_BSDF_FRACTION: f64 = 0.5;
 
 #[derive(Clone, Copy)]
 enum EnvironmentStrategy {
@@ -30,15 +30,41 @@ struct EnvironmentMisWeights {
     power_source: Option<EnvironmentStrategy>,
 }
 
-/// 估计当前表面从整个环境接收到的 RGB 反射光，供相机每个连续顶点着色。
+/// 估计当前表面从整个环境接收到的反射光，供相机每个连续顶点着色（RGB 与光谱路径共用）。
 ///
-/// 输入：scene、Hit、材质、wo 和本顶点使用的 RNG；输出：线性 RGB L_env，配置/数值错误时 Err。
+/// 输入：scene、Hit、材质、wo、本顶点 RNG 与传输模式 transport；输出：反射辐亮度 L_env，配置/数值错误时 Err。
 /// 目标积分：L_env=∫f_r(wi,wo)·L_i(wi)·max(n·wi,0)·V(wi)dω。
 /// HDR 多样本固定分配材质/环境策略并用 Balance 或 Power MIS；单样本随机 50/50，渐变只用材质方向采样。
 /// 无环境/无连续分量返回零；遮挡与零贡献样本不补采，玻璃按二值遮挡处理，不含太阳或焦散图。
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(in crate::integrator::camera) fn environment_lighting<T: CameraTransport>(
     scene: &RenderJob,
+    hit: &Hit,
+    material: &dyn Material,
+    wo: Vector3<f64>,
+    rng: &mut dyn rand::RngCore,
+    transport: T,
+    ior: IorMode,
+    medium: Option<&dyn Medium>,
+) -> Result<T::Value, Box<dyn Error + Send + Sync>> {
+    environment_lighting_with_interface(
+        scene,
+        scene.scene.has_medium_interface(),
+        hit,
+        material,
+        wo,
+        rng,
+        transport,
+        ior,
+        medium,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::integrator::camera) fn environment_lighting_with_interface<T: CameraTransport>(
+    scene: &RenderJob,
+    has_medium_interface: bool,
     hit: &Hit,
     material: &dyn Material,
     wo: Vector3<f64>,
@@ -79,7 +105,7 @@ pub(in crate::integrator::camera) fn environment_lighting<T: CameraTransport>(
             // N=1 随机选择策略；渐变不消耗额外随机数。
             !has_map || rng.random::<f64>() < ENVIRONMENT_BSDF_FRACTION
         };
-        let wi = if use_bsdf {
+        let (wi, sampled_pdf) = if use_bsdf {
             let Some(sample) = transport.sample(material, wo, normal, ior, rng) else {
                 continue;
             };
@@ -87,15 +113,17 @@ pub(in crate::integrator::camera) fn environment_lighting<T: CameraTransport>(
                 // 混合材质中此配额抽到 Delta：局部连续 NEE 不估计它，也不重采样。
                 continue;
             }
-            if sample.pdf.is_none_or(|p| !p.is_finite() || p <= 0.0) {
+            let Some(pdf) = sample.pdf.filter(|p| p.is_finite() && *p > 0.0) else {
                 return Err("环境 BSDF 样本的立体角 PDF 无效".into());
-            }
-            sample.wi
+            };
+            (sample.wi, Some(pdf))
         } else {
-            environment
-                .sample_direction(rng)
-                .ok_or("HDRI 环境方向采样失败")?
-                .direction
+            (
+                environment
+                    .sample_direction_only(rng)
+                    .ok_or("HDRI 环境方向采样失败")?,
+                None,
+            )
         };
         let weights = pdf_weights.map(|(bsdf, environment)| EnvironmentMisWeights {
             bsdf,
@@ -107,7 +135,17 @@ pub(in crate::integrator::camera) fn environment_lighting<T: CameraTransport>(
             }),
         });
         rgb += environment_direction_contribution(
-            scene, hit, material, wo, normal, wi, weights, transport, medium,
+            scene,
+            has_medium_interface,
+            hit,
+            material,
+            wo,
+            normal,
+            wi,
+            sampled_pdf,
+            weights,
+            transport,
+            medium,
         )? / average_count;
     }
     if !transport.finite(rgb) {
@@ -118,18 +156,20 @@ pub(in crate::integrator::camera) fn environment_lighting<T: CameraTransport>(
 
 /// 计算一个已抽方向的环境积分贡献，供不同采样策略共用求值和可见性。
 ///
-/// 输入：场景、交点、材质、wo、单位法线、方向 wi 和可选策略权重；输出：RGB 贡献，错误返回 Err。
+/// 输入：场景、交点、材质、wo、单位法线、方向 wi、可选策略权重与传输模式；输出：当前传输模式的贡献，错误返回 Err。
 /// 令 g=f_r·L_i·cosθ·V、q_b=n_b p_b、q_e=n_e p_e；Balance 为 g/(q_b+q_e)，
 /// Power 为 g·w_i/q_i，w_i=q_i²/(q_b²+q_e²)；None 时只用材质分布 g/p_b。
 /// 固定配额的 q 已含样本数，贡献求和后不再除总数；单样本 n_b=n_e=0.5 表示策略选择概率。
 #[allow(clippy::too_many_arguments)]
 fn environment_direction_contribution<T: CameraTransport>(
     scene: &RenderJob,
+    has_medium_interface: bool,
     hit: &Hit,
     material: &dyn Material,
     wo: Vector3<f64>,
     normal: Vector3<f64>,
     wi: Vector3<f64>,
+    sampled_pdf: Option<f64>,
     pdf_weights: Option<EnvironmentMisWeights>,
     transport: T,
     medium: Option<&dyn Medium>,
@@ -137,56 +177,58 @@ fn environment_direction_contribution<T: CameraTransport>(
     let environment = scene.scene.environment.as_ref().ok_or("环境不存在")?;
     let wi = unit_vector(wi).ok_or("环境采样方向无效")?;
     let cosine = normal.dot(&wi).clamp(0.0, 1.0);
-    let pdf_bsdf = transport.pdf(material, wi, wo, normal);
-    if !pdf_bsdf.is_finite() || pdf_bsdf < 0.0 {
-        return Err("环境采样的 BSDF PDF 无效".into());
-    }
-    let cosine_weight = if let Some(weights) = pdf_weights {
-        let pdf_env = environment
-            .pdf_direction(wi)
-            .ok_or("HDRI 环境 PDF 查询失败")?;
-        if !pdf_env.is_finite() || pdf_env < 0.0 {
-            return Err("HDRI 环境 PDF 无效".into());
-        }
-        let q_bsdf = weights.bsdf * pdf_bsdf;
-        let q_env = weights.environment * pdf_env;
-        if let Some(source) = weights.power_source {
-            let (sampled, other) = match source {
-                EnvironmentStrategy::Bsdf => (q_bsdf, q_env),
-                EnvironmentStrategy::Environment => (q_env, q_bsdf),
-            };
-            let (_, weight_over_pdf) =
-                power_heuristic(sampled, other).ok_or("Power MIS 概率或权重无效")?;
-            cosine * weight_over_pdf
-        } else {
-            let denominator = q_bsdf + q_env;
-            if !denominator.is_finite() || denominator <= 0.0 {
-                return Err("环境采样的加权分母必须有限且为正".into());
-            }
-            cosine / denominator
-        }
-    } else {
-        if pdf_bsdf <= 0.0 {
-            return Err("环境采样的 PDF 必须有限且为正".into());
-        }
-        cosine / pdf_bsdf
-    };
-    if !cosine_weight.is_finite() {
-        return Err("环境采样的余弦权重计算溢出".into());
-    }
     if cosine <= 0.0 {
         if pdf_weights.is_some() {
             return Ok(T::Value::default());
         }
         return Err("环境采样的入射半球无效".into());
     }
+    let pdf_bsdf = match sampled_pdf {
+        Some(pdf) => pdf,
+        None => {
+            let pdf = transport.pdf(material, wi, wo, normal);
+            if !pdf.is_finite() || pdf < 0.0 {
+                return Err("环境采样的 BSDF PDF 无效".into());
+            }
+            pdf
+        }
+    };
+    let (cosine_weight, env_rgb) = if let Some(weights) = pdf_weights {
+        let (env_rgb, pdf_env) = environment
+            .radiance_and_pdf(wi)
+            .ok_or("HDRI 环境 PDF 查询失败")?;
+        if !pdf_env.is_finite() || pdf_env < 0.0 {
+            return Err("HDRI 环境 PDF 无效".into());
+        }
+        let q_bsdf = weights.bsdf * pdf_bsdf;
+        let q_env = weights.environment * pdf_env;
+        let (sampled, other, heuristic) = if let Some(source) = weights.power_source {
+            let (sampled, other) = match source {
+                EnvironmentStrategy::Bsdf => (q_bsdf, q_env),
+                EnvironmentStrategy::Environment => (q_env, q_bsdf),
+            };
+            (sampled, other, EnvironmentMisHeuristic::Power)
+        } else {
+            (q_bsdf, q_env, EnvironmentMisHeuristic::Balance)
+        };
+        let weight = mis_weighted_value(cosine, sampled, other, heuristic)
+            .ok_or("环境采样的 MIS 概率或分母无效")?;
+        (weight, env_rgb)
+    } else {
+        if pdf_bsdf <= 0.0 {
+            return Err("环境采样的 PDF 必须有限且为正".into());
+        }
+        let env_rgb = environment.radiance(wi).ok_or("环境辐亮度无效")?;
+        (cosine / pdf_bsdf, env_rgb)
+    };
+    if !cosine_weight.is_finite() {
+        return Err("环境采样的余弦权重计算溢出".into());
+    }
     let f_r = transport.evaluate(material, wi, wo, normal);
     if !transport.valid_weight(f_r) {
         return Err("invalid environment BSDF".into());
     }
-    let li = transport
-        .emission(environment.radiance(wi).ok_or("环境辐亮度无效")?)
-        .ok_or("emission overflow")?;
+    let li = transport.emission(env_rgb).ok_or("emission overflow")?;
     if !transport.finite(li) {
         return Err("环境辐亮度必须有限".into());
     }
@@ -194,9 +236,13 @@ fn environment_direction_contribution<T: CameraTransport>(
     if !transport.finite(contribution) {
         return Err("环境采样贡献计算溢出".into());
     }
+    if contribution == T::Value::default() {
+        return Ok(contribution);
+    }
     Ok(contribution
         * transmittance_to_light(
             scene,
+            has_medium_interface,
             hit.coords,
             normal,
             wi,
