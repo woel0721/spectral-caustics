@@ -34,7 +34,7 @@ pub(in crate::integrator::camera) fn volume_lighting<T: CameraTransport>(
     let mut result = T::Value::default();
     if sun != T::Value::default() {
         let ray = Ray::new(position, sun_wi).ok_or("invalid volume shadow ray")?;
-        result += sun * (phase.eval(wo, sun_wi) * transmittance(&ray, f64::INFINITY));
+        result += sun * (phase.eval(wo, sun_wi) * transmittance(&ray, f64::INFINITY)?);
     }
     if let Some(disk) = job.scene.light.as_disk() {
         for _ in 0..job.camera_options.light_samples {
@@ -42,7 +42,7 @@ pub(in crate::integrator::camera) fn volume_lighting<T: CameraTransport>(
                 let ray = Ray::new(position, s.wi).ok_or("invalid volume disk ray")?;
                 // incident_weight already contains Le cos_light / (r² p_area).
                 let weight =
-                    s.incident_weight * phase.eval(wo, s.wi) * transmittance(&ray, s.distance)
+                    s.incident_weight * phase.eval(wo, s.wi) * transmittance(&ray, s.distance)?
                         / job.camera_options.light_samples as f64;
                 result += transport.disk_emission() * weight;
             }
@@ -94,7 +94,7 @@ pub(in crate::integrator::camera) fn volume_lighting<T: CameraTransport>(
                         .ok_or("invalid volume environment radiance")?,
                 )
                 .ok_or("volume emission overflow")?;
-            result += li * (weight * transmittance(&ray, f64::INFINITY));
+            result += li * (weight * transmittance(&ray, f64::INFINITY)?);
         }
     }
     if !transport.finite(result) {

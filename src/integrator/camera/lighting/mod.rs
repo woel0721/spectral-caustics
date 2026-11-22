@@ -6,7 +6,7 @@ use super::surface_ray_origin;
 use crate::{
     config::RenderJob,
     geometry::{hit::Hit, ray::Ray},
-    medium::{ACHROMATIC_QUERY_NM, Medium},
+    medium::{ACHROMATIC_QUERY_NM, Medium, checked_transmittance},
 };
 use nalgebra::Vector3;
 use std::error::Error;
@@ -21,13 +21,14 @@ pub(in crate::integrator::camera) fn transmittance_to_light(
 ) -> Result<f64, Box<dyn Error + Send + Sync>> {
     let origin = surface_ray_origin(&scene.scene, position, normal, 1.0);
     let shadow_ray = Ray::new(origin, wi).ok_or("阴影光线起点或方向无效")?;
-    Ok(shadow_transmittance(
+    let tr = shadow_transmittance(
         scene.scene.intersect(&shadow_ray),
         &shadow_ray,
         f64::INFINITY,
         medium,
         wavelength_nm,
-    ))
+    )?;
+    Ok(tr)
 }
 
 /// Geometry remains opaque (including glass); an unblocked segment includes medium Tr.
@@ -37,12 +38,17 @@ pub(in crate::integrator::camera) fn shadow_transmittance(
     distance: f64,
     medium: Option<&dyn Medium>,
     wavelength_nm: Option<f64>,
-) -> f64 {
+) -> Result<f64, &'static str> {
     if hit.is_some_and(|h| h.distance < distance) {
-        return 0.0;
+        return Ok(0.0);
     }
-    medium.map_or(1.0, |m| {
-        m.transmittance_ray(ray, distance, wavelength_nm.unwrap_or(ACHROMATIC_QUERY_NM))
+    medium.map_or(Ok(1.0), |m| {
+        checked_transmittance(
+            m,
+            ray,
+            distance,
+            wavelength_nm.unwrap_or(ACHROMATIC_QUERY_NM),
+        )
     })
 }
 

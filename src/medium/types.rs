@@ -1,4 +1,5 @@
 //! Local coefficients and compensated segment sampling results.
+use crate::geometry::ray::Ray;
 use nalgebra::Vector3;
 
 /// Local absorption/scattering coefficients; extinction is their sum.
@@ -26,4 +27,30 @@ impl MediumCoefficients {
 pub struct MediumSample {
     pub position: Option<Vector3<f64>>,
     pub weight: f64,
+}
+
+impl MediumSample {
+    pub(crate) fn validate(
+        self,
+        ray: &Ray,
+        max_distance: f64,
+        allow_scattering: bool,
+    ) -> Result<(), &'static str> {
+        if !self.weight.is_finite() || self.weight < 0.0 {
+            return Err("invalid medium sample weight");
+        }
+        if let Some(position) = self.position {
+            if !allow_scattering || position.iter().any(|value| !value.is_finite()) {
+                return Err("invalid medium sample position or scattering budget");
+            }
+            // A volume ray skips hits at t=0. A rounded endpoint can leave it on
+            // an interface while the path still carries the incident region.
+            if position == ray.origin
+                || (max_distance.is_finite() && position == ray.at(max_distance))
+            {
+                return Err("medium collision rounds to a ray segment endpoint");
+            }
+        }
+        Ok(())
+    }
 }

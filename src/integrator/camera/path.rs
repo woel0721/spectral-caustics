@@ -147,21 +147,15 @@ pub fn trace_camera_path<T: CameraTransport>(
                 return Err(SPECTRAL_CAMERA_REQUIRED.into());
             }
             let allow_scattering = state.volume_scatters < job.camera_options.max_volume_scatters;
+            let distance = hit.as_ref().map_or(f64::INFINITY, |h| h.distance);
             let sample = medium.sample_segment(
                 &state.ray,
-                hit.as_ref().map_or(f64::INFINITY, |h| h.distance),
+                distance,
                 medium_wavelength_nm,
                 allow_scattering,
                 rngs.medium,
             )?;
-            if !sample.weight.is_finite()
-                || sample.weight < 0.0
-                || sample
-                    .position
-                    .is_some_and(|p| !allow_scattering || p.iter().any(|value| !value.is_finite()))
-            {
-                return Err("invalid medium sample position, weight or scattering budget".into());
-            }
+            sample.validate(&state.ray, distance, allow_scattering)?;
             state.throughput = state.throughput * sample.weight;
             if let Some(position) = sample.position {
                 let wo = -state.ray.direction;

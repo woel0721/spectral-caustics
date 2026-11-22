@@ -4,7 +4,7 @@ use super::PhotonLanding;
 use crate::config::RenderJob;
 use crate::geometry::hit::Hit;
 use crate::geometry::ray::Ray;
-use crate::medium::Medium;
+use crate::medium::{Medium, checked_transmittance};
 use crate::scene::{MediumRegion, Scene};
 use nalgebra::Vector3;
 use rand::RngCore;
@@ -36,11 +36,7 @@ impl PhotonSegment {
         medium: &dyn Medium,
         wavelength_nm: f64,
     ) -> Result<f64, &'static str> {
-        let tr = medium.transmittance_ray(&self.ray, self.distance, wavelength_nm);
-        if !(0.0..=1.0).contains(&tr) {
-            return Err("invalid photon medium transmittance");
-        }
-        Ok(tr)
+        checked_transmittance(medium, &self.ray, self.distance, wavelength_nm)
     }
 }
 
@@ -218,23 +214,15 @@ impl PhotonTracer {
                 return Err("invalid photon segment distance".into());
             }
             let allow_scattering = state.volume_scatters < max_volume_scatters;
+            let distance = distance.unwrap_or(f64::INFINITY);
             let sample = medium.sample_segment(
                 &state.ray,
-                distance.unwrap_or(f64::INFINITY),
+                distance,
                 wavelength_nm,
                 allow_scattering,
                 rng,
             )?;
-            if !sample.weight.is_finite()
-                || sample.weight < 0.0
-                || sample
-                    .position
-                    .is_some_and(|p| !allow_scattering || p.iter().any(|value| !value.is_finite()))
-            {
-                return Err(
-                    "invalid photon medium sample position, weight or scattering budget".into(),
-                );
-            }
+            sample.validate(&state.ray, distance, allow_scattering)?;
             state.flux_weight *= sample.weight;
             if !state.flux_weight.is_finite() {
                 return Err("photon medium flux weight overflow".into());
@@ -242,12 +230,6 @@ impl PhotonTracer {
             let Some(position) = sample.position else {
                 return Ok(false);
             };
-            // Rounding to a surface would make the volume-origin query skip
-            // that interface at t=0 and could select its opposite side.
-            if position == state.ray.origin || distance.is_some_and(|d| position == state.ray.at(d))
-            {
-                return Err("photon medium collision rounds to a ray segment endpoint".into());
-            }
             // HG is sampled from its own density, so its direction weight is 1.
             let direction = medium
                 .phase(wavelength_nm)
@@ -577,7 +559,7 @@ mod tests {
                 tracer
                     .trace(&scene, ray, Some(hit), 550.0, &mut Sequence::new(&[]))
                     .unwrap_err(),
-                "invalid photon medium transmittance"
+                "invalid medium transmittance"
             );
         }
         scene.scene.medium = Some(Box::new(FixedTransmittance(1.0)));
@@ -1184,10 +1166,7 @@ mod tests {
         let mut rng = Sequence::new(&[0, 0, 0, 0]);
         let error = trace_photon_with_volume(&job, ray, None, IorMode::Constant, 2, 1, &mut rng)
             .unwrap_err();
-        assert_eq!(
-            error,
-            "photon medium collision rounds to a ray segment endpoint"
-        );
+        assert_eq!(error, "medium collision rounds to a ray segment endpoint");
         assert_eq!(rng.draws, 2);
     }
 
