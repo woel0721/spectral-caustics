@@ -28,6 +28,10 @@ impl Scene {
             .find(|(_, object)| object.medium_interface.is_some())
     }
 
+    pub(crate) fn has_medium(&self) -> bool {
+        self.media().next().is_some()
+    }
+
     pub(crate) fn has_medium_interface(&self) -> bool {
         self.medium_boundary().is_some()
     }

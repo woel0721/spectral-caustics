@@ -104,7 +104,7 @@ pub fn integrate_spectral(
     #[cfg(feature = "diagnostics")]
     let debug = settings.diagnostics.path;
     let has_environment = scene.scene.environment.is_some();
-    let has_medium = scene.scene.medium.is_some();
+    let has_medium = scene.scene.has_medium();
     let weight_denominator = WAVELENGTH_PDF * total_paths as f64;
     let caustics_map = caustics.map_or(Caustics::None, Caustics::Spectral);
     render_camera_pixels(

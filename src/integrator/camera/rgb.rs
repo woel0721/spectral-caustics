@@ -74,7 +74,7 @@ pub fn integrate_rgb(
     };
 
     let has_environment = job.scene.environment.is_some();
-    let has_medium = job.scene.medium.is_some();
+    let has_medium = job.scene.has_medium();
     let caustics_map = ground.map_or(Caustics::None, Caustics::Rgb);
     render_camera_pixels(
         width,

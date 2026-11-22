@@ -365,3 +365,52 @@ fn scene_validation_still_precedes_environment_loading_and_geometry_construction
         "场景必须包含一个 ground 接收地面"
     );
 }
+
+#[test]
+fn scene_has_medium_checks_exterior_and_bound_interior_media() {
+    use crate::geometry::sphere::Sphere;
+    use crate::material::dielectric::Dielectric;
+    use crate::medium::{HomogeneousMedium, HomogeneousMediumConfig};
+    let make_medium = || {
+        Box::new(
+            HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+                min_m: [-2.0; 3],
+                max_m: [2.0; 3],
+                sigma_a: 0.1.into(),
+                sigma_s: 0.5.into(),
+                g: 0.0.into(),
+            })
+            .unwrap(),
+        ) as Box<dyn Medium>
+    };
+    let mut scene = RenderJob::new().scene;
+    assert!(!scene.has_medium());
+
+    scene.medium = Some(make_medium());
+    assert!(scene.has_medium());
+
+    scene.medium = None;
+    let id = scene.add(
+        Box::new(Sphere::new(Vector3::zeros(), 1.0).unwrap()),
+        Box::new(Dielectric::new(1.5).unwrap()),
+    );
+    scene
+        .bind_medium_interface(id, MediumInterface { interior: None })
+        .unwrap();
+    assert!(!scene.has_medium());
+
+    let mut interior_only = RenderJob::new().scene;
+    let id = interior_only.add(
+        Box::new(Sphere::new(Vector3::zeros(), 1.0).unwrap()),
+        Box::new(Dielectric::new(1.5).unwrap()),
+    );
+    interior_only
+        .bind_medium_interface(
+            id,
+            MediumInterface {
+                interior: Some(make_medium()),
+            },
+        )
+        .unwrap();
+    assert!(interior_only.has_medium());
+}

@@ -530,6 +530,134 @@ fn bound_sphere_renders_deterministically_in_rgb_hero_and_packet() {
     }
 }
 
+fn interior_only_scattering_sphere_job() -> RenderJob {
+    let mut job = RenderJob::new();
+    job.camera = Camera::from_config(&CameraConfig {
+        position: [0.0, 0.0, -2.5],
+        target: [0.0, 0.0, 0.0],
+        up: [0.0, 1.0, 0.0],
+        fov_y_degrees: 35.0,
+    })
+    .unwrap();
+    job.scene.environment = None;
+    job.scene.background_color = Vector3::zeros();
+    job.scene.medium = None;
+    job.scene.light = Light::DiskArea(
+        DiskAreaLight::new(Vector3::new(0.0, 0.5, 0.0), -Vector3::y(), 0.05, 10.0).unwrap(),
+    );
+    job.camera_options.max_volume_scatters = 2;
+    let id = job.scene.add(sphere(), glass());
+    let scattering = HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+        min_m: [-2.0; 3],
+        max_m: [2.0; 3],
+        sigma_a: 0.1.into(),
+        sigma_s: 1.5.into(),
+        g: 0.3.into(),
+    })
+    .unwrap();
+    job.scene
+        .bind_medium_interface(
+            id,
+            MediumInterface {
+                interior: Some(Box::new(scattering)),
+            },
+        )
+        .unwrap();
+    job
+}
+
+#[test]
+fn interior_only_scattering_sphere_renders_deterministically_in_rgb_hero_and_packet() {
+    let job = interior_only_scattering_sphere_job();
+    let mut no_scatter = interior_only_scattering_sphere_job();
+    no_scatter.camera_options.max_volume_scatters = 0;
+
+    for (mode, packet) in [
+        (CameraMode::Rgb, 1),
+        (CameraMode::Spectral, 1),
+        (CameraMode::Spectral, 4),
+    ] {
+        let mut settings = RenderSetting {
+            width: 8,
+            height: 8,
+            camera_spp: 16,
+            seed: 42,
+            camera_mode: mode,
+            spectral_packet_size: packet,
+            ..Default::default()
+        };
+        let baseline = Renderer::new(settings.clone())
+            .unwrap()
+            .render(&no_scatter)
+            .unwrap();
+        assert!(
+            baseline
+                .direct
+                .pixels()
+                .iter()
+                .all(|p| *p == Vector3::zeros())
+        );
+
+        let mut reference = None;
+        for threads in [1, 2, 4] {
+            settings.thread_count = Some(threads);
+            let image = Renderer::new(settings.clone())
+                .unwrap()
+                .render(&job)
+                .unwrap();
+            assert!(
+                image.direct.pixels().iter().any(|p| p.y > 0.0),
+                "expected positive interior volume scattering for {mode:?} packet={packet}"
+            );
+            for (direct, caustics) in image.direct.pixels().iter().zip(image.caustics.pixels()) {
+                assert!(direct.iter().all(|v| v.is_finite() && *v >= 0.0));
+                assert_eq!(*caustics, Vector3::zeros());
+            }
+            assert_eq!(image.direct.pixels(), image.combined.pixels());
+            if let Some(expected) = &reference {
+                assert_camera_images_bits_eq(&image, expected);
+            } else {
+                reference = Some(image);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+#[test]
+fn interior_only_scattering_sphere_renders_fixed_wavelength_camera() {
+    let job = interior_only_scattering_sphere_job();
+    let first = spectral_caustics::diagnostics::render_fixed_wavelength_camera(
+        &job,
+        8,
+        8,
+        8,
+        42,
+        IorMode::Constant,
+        &[450.0, 650.0],
+    )
+    .unwrap();
+    let second = spectral_caustics::diagnostics::render_fixed_wavelength_camera(
+        &job,
+        8,
+        8,
+        8,
+        42,
+        IorMode::Constant,
+        &[450.0, 650.0],
+    )
+    .unwrap();
+    assert_eq!(first.len(), 2);
+    for (a, b) in first.iter().zip(&second) {
+        assert!(a.radiance.iter().any(|&v| v > 0.0));
+        assert!(a.radiance.iter().all(|&v| v.is_finite() && v >= 0.0));
+        assert_eq!(
+            a.radiance.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            b.radiance.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+    }
+}
+
 #[test]
 fn sphere_classifies_launch_before_any_intersection_and_resolves_vacuum() {
     let mut scene = RenderJob::new().scene;
