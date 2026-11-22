@@ -23,7 +23,7 @@ pub struct RenderJob {
     pub photon: PhotonOptions,
     pub ground_checkerboard: Option<Checkerboard>,
     #[cfg(feature = "diagnostics")]
-    pub diagnostics: crate::diagnostics::Settings,
+    pub diagnostic_target: Option<usize>,
 }
 
 impl RenderJob {
@@ -61,6 +61,13 @@ impl RenderJob {
         self.scene
             .material(object.material_id())
             .photon_ior(wavelength_nm, mode)
+    }
+    pub(crate) fn has_wavelength_dependent_ior(&self, object_id: usize, mode: IorMode) -> bool {
+        self.scene.objects.get(object_id).is_some_and(|o| {
+            self.scene
+                .material(o.material_id())
+                .has_wavelength_dependent_ior(mode)
+        })
     }
     pub(crate) fn supports_ideal_caustics(&self, caustics_object_id: usize) -> bool {
         self.scene

@@ -119,6 +119,9 @@ pub trait Material: Send + Sync {
     ) -> Option<f64> {
         self.ior()
     }
+    fn has_wavelength_dependent_ior(&self, _mode: crate::optics::dispersion::IorMode) -> bool {
+        false
+    }
 }
 /// 将可序列化的材质配置构建为运行时材质，供场景绑定和并行追踪。
 ///
@@ -149,10 +152,15 @@ pub fn from_config(config: &MaterialConfig) -> Result<Box<dyn Material>, String>
 /// 公式：world=local.x·t+local.y·b+local.z·n，(t,b,n) 为围绕单位法线构建的右手正交基。
 /// 局部 +Z 对应法线方向；不平移、不额外归一化，保留向量长度及局部 z 的正负。
 pub fn to_world(local: Vector3<f64>, normal: Vector3<f64>) -> Option<Vector3<f64>> {
+    let normal = unit_vector(normal)?;
+    to_world_unit(local, normal)
+}
+
+/// 把局部向量变换到围绕已知单位法线构建的右手正交基中，避免重复归一化法线。
+pub(crate) fn to_world_unit(local: Vector3<f64>, normal: Vector3<f64>) -> Option<Vector3<f64>> {
     if !local.iter().all(|value| value.is_finite()) {
         return None;
     }
-    let normal = unit_vector(normal)?;
     // 选择较不平行的辅助轴，避免法线接近某个坐标轴时叉积退化。
     let helper = if normal.x.abs() > normal.y.abs() {
         Vector3::y()
@@ -169,10 +177,14 @@ pub fn to_world(local: Vector3<f64>, normal: Vector3<f64>) -> Option<Vector3<f64
 ///
 /// 输入：有限非零 vector；输出：vector/‖vector‖，长度为零、非有限或模长溢出返回 None。
 pub(crate) fn unit_vector(vector: Vector3<f64>) -> Option<Vector3<f64>> {
-    if !vector.iter().all(|value| value.is_finite()) {
+    let norm_squared = vector.norm_squared();
+    if !norm_squared.is_finite() || norm_squared == 0.0 {
         return None;
     }
-    let length = vector.norm();
+    if (norm_squared - 1.0).abs() <= 4.0 * f64::EPSILON {
+        return Some(vector);
+    }
+    let length = norm_squared.sqrt();
     if !length.is_finite() || length == 0.0 {
         return None;
     }

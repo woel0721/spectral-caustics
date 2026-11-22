@@ -105,13 +105,16 @@ fn write_transmittance(config: &Config, directory: &Path) -> ExperimentResult<()
 }
 
 fn render_images(mut config: Config, directory: &Path) -> ExperimentResult<()> {
+    let mut fog_job = config.build()?;
     for (name, packet_size) in CAMERA_MODES {
         config.render.spectral_packet_size = packet_size;
         let renderer = Renderer::new(config.render.clone())?;
         for limit in SCATTER_LIMITS {
             config.scene.max_volume_scatters = limit;
+            fog_job.camera_options.max_volume_scatters = limit;
             save_image(
                 &mut config,
+                &fog_job,
                 &renderer,
                 &directory.join(format!("{name}_{limit}")),
             )?;
@@ -120,14 +123,25 @@ fn render_images(mut config: Config, directory: &Path) -> ExperimentResult<()> {
     config.scene.medium = None;
     config.scene.max_volume_scatters = 0;
     config.render.spectral_packet_size = 1;
+    let vacuum_job = config.build()?;
     let renderer = Renderer::new(config.render.clone())?;
-    save_image(&mut config, &renderer, &directory.join("vacuum"))
+    save_image(
+        &mut config,
+        &vacuum_job,
+        &renderer,
+        &directory.join("vacuum"),
+    )
 }
 
-fn save_image(config: &mut Config, renderer: &Renderer, directory: &Path) -> ExperimentResult<()> {
+fn save_image(
+    config: &mut Config,
+    job: &RenderJob,
+    renderer: &Renderer,
+    directory: &Path,
+) -> ExperimentResult<()> {
     let start = Instant::now();
     config.render.output_path = directory.join("camera_combined.png");
-    let image = renderer.render(&config.build()?)?.combined;
+    let image = renderer.render(job)?.combined;
     output::save_png_with_exposure(&image, &config.render.output_path, config.render.exposure)?;
     config.save(directory.join("config.json"))?;
     println!(
@@ -225,13 +239,14 @@ fn verify_colors(mut config: Config, directory: &Path) -> ExperimentResult<()> {
     vacuum.scene.max_volume_scatters = 0;
     let vacuum_job = vacuum.build()?;
 
+    let mut fog_job = config.build()?;
     for limit in SCATTER_LIMITS {
         config.scene.max_volume_scatters = limit;
-        let job = config.build()?;
+        fog_job.camera_options.max_volume_scatters = limit;
         let start = Instant::now();
         for seed in SEEDS {
             config.render.seed = seed;
-            let [coarse, fine] = fixed_wavelength_colors(&config, &job, &regions)?;
+            let [coarse, fine] = fixed_wavelength_colors(&config, &fog_job, &regions)?;
             for (method, colors) in [("reference_5nm", coarse), ("reference_2.5nm", fine)] {
                 for ((region, _), xyz) in REGIONS.into_iter().zip(colors) {
                     write_color(&mut csv, limit, seed, method, region, xyz)?;
@@ -240,7 +255,7 @@ fn verify_colors(mut config: Config, directory: &Path) -> ExperimentResult<()> {
             for (method, packet_size) in CAMERA_MODES {
                 config.render.spectral_packet_size = packet_size;
                 let renderer = Renderer::new(config.render.clone())?;
-                let colors = renderer.render(&job)?.combined;
+                let colors = renderer.render(&fog_job)?.combined;
                 for ((region, _), indices) in REGIONS.iter().zip(&regions) {
                     write_color(
                         &mut csv,

@@ -1,7 +1,7 @@
 //! 各向同性 Trowbridge–Reitz NDF、height-correlated Smith G 与导体 Fresnel。
 //! BRDF/Jacobian 参考 PBRT 4e Reflection Models（microfacet / conductor）。
 //! 采样完整 NDF p(h)=D(h)|n·h|，不是 VNDF；无效反射不重采样。
-use super::to_world;
+use super::to_world_unit;
 use super::unit_vector;
 use nalgebra::Vector3;
 use std::f64::consts::PI;
@@ -26,6 +26,7 @@ pub(super) fn d(cos_h: f64, alpha: f64) -> f64 {
 /// 输入：入射/出射方向相对法线的余弦 c_i/c_o 和粗糙参数 α；输出：高度相关 Smith 遮蔽项 G，背半球为 0。
 ///
 /// 公式：s(c)=√(α²+(1-α²)c²)，G=2c_i c_o/[c_i s(c_o)+c_o s(c_i)]。
+#[cfg(test)]
 pub(super) fn g(cos_i: f64, cos_o: f64, alpha: f64) -> f64 {
     if cos_i <= 0.0 || cos_o <= 0.0 {
         return 0.0;
@@ -37,9 +38,22 @@ pub(super) fn g(cos_i: f64, cos_o: f64, alpha: f64) -> f64 {
     2.0 * ci * co * scale / (ci * root(cos_o) + co * root(cos_i))
 }
 
+/// 高度相关 Smith 可见性项 V = G / (4 c_i c_o) = 0.5 / [c_i s(c_o) + c_o s(c_i)]。
+/// 直接消去分子分母中的 c_i c_o，避免近切线方向提前下溢且仅需一次除法。
+pub(super) fn visibility(cos_i: f64, cos_o: f64, alpha: f64) -> f64 {
+    if cos_i <= 0.0 || cos_o <= 0.0 {
+        return 0.0;
+    }
+    let a2 = alpha * alpha;
+    let one_minus_a2 = 1.0 - a2;
+    let root_i = (a2 + one_minus_a2 * cos_i * cos_i).sqrt();
+    let root_o = (a2 + one_minus_a2 * cos_o * cos_o).sqrt();
+    0.5 / (cos_i * root_o + cos_o * root_i)
+}
+
 /// 按完整 GGX 法线分布生成微表面法线 h，供金属反射采样使用。
 ///
-/// 输入：法线 normal、粗糙参数 α、两个 [0,1) 样本 u/v；输出：单位世界半向量，变换无效时 None。
+/// 输入：单位法线 normal、粗糙参数 α、两个 [0,1) 样本 u/v；输出：单位世界半向量，变换无效时 None。
 ///
 /// 公式：tan²θ_h=α²u/(1-u)，φ=2πv，p(h)=D(h)·|n·h|。
 /// 这是完整法线分布采样，不是只采可见微表面的 VNDF。
@@ -51,11 +65,12 @@ pub(super) fn sample_half_vector(
 ) -> Option<Vector3<f64>> {
     // 逆变换采样：tan²θ_h=α²u/(1-u)，方位角均匀；u/v 均在 [0,1)。
     let tan2 = alpha * alpha * u / (1.0 - u);
-    let cos = 1.0 / (1.0 + tan2).sqrt();
-    let sin = (tan2 / (1.0 + tan2)).sqrt();
-    let phi = 2.0 * PI * v;
-    unit_vector(to_world(
-        Vector3::new(sin * phi.cos(), sin * phi.sin(), cos),
+    let inv_one_plus_tan2 = 1.0 / (1.0 + tan2);
+    let cos = inv_one_plus_tan2.sqrt();
+    let sin = (tan2 * inv_one_plus_tan2).sqrt();
+    let (sin_phi, cos_phi) = (2.0 * PI * v).sin_cos();
+    unit_vector(to_world_unit(
+        Vector3::new(sin * cos_phi, sin * sin_phi, cos),
         normal,
     )?)
 }
@@ -104,10 +119,13 @@ pub(super) fn fresnel(cos: f64, eta: Vector3<f64>, k: Vector3<f64>) -> Vector3<f
             return 1.0;
         }
         let scale = eta.max(k).max(1.0);
-        let (e, k, c) = (eta / scale, k / scale, cos / scale);
+        let inv_scale = 1.0 / scale;
+        let (e, k, c) = (eta * inv_scale, k * inv_scale, cos * inv_scale);
         let sin2 = (1.0 - cos * cos).max(0.0);
-        let t0 = e * e - k * k - (sin2 / scale) / scale;
-        let ab2 = t0.hypot(2.0 * e * k);
+        let sin2_scaled = sin2 * inv_scale;
+        let t0 = e * e - k * k - sin2_scaled * inv_scale;
+        let two_ek = 2.0 * e * k;
+        let ab2 = (t0 * t0 + two_ek * two_ek).sqrt();
         let a = (0.5 * (ab2 + t0).max(0.0)).sqrt();
         let t1 = ab2 + c * c;
         let t2 = 2.0 * c * a;
@@ -115,7 +133,7 @@ pub(super) fn fresnel(cos: f64, eta: Vector3<f64>, k: Vector3<f64>) -> Vector3<f
             return 1.0;
         }
         let rs = (t1 - t2) / (t1 + t2);
-        let t3 = cos * cos * ab2 + (sin2 / scale).powi(2);
+        let t3 = cos * cos * ab2 + sin2_scaled * sin2_scaled;
         let t4 = t2 * sin2;
         let rp = if t3 + t4 == 0.0 {
             rs

@@ -1,5 +1,7 @@
 use crate::integrator::camera::{
+    RenderedPixel, UnusedRng,
     path::trace_camera_path,
+    render_camera_pixels,
     transport::Caustics,
     types::{CameraPathRngs, CameraPathState},
 };
@@ -10,7 +12,7 @@ use crate::caustics::SpectralCausticsMap;
 use crate::config::RenderJob;
 use crate::config::render::RenderSetting;
 use crate::config::render::spectral_sample_counts;
-use crate::film::Framebuffer;
+use crate::geometry::ray::Ray;
 use crate::sampling::rng::CAMERA_STREAM;
 use crate::sampling::rng::DIFFUSE_STREAM;
 use crate::sampling::rng::ENVIRONMENT_STREAM;
@@ -25,7 +27,6 @@ use nalgebra::Vector3;
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rayon::prelude::*;
 use std::error::Error;
 
 const WAVELENGTH_STREAM: u64 = 0xe703_7ed1_a0b4_28db;
@@ -33,18 +34,58 @@ pub(crate) const PREFIX_STREAM: u64 = 0x8ebc_6af0_9c88_c6e3;
 const PACKET_SAMPLE_STREAM: u64 = 0x5899_65cc_7537_4cc3;
 const PACKET_LANE_STREAM: u64 = 0x1d8e_4e27_c47d_124f;
 
+pub(crate) struct ValidatedSpectralRender {
+    pub(crate) spatial_spp: usize,
+    pub(crate) total_paths: usize,
+    pub(crate) sun_wi: Vector3<f64>,
+    pub(crate) sun_strength: f64,
+}
+
+pub(crate) fn validate_spectral_render(
+    scene: &RenderJob,
+    settings: &RenderSetting,
+) -> Result<ValidatedSpectralRender, Box<dyn Error + Send + Sync>> {
+    #[cfg(feature = "diagnostics")]
+    if scene
+        .diagnostic_target
+        .is_some_and(|id| id >= scene.scene.objects.len())
+    {
+        return Err("invalid diagnostic target".into());
+    }
+    let (spatial_spp, total_paths) =
+        spectral_sample_counts(settings.camera_spp, settings.spectral_packet_size)?;
+    let (sun_wi, sun_strength) =
+        spectral_camera_setup(scene, settings.width, settings.height, total_paths)?;
+    Ok(ValidatedSpectralRender {
+        spatial_spp,
+        total_paths,
+        sun_wi,
+        sun_strength,
+    })
+}
+
 /// Integrate Hero/Packet radiance into three linear XYZ buffers.
 pub fn integrate_spectral(
     scene: &RenderJob,
     settings: &RenderSetting,
     caustics: Option<&SpectralCausticsMap>,
 ) -> Result<super::CameraLightingImages, Box<dyn Error + Send + Sync>> {
-    if let Some(map) = caustics
-        && (Some(map.ground_id()) != scene.photon.ground_id
+    if let Some(map) = caustics {
+        if Some(map.ground_id()) != scene.photon.ground_id
             || map.receiver() != &scene.photon.receiver
-            || map.mode() != settings.mode)
-    {
-        return Err("caustics map receiver or IOR mode mismatch".into());
+            || map.mode() != settings.mode
+        {
+            return Err("caustics map receiver or IOR mode mismatch".into());
+        }
+        let ground_material = scene
+            .scene
+            .objects
+            .get(map.ground_id())
+            .map(|o| scene.scene.material(o.material_id()))
+            .ok_or("caustics map receiver ground invalid")?;
+        if ground_material.irradiance_reflectance().is_none() {
+            return Err("caustics receiver ground must be Lambertian".into());
+        }
     }
     let (width, height, spp, packet_size, seed, ior_mode) = (
         settings.width,
@@ -54,81 +95,39 @@ pub fn integrate_spectral(
         settings.seed,
         settings.mode,
     );
-    let (spatial_spp, total_paths) = spectral_sample_counts(spp, packet_size)?;
-    let (sun_wi, sun_strength) = spectral_camera_setup(scene, width, height, total_paths)?;
+    let ValidatedSpectralRender {
+        spatial_spp,
+        total_paths,
+        sun_wi,
+        sun_strength,
+    } = validate_spectral_render(scene, settings)?;
     #[cfg(feature = "diagnostics")]
     let debug = settings.diagnostics.path;
-    let mut buffers = super::CameraLightingImages {
-        direct: Framebuffer::new(width, height)?,
-        caustics: Framebuffer::new(width, height)?,
-        combined: Framebuffer::new(width, height)?,
+    let has_environment = scene.scene.environment.is_some();
+    let has_medium = scene.scene.medium.is_some();
+    let weight_denominator = WAVELENGTH_PDF * total_paths as f64;
+    let caustics_map = caustics.map_or(Caustics::None, Caustics::Spectral);
+    render_camera_pixels(
+        width,
+        height,
         #[cfg(feature = "diagnostics")]
-        path_debug: debug.then(|| {
-            crate::diagnostics::PathDebugBuffer::new(width, height, scene.diagnostics.target)
-        }),
-    };
-    struct Pixel {
-        direct: Vector3<f64>,
-        caustics: Vector3<f64>,
-        #[cfg(feature = "diagnostics")]
-        statistics: Option<crate::diagnostics::PathDebugPixel>,
-    }
-    let render_pixel = |index| -> Result<Pixel, String> {
-        #[cfg(feature = "diagnostics")]
-        let mut statistics = debug.then(crate::diagnostics::PathDebugPixel::default);
-        let mut jitter = StdRng::seed_from_u64(pixel_seed(seed, index, CAMERA_STREAM));
-        let mut medium = StdRng::seed_from_u64(pixel_seed(seed, index, MEDIUM_STREAM));
-        let mut scattering = StdRng::seed_from_u64(pixel_seed(seed, index, DIFFUSE_STREAM));
-        let mut prefix = StdRng::seed_from_u64(pixel_seed(seed, index, PREFIX_STREAM));
-        let mut environment = StdRng::seed_from_u64(pixel_seed(seed, index, ENVIRONMENT_STREAM));
-        let mut wavelength = StdRng::seed_from_u64(pixel_seed(seed, index, WAVELENGTH_STREAM));
-        let mut mean = Vector3::zeros();
-        let mut caustics_mean = Vector3::zeros();
-        for i in 0..spatial_spp {
-            if packet_size == 4 {
-                // Camera RNG 按空间样本派生；每个 Packet 只抽一次偏移。
-                jitter = packet_rng(seed, index, i, 0, CAMERA_STREAM);
-            }
-            let offset = Vector2::new(jitter.random::<f64>(), jitter.random::<f64>());
-            let ray = scene
-                .camera
-                .ray_for_pixel_sample(index % width, index / width, width, height, offset)
-                .ok_or("光谱相机子像素光线无效")?;
-            // CRN：每个 Packet 只初始化一组路径流，各 Lane 从相同状态的副本开始。
-            // 仍隔离前缀、首次环境与续追；Packet=1 不改变原有像素流。
-            let common_path_rngs = (packet_size == 4).then(|| {
-                [
-                    packet_rng(seed, index, i, 0, PREFIX_STREAM),
-                    packet_rng(seed, index, i, 0, ENVIRONMENT_STREAM),
-                    packet_rng(seed, index, i, 0, DIFFUSE_STREAM),
-                    packet_rng(seed, index, i, 0, MEDIUM_STREAM),
-                ]
-            });
-            for lane in 0..packet_size {
-                if let Some(
-                    [
-                        common_prefix,
-                        common_environment,
-                        common_scattering,
-                        common_medium,
-                    ],
-                ) = &common_path_rngs
-                {
-                    // 波长层内抖动独立；路径流共享随机值，不共享可变游标。
-                    wavelength = packet_rng(seed, index, i, lane, WAVELENGTH_STREAM);
-                    prefix.clone_from(common_prefix);
-                    environment.clone_from(common_environment);
-                    scattering.clone_from(common_scattering);
-                    medium.clone_from(common_medium);
-                }
-                let u = wavelength.random::<f64>();
-                let nm = if packet_size == 1 {
-                    // 单波长模式把 380–780 nm 分成 spp 层，在第 i 层均匀取一个样本。
-                    WAVELENGTH_MIN_NM
-                        + (WAVELENGTH_MAX_NM - WAVELENGTH_MIN_NM) * ((i as f64 + u) / spp as f64)
-                } else {
-                    packet_wavelength_nm(i, spatial_spp, lane, u)
-                };
+        debug.then_some(scene.diagnostic_target),
+        |index| -> Result<RenderedPixel, String> {
+            #[cfg(feature = "diagnostics")]
+            let mut statistics = debug.then(crate::diagnostics::PathDebugAccumulator::default);
+            let mut mean = Vector3::zeros();
+            let mut caustics_mean = Vector3::zeros();
+            let mut unused_environment = UnusedRng;
+            let mut unused_medium = UnusedRng;
+            let trace_lane = |ray,
+                              nm,
+                              rngs: &mut CameraPathRngs<'_>,
+                              mean: &mut Vector3<f64>,
+                              caustics_mean: &mut Vector3<f64>,
+                              #[cfg(feature = "diagnostics")] statistics: &mut Option<
+                crate::diagnostics::PathDebugAccumulator,
+            >|
+             -> Result<(), String> {
                 let mut state =
                     CameraPathState::spectral(ray, nm, scene.camera_options.max_diffuse_bounces)?;
                 #[cfg(feature = "diagnostics")]
@@ -140,100 +139,190 @@ pub fn integrate_spectral(
                 trace_camera_path(
                     scene,
                     &mut state,
-                    &mut CameraPathRngs {
-                        camera: &mut prefix,
-                        environment: &mut environment,
-                        diffuse: &mut scattering,
-                        medium: &mut medium,
-                    },
+                    rngs,
                     sun_wi,
                     sun_strength,
-                    (caustics).map_or(Caustics::None, Caustics::Spectral),
+                    caustics_map,
                     ior_mode,
                     #[cfg(feature = "diagnostics")]
                     statistics.as_ref().map(|_| &mut observation),
                 )
                 .map_err(|e| e.to_string())?;
                 #[cfg(feature = "diagnostics")]
-                if let Some(stats) = &mut statistics {
-                    stats.record(&observation, scene.diagnostics.target)?;
+                if let Some(stats) = statistics {
+                    stats.record(&observation, scene.diagnostic_target)?;
                 }
                 // 每个细分层恰取一个样本，权重为 400/总路径数。
                 // 不额外乘 Δλ，也不再除以 Packet 大小。
-                let cmf = cie_xyz(nm).ok_or("CIE 查询失败")?;
-                mean += cmf * (state.radiance.direct / (WAVELENGTH_PDF * total_paths as f64));
-                if caustics.is_some() {
-                    caustics_mean +=
-                        cmf * (state.radiance.caustics / (WAVELENGTH_PDF * total_paths as f64));
+                let has_direct = state.radiance.direct != 0.0;
+                let has_caustics = caustics.is_some() && state.radiance.caustics != 0.0;
+                if has_direct || has_caustics {
+                    let cmf = cie_xyz(nm).ok_or("CIE 查询失败")?;
+                    if has_direct {
+                        *mean += cmf * (state.radiance.direct / weight_denominator);
+                    }
+                    if has_caustics {
+                        *caustics_mean += cmf * (state.radiance.caustics / weight_denominator);
+                    }
+                }
+                Ok(())
+            };
+            if packet_size == 1 {
+                let mut jitter = StdRng::seed_from_u64(pixel_seed(seed, index, CAMERA_STREAM));
+                let mut medium = has_medium
+                    .then(|| StdRng::seed_from_u64(pixel_seed(seed, index, MEDIUM_STREAM)));
+                let mut scattering = StdRng::seed_from_u64(pixel_seed(seed, index, DIFFUSE_STREAM));
+                let mut prefix = StdRng::seed_from_u64(pixel_seed(seed, index, PREFIX_STREAM));
+                let mut environment = has_environment
+                    .then(|| StdRng::seed_from_u64(pixel_seed(seed, index, ENVIRONMENT_STREAM)));
+                let mut wavelength =
+                    StdRng::seed_from_u64(pixel_seed(seed, index, WAVELENGTH_STREAM));
+                for i in 0..spatial_spp {
+                    let offset = Vector2::new(jitter.random::<f64>(), jitter.random::<f64>());
+                    let ray = scene
+                        .camera
+                        .ray_for_pixel_sample(index % width, index / width, width, height, offset)
+                        .ok_or("光谱相机子像素光线无效")?;
+                    let u = wavelength.random::<f64>();
+                    // 单波长模式把 380–780 nm 分成 spp 层，在第 i 层均匀取一个样本。
+                    let nm = WAVELENGTH_MIN_NM
+                        + (WAVELENGTH_MAX_NM - WAVELENGTH_MIN_NM) * ((i as f64 + u) / spp as f64);
+                    trace_lane(
+                        ray,
+                        nm,
+                        &mut CameraPathRngs {
+                            camera: &mut prefix,
+                            environment: match &mut environment {
+                                Some(rng) => rng,
+                                None => &mut unused_environment,
+                            },
+                            diffuse: &mut scattering,
+                            medium: match &mut medium {
+                                Some(rng) => rng,
+                                None => &mut unused_medium,
+                            },
+                        },
+                        &mut mean,
+                        &mut caustics_mean,
+                        #[cfg(feature = "diagnostics")]
+                        &mut statistics,
+                    )?;
+                }
+            } else {
+                for i in 0..spatial_spp {
+                    let (ray, common) = packet_primary_sample(
+                        scene,
+                        width,
+                        height,
+                        seed,
+                        index,
+                        i,
+                        has_environment,
+                        has_medium,
+                    )?;
+                    let mut common = Some(common);
+                    for lane in 0..packet_size {
+                        let mut wavelength = packet_rng(seed, index, i, lane, WAVELENGTH_STREAM);
+                        let u = wavelength.random::<f64>();
+                        let nm = packet_wavelength_nm(i, spatial_spp, lane, u);
+                        // 波长层内抖动独立；路径流共享随机值，不共享可变游标。
+                        let mut lane_rngs = if lane + 1 == packet_size {
+                            common.take().expect("last lane consumes common RNGs")
+                        } else {
+                            common.as_ref().expect("common RNGs").clone()
+                        };
+                        trace_lane(
+                            ray,
+                            nm,
+                            &mut lane_rngs
+                                .as_camera_rngs(&mut unused_environment, &mut unused_medium),
+                            &mut mean,
+                            &mut caustics_mean,
+                            #[cfg(feature = "diagnostics")]
+                            &mut statistics,
+                        )?;
+                    }
                 }
             }
+            if mean
+                .iter()
+                .chain(caustics_mean.iter())
+                .any(|v| !v.is_finite() || *v < 0.0)
+                || (mean + caustics_mean).iter().any(|v| !v.is_finite())
+            {
+                return Err("光谱 XYZ 积分溢出".into());
+            }
+            Ok(RenderedPixel {
+                direct: mean,
+                caustics: caustics_mean,
+                #[cfg(feature = "diagnostics")]
+                statistics: statistics.map(crate::diagnostics::PathDebugAccumulator::finish),
+            })
+        },
+    )
+}
+
+#[derive(Clone)]
+pub(crate) struct PacketSampleRngs {
+    prefix: StdRng,
+    environment: Option<StdRng>,
+    scattering: StdRng,
+    medium: Option<StdRng>,
+}
+
+impl PacketSampleRngs {
+    pub(crate) fn as_camera_rngs<'a>(
+        &'a mut self,
+        unused_environment: &'a mut UnusedRng,
+        unused_medium: &'a mut UnusedRng,
+    ) -> CameraPathRngs<'a> {
+        CameraPathRngs {
+            camera: &mut self.prefix,
+            environment: match &mut self.environment {
+                Some(rng) => rng,
+                None => unused_environment,
+            },
+            diffuse: &mut self.scattering,
+            medium: match &mut self.medium {
+                Some(rng) => rng,
+                None => unused_medium,
+            },
         }
-        if mean
-            .iter()
-            .chain(caustics_mean.iter())
-            .any(|v| !v.is_finite() || *v < 0.0)
-            || (mean + caustics_mean).iter().any(|v| !v.is_finite())
-        {
-            return Err("光谱 XYZ 积分溢出".into());
-        }
-        Ok(Pixel {
-            direct: mean,
-            caustics: caustics_mean,
-            #[cfg(feature = "diagnostics")]
-            statistics,
-        })
-    };
-    let write = |index,
-                 combined: &mut Vector3<f64>,
-                 direct: &mut Vector3<f64>,
-                 caustics: &mut Vector3<f64>|
-     -> Result<(), String> {
-        let pixel = render_pixel(index)?;
-        *direct = pixel.direct;
-        *caustics = pixel.caustics;
-        *combined = pixel.direct + pixel.caustics;
-        Ok(())
-    };
-    #[cfg(feature = "diagnostics")]
-    if let Some(debug) = &mut buffers.path_debug {
-        buffers
-            .combined
-            .pixels
-            .par_iter_mut()
-            .zip(buffers.direct.pixels.par_iter_mut())
-            .zip(buffers.caustics.pixels.par_iter_mut())
-            .zip(debug.pixels.par_iter_mut())
-            .enumerate()
-            .try_for_each(
-                |(index, (((combined, direct), caustics), stats))| -> Result<(), String> {
-                    let pixel = render_pixel(index)?;
-                    *direct = pixel.direct;
-                    *caustics = pixel.caustics;
-                    *combined = pixel.direct + pixel.caustics;
-                    *stats = pixel.statistics.expect("enabled observer");
-                    Ok(())
-                },
-            )?;
-    } else {
-        buffers
-            .combined
-            .pixels
-            .par_iter_mut()
-            .zip(buffers.direct.pixels.par_iter_mut())
-            .zip(buffers.caustics.pixels.par_iter_mut())
-            .enumerate()
-            .try_for_each(|(index, ((b, d), c))| write(index, b, d, c))?;
     }
-    #[cfg(not(feature = "diagnostics"))]
-    buffers
-        .combined
-        .pixels
-        .par_iter_mut()
-        .zip(buffers.direct.pixels.par_iter_mut())
-        .zip(buffers.caustics.pixels.par_iter_mut())
-        .enumerate()
-        .try_for_each(|(index, ((b, d), c))| write(index, b, d, c))?;
-    Ok(buffers)
+}
+
+/// 生成一个 Packet/固定波长空间样本的主射线和共享初始路径随机流（CRN）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn packet_primary_sample(
+    scene: &RenderJob,
+    width: usize,
+    height: usize,
+    seed: u64,
+    pixel_index: usize,
+    sample: usize,
+    has_environment: bool,
+    has_medium: bool,
+) -> Result<(Ray, PacketSampleRngs), &'static str> {
+    let mut jitter = packet_rng(seed, pixel_index, sample, 0, CAMERA_STREAM);
+    let offset = Vector2::new(jitter.random::<f64>(), jitter.random::<f64>());
+    let ray = scene
+        .camera
+        .ray_for_pixel_sample(
+            pixel_index % width,
+            pixel_index / width,
+            width,
+            height,
+            offset,
+        )
+        .ok_or("光谱相机子像素光线无效")?;
+    let rngs = PacketSampleRngs {
+        prefix: packet_rng(seed, pixel_index, sample, 0, PREFIX_STREAM),
+        environment: has_environment
+            .then(|| packet_rng(seed, pixel_index, sample, 0, ENVIRONMENT_STREAM)),
+        scattering: packet_rng(seed, pixel_index, sample, 0, DIFFUSE_STREAM),
+        medium: has_medium.then(|| packet_rng(seed, pixel_index, sample, 0, MEDIUM_STREAM)),
+    };
+    Ok((ray, rngs))
 }
 
 /// 在光谱渲染前检查照明、工作量与材质的光谱能力，返回解析太阳的方向和法向辐照度。

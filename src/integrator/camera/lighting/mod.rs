@@ -4,25 +4,47 @@ pub(crate) mod volume;
 // Camera render boundary and binary shadow visibility.
 use super::surface_ray_origin;
 use crate::{
-    config::RenderJob,
-    geometry::{hit::Hit, ray::Ray},
+    config::{RenderJob, scene::EnvironmentMisHeuristic},
+    geometry::ray::Ray,
     medium::{ACHROMATIC_QUERY_NM, Medium, checked_transmittance},
 };
 use nalgebra::Vector3;
 use std::error::Error;
 
+/// 按 Balance 或 Power 启发式把分子 `numerator` 与策略组合密度合成 MIS 权重项 `numerator * w_i / q_i`。
+pub(super) fn mis_weighted_value(
+    numerator: f64,
+    sampled: f64,
+    other: f64,
+    heuristic: EnvironmentMisHeuristic,
+) -> Option<f64> {
+    match heuristic {
+        EnvironmentMisHeuristic::Power => {
+            environment::power_heuristic(sampled, other).map(|(_, w)| numerator * w)
+        }
+        EnvironmentMisHeuristic::Balance => {
+            if !sampled.is_finite() || !other.is_finite() || sampled < 0.0 || other < 0.0 {
+                return None;
+            }
+            let total = sampled + other;
+            (total.is_finite() && total > 0.0).then_some(numerator / total)
+        }
+    }
+}
+
 pub(in crate::integrator::camera) fn transmittance_to_light(
     scene: &RenderJob,
+    has_medium_interface: bool,
     position: Vector3<f64>,
     normal: Vector3<f64>,
     wi: Vector3<f64>,
     medium: Option<&dyn Medium>,
     wavelength_nm: Option<f64>,
 ) -> Result<f64, Box<dyn Error + Send + Sync>> {
-    let origin = surface_ray_origin(&scene.scene, position, normal, 1.0);
+    let origin = surface_ray_origin(has_medium_interface, position, normal, 1.0);
     let shadow_ray = Ray::new(origin, wi).ok_or("阴影光线起点或方向无效")?;
     let tr = shadow_transmittance(
-        scene.scene.intersect(&shadow_ray),
+        scene.scene.is_occluded(&shadow_ray, f64::INFINITY),
         &shadow_ray,
         f64::INFINITY,
         medium,
@@ -33,13 +55,13 @@ pub(in crate::integrator::camera) fn transmittance_to_light(
 
 /// Geometry remains opaque (including glass); an unblocked segment includes medium Tr.
 pub(in crate::integrator::camera) fn shadow_transmittance(
-    hit: Option<Hit>,
+    occluded: bool,
     ray: &Ray,
     distance: f64,
     medium: Option<&dyn Medium>,
     wavelength_nm: Option<f64>,
 ) -> Result<f64, &'static str> {
-    if hit.is_some_and(|h| h.distance < distance) {
+    if occluded {
         return Ok(0.0);
     }
     medium.map_or(Ok(1.0), |m| {

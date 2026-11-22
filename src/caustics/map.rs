@@ -58,22 +58,32 @@ impl SpectralCausticsMap {
         if wavelength_nm < self.samples.first()?.0 || wavelength_nm > self.samples.last()?.0 {
             return Some(0.0);
         }
-        let weights =
-            ground_splat_weights(position, self.width, self.height, &self.receiver).ok()?;
+        let Some(weights) =
+            ground_splat_weights(position, self.width, self.height, &self.receiver).ok()?
+        else {
+            return Some(0.0);
+        };
         let right = self.samples.partition_point(|&(nm, _)| nm < wavelength_nm);
         let left = right.saturating_sub(1);
-        let t = if left == right {
-            0.0
-        } else {
-            (wavelength_nm - self.samples[left].0) / (self.samples[right].0 - self.samples[left].0)
-        };
         let spatial = |layer: usize| -> f64 {
-            weights
-                .iter()
-                .map(|&(x, y, w)| self.layers[layer][y * self.width + x] * w)
-                .sum()
+            let pixels = &self.layers[layer];
+            let mut sum = 0.0;
+            for &(x, y, w) in &weights {
+                if w != 0.0 {
+                    sum += pixels[y * self.width + x] * w;
+                }
+            }
+            sum
         };
-        let value = spatial(left) * (1.0 - t) + spatial(right) * t;
+        let value = if left == right || wavelength_nm == self.samples[left].0 {
+            spatial(left)
+        } else if wavelength_nm == self.samples[right].0 {
+            spatial(right)
+        } else {
+            let t = (wavelength_nm - self.samples[left].0)
+                / (self.samples[right].0 - self.samples[left].0);
+            spatial(left) * (1.0 - t) + spatial(right) * t
+        };
         (value.is_finite() && value >= 0.0).then_some(value)
     }
 }
@@ -96,23 +106,22 @@ pub fn ground_to_pixel(
     let v = (position.y - receiver.min_m.y) / span.y;
     Some((u * width as f64 - 0.5, (1.0 - v) * height as f64 - 0.5))
 }
+pub(crate) type BilinearWeights = [(usize, usize, f64); 4];
+
 pub(crate) fn ground_splat_weights(
     position: Vector3<f64>,
     width: usize,
     height: usize,
     receiver: &GroundReceiver,
-) -> Result<[(usize, usize, f64); 4], &'static str> {
+) -> Result<Option<BilinearWeights>, &'static str> {
     match ground_to_pixel(position, width, height, receiver) {
-        Some((x, y)) => bilinear_weights(x, y, width, height).ok_or("双线性权重计算失败"),
-        None => Ok([(0, 0, 0.0); 4]),
+        Some((x, y)) => bilinear_weights(x, y, width, height)
+            .map(Some)
+            .ok_or("双线性权重计算失败"),
+        None => Ok(None),
     }
 }
-pub fn bilinear_weights(
-    x: f64,
-    y: f64,
-    width: usize,
-    height: usize,
-) -> Option<[(usize, usize, f64); 4]> {
+pub fn bilinear_weights(x: f64, y: f64, width: usize, height: usize) -> Option<BilinearWeights> {
     if width == 0
         || height == 0
         || !x.is_finite()
@@ -185,5 +194,60 @@ mod tests {
         }
         assert!(map.sample(Vector3::zeros(), f64::NAN).is_none());
         assert!(map.sample(Vector3::repeat(f64::INFINITY), 450.0).is_none());
+    }
+
+    #[test]
+    fn fractional_position_has_expected_four_weights() {
+        assert_eq!(
+            bilinear_weights(1.25, 0.75, 4, 3),
+            Some([
+                (1, 0, 0.1875),
+                (2, 0, 0.0625),
+                (1, 1, 0.5625),
+                (2, 1, 0.1875)
+            ])
+        );
+    }
+
+    #[test]
+    fn pixel_center_contributes_only_to_that_pixel() {
+        let samples = bilinear_weights(1.0, 1.0, 4, 3).unwrap();
+        assert_eq!(samples[0], (1, 1, 1.0));
+        assert!(samples[1..].iter().all(|&(_, _, weight)| weight == 0.0));
+    }
+
+    #[test]
+    fn edge_and_single_pixel_weights_stay_in_bounds_and_sum_to_one() {
+        for (width, height) in [(4, 3), (1, 4), (4, 1), (1, 1)] {
+            for x in [-0.5, -0.25, 0.0, (width - 1) as f64, width as f64 - 0.5] {
+                for y in [-0.5, -0.25, 0.0, (height - 1) as f64, height as f64 - 0.5] {
+                    let samples = bilinear_weights(x, y, width, height).unwrap();
+                    assert!(
+                        samples
+                            .iter()
+                            .all(|&(x, y, w)| x < width && y < height && w.is_finite() && w >= 0.0)
+                    );
+                    let total: f64 = samples.iter().map(|&(_, _, weight)| weight).sum();
+                    assert!((total - 1.0).abs() < 1e-12);
+                }
+            }
+        }
+        let samples = bilinear_weights(-0.25, 1.25, 4, 3).unwrap();
+        assert!(
+            samples
+                .iter()
+                .filter(|&&(_, _, w)| w > 0.0)
+                .all(|&(x, _, _)| x == 0)
+        );
+    }
+
+    #[test]
+    fn invalid_coordinates_and_empty_dimensions_are_rejected() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5001, 3.5001] {
+            assert!(bilinear_weights(value, 0.0, 4, 4).is_none());
+            assert!(bilinear_weights(0.0, value, 4, 4).is_none());
+        }
+        assert!(bilinear_weights(0.0, 0.0, 0, 4).is_none());
+        assert!(bilinear_weights(0.0, 0.0, 4, 0).is_none());
     }
 }

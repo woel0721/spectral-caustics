@@ -5,7 +5,6 @@ use spectral_caustics::config::Config;
 use spectral_caustics::config::RenderJob;
 use spectral_caustics::film::Framebuffer;
 use spectral_caustics::integrator::photon::integrate_spectral;
-use spectral_caustics::renderer::Renderer;
 use spectral_caustics::spectrum::d65_normalization;
 use spectral_caustics::spectrum::d65_spd;
 use spectral_caustics::spectrum::wavelength_to_xyz;
@@ -88,7 +87,6 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Err("用法：sphere_wavelengths [SPP] [正方形边长] [输出目录]".into());
     }
     let scene = config.build()?;
-    let renderer = Renderer::new(config.render.clone())?;
     fs::create_dir_all(&directory)?;
     config.save(directory.join("config.json"))?;
     println!(
@@ -102,29 +100,30 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let start = Instant::now();
     let atlas = integrate_spectral(&scene, &config.render)?.ok_or("missing caustic target")?;
     println!("光谱焦散图集生成耗时 {:.3}s", start.elapsed().as_secs_f64());
+    let camera_settings = spectral_caustics::config::render::RenderSetting {
+        width: config.render.width,
+        height: config.render.height,
+        camera_spp: config.render.camera_spp,
+        seed: config.render.seed,
+        ..Default::default()
+    };
     for wavelength_nm in WAVELENGTHS_NM {
         let start = Instant::now();
         let (lighting, ior) = wavelength_lighting(&atlas, &scene, wavelength_nm)?;
         spectral_caustics::output::save_png_with_exposure(
             &lighting.caustics,
             directory.join(format!("ground_caustics_{wavelength_nm:.0}nm.png")),
-            (renderer).settings().exposure,
+            config.render.exposure,
         )?;
         let images = spectral_caustics::integrator::camera::integrate_rgb(
             &scene,
-            &spectral_caustics::config::render::RenderSetting {
-                width: (renderer).settings().width,
-                height: (renderer).settings().height,
-                camera_spp: config.render.camera_spp,
-                seed: config.render.seed,
-                ..Default::default()
-            },
+            &camera_settings,
             Some(&lighting),
         )?;
         spectral_caustics::output::save_png_with_exposure(
             &images.caustics,
             directory.join(format!("camera_caustics_{wavelength_nm:.0}nm.png")),
-            (renderer).settings().exposure,
+            config.render.exposure,
         )?;
         println!(
             "{wavelength_nm:.0} nm：n={ior:.9}，地面/相机焦散已输出，{:.3}s",

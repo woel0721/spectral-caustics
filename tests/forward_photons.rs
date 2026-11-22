@@ -902,7 +902,7 @@ fn forward_xyz_and_scalar_maps_share_paths_conserve_flux_and_repeat_across_threa
                 &scene,
                 scene.photon.caustics_object_id,
                 scene.photon.ground_id.expect("receiver"),
-                (Renderer::new(c.render.clone()).unwrap()).settings(),
+                &c.render,
             )
             .unwrap();
             let atlas = map(&scene, &c.render, 1);
@@ -938,13 +938,15 @@ fn forward_xyz_and_scalar_maps_share_paths_conserve_flux_and_repeat_across_threa
             assert!(lighting.caustics.pixels().iter().any(|p| p.y > 0.0));
             for threads in [1, 2, 4] {
                 c.render.thread_count = Some(threads);
-                let actual = spectral_caustics::integrator::photon::integrate_xyz(
-                    &scene,
-                    scene.photon.caustics_object_id,
-                    scene.photon.ground_id.expect("receiver"),
-                    (Renderer::new(c.render.clone()).unwrap()).settings(),
-                )
-                .unwrap();
+                let actual = support::run_in_threads(threads, || {
+                    spectral_caustics::integrator::photon::integrate_xyz(
+                        &scene,
+                        scene.photon.caustics_object_id,
+                        scene.photon.ground_id.expect("receiver"),
+                        &c.render,
+                    )
+                    .unwrap()
+                });
                 assert_framebuffer_bits_eq(
                     lighting.direct.as_ref().unwrap(),
                     actual.direct.as_ref().unwrap(),
@@ -1006,25 +1008,21 @@ fn camera_components_packet_and_rng_are_deterministic_with_forward_photons() {
                     c.render.thread_count = Some(1);
                     let renderer = Renderer::new(c.render.clone()).unwrap();
                     let reference = renderer.render(&scene).unwrap();
-                    let light = spectral_caustics::integrator::photon::integrate_xyz(
-                        &scene,
-                        scene.photon.caustics_object_id,
-                        scene.photon.ground_id.expect("receiver"),
-                        (renderer).settings(),
-                    )
-                    .unwrap();
-                    let rgb = spectral_caustics::integrator::camera::integrate_rgb(
-                        &scene,
-                        &spectral_caustics::config::render::RenderSetting {
-                            width: (renderer).settings().width,
-                            height: (renderer).settings().height,
-                            camera_spp: 8,
-                            seed: c.render.seed,
-                            ..Default::default()
-                        },
-                        Some(&light),
-                    )
-                    .unwrap();
+                    let rgb = support::run_in_threads(1, || {
+                        let light = spectral_caustics::integrator::photon::integrate_xyz(
+                            &scene,
+                            scene.photon.caustics_object_id,
+                            scene.photon.ground_id.expect("receiver"),
+                            &c.render,
+                        )
+                        .unwrap();
+                        spectral_caustics::integrator::camera::integrate_rgb(
+                            &scene,
+                            &c.render,
+                            Some(&light),
+                        )
+                        .unwrap()
+                    });
                     for images in [&reference, &rgb] {
                         for ((d, a), combined) in images
                             .direct
@@ -1042,25 +1040,21 @@ fn camera_components_packet_and_rng_are_deterministic_with_forward_photons() {
                         let renderer = Renderer::new(c.render.clone()).unwrap();
                         let actual = renderer.render(&scene).unwrap();
                         assert_camera_images_bits_eq(&actual, &reference);
-                        let lighting = spectral_caustics::integrator::photon::integrate_xyz(
-                            &scene,
-                            scene.photon.caustics_object_id,
-                            scene.photon.ground_id.expect("receiver"),
-                            (renderer).settings(),
-                        )
-                        .unwrap();
-                        let actual = spectral_caustics::integrator::camera::integrate_rgb(
-                            &scene,
-                            &spectral_caustics::config::render::RenderSetting {
-                                width: (renderer).settings().width,
-                                height: (renderer).settings().height,
-                                camera_spp: 8,
-                                seed: c.render.seed,
-                                ..Default::default()
-                            },
-                            Some(&lighting),
-                        )
-                        .unwrap();
+                        let actual = support::run_in_threads(threads, || {
+                            let lighting = spectral_caustics::integrator::photon::integrate_xyz(
+                                &scene,
+                                scene.photon.caustics_object_id,
+                                scene.photon.ground_id.expect("receiver"),
+                                &c.render,
+                            )
+                            .unwrap();
+                            spectral_caustics::integrator::camera::integrate_rgb(
+                                &scene,
+                                &c.render,
+                                Some(&lighting),
+                            )
+                            .unwrap()
+                        });
                         assert_camera_images_bits_eq(&rgb, &actual);
                     }
                 }

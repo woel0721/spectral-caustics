@@ -75,7 +75,9 @@ jobs:
       - name: Build all targets
         run: cargo build --locked --all-targets
       - name: Test default configuration
-        run: cargo test --locked
+        run: |
+          cargo test --locked --all-targets
+          cargo test --locked --doc
       - name: Check default configuration with Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
@@ -90,6 +92,8 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy
       - name: Test diagnostics configuration
-        run: cargo test --locked --all-targets --features diagnostics
+        run: |
+          cargo test --locked --all-targets --features diagnostics
+          cargo test --locked --doc --features diagnostics
       - name: Check diagnostics configuration with Clippy
         run: cargo clippy --locked --all-targets --features diagnostics -- -D warnings

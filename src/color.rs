@@ -113,7 +113,6 @@ pub fn linear_rgb_to_srgb8(linear_rgb: Vector3<f64>) -> Option<[u8; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caustics::map::bilinear_weights;
 
     // 浮点矩阵计算有舍入误差，使用向量差的长度（欧几里得范数）衡量接近程度。
     // 例如 0.9999999999999993 与 1.0 的差远小于这里使用的 1e-12 容差。
@@ -281,60 +280,5 @@ mod tests {
         ] {
             assert_eq!(linear_to_srgb_channel(linear), None);
         }
-    }
-
-    #[test]
-    fn fractional_position_has_expected_four_weights() {
-        assert_eq!(
-            bilinear_weights(1.25, 0.75, 4, 3),
-            Some([
-                (1, 0, 0.1875),
-                (2, 0, 0.0625),
-                (1, 1, 0.5625),
-                (2, 1, 0.1875)
-            ])
-        );
-    }
-
-    #[test]
-    fn pixel_center_contributes_only_to_that_pixel() {
-        let samples = bilinear_weights(1.0, 1.0, 4, 3).unwrap();
-        assert_eq!(samples[0], (1, 1, 1.0));
-        assert!(samples[1..].iter().all(|&(_, _, weight)| weight == 0.0));
-    }
-
-    #[test]
-    fn edge_and_single_pixel_weights_stay_in_bounds_and_sum_to_one() {
-        for (width, height) in [(4, 3), (1, 4), (4, 1), (1, 1)] {
-            for x in [-0.5, -0.25, 0.0, (width - 1) as f64, width as f64 - 0.5] {
-                for y in [-0.5, -0.25, 0.0, (height - 1) as f64, height as f64 - 0.5] {
-                    let samples = bilinear_weights(x, y, width, height).unwrap();
-                    assert!(
-                        samples
-                            .iter()
-                            .all(|&(x, y, w)| x < width && y < height && w.is_finite() && w >= 0.0)
-                    );
-                    let total: f64 = samples.iter().map(|&(_, _, weight)| weight).sum();
-                    assert!((total - 1.0).abs() < 1e-12);
-                }
-            }
-        }
-        let samples = bilinear_weights(-0.25, 1.25, 4, 3).unwrap();
-        assert!(
-            samples
-                .iter()
-                .filter(|&&(_, _, w)| w > 0.0)
-                .all(|&(x, _, _)| x == 0)
-        );
-    }
-
-    #[test]
-    fn invalid_coordinates_and_empty_dimensions_are_rejected() {
-        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5001, 3.5001] {
-            assert!(bilinear_weights(value, 0.0, 4, 4).is_none());
-            assert!(bilinear_weights(0.0, value, 4, 4).is_none());
-        }
-        assert!(bilinear_weights(0.0, 0.0, 0, 4).is_none());
-        assert!(bilinear_weights(0.0, 0.0, 4, 0).is_none());
     }
 }

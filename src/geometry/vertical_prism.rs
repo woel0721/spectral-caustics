@@ -10,7 +10,6 @@ use nalgebra::Vector3;
 #[derive(Debug)]
 pub struct VerticalPrism {
     mesh: Prism,
-    vertices: [Vector3<f64>; 6],
 }
 
 impl VerticalPrism {
@@ -43,13 +42,7 @@ impl VerticalPrism {
             Vector3::new(p.x, p.y, if i < 3 { z_min } else { z_max })
         });
         let mesh = Prism::from_vertices(vertices)?;
-        Some(Self { mesh, vertices })
-    }
-
-    /// 读取构建后的六个世界坐标顶点（米），返回只读引用。
-    /// 前三点位于下端面，后三点位于相同 XY 的上端面；下端面从 +Z 看为顺时针。
-    pub fn vertices(&self) -> &[Vector3<f64>; 6] {
-        &self.vertices
+        Some(Self { mesh })
     }
 }
 
@@ -83,11 +76,6 @@ mod tests {
     #[test]
     fn z_extrusion_has_triangular_caps_and_vertical_outward_sides() {
         let prism = VerticalPrism::new(section(), 0.1, 2.1).unwrap();
-        for i in 0..3 {
-            assert_eq!(prism.vertices[i].z, 0.1);
-            assert_eq!(prism.vertices[i + 3].z, 2.1);
-            assert_eq!(prism.vertices[i].xy(), prism.vertices[i + 3].xy());
-        }
         let center = Vector3::new(0.0, 0.0, 1.1);
         for (point, normal) in [
             (Vector3::new(0.0, 0.0, 2.1), Vector3::z()),

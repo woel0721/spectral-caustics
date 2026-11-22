@@ -24,7 +24,6 @@ use crate::geometry::triangle::Triangle;
 use crate::material::BsdfSample;
 use crate::material::Material;
 use crate::material::lambertian::Lambertian;
-use crate::renderer::Renderer;
 use nalgebra::Vector3;
 use rand::RngCore;
 use rand::SeedableRng;
@@ -167,18 +166,17 @@ fn deep_render_repeats_across_threads_mis_and_components_and_preserves_photons()
     let mut scene = RenderJob::from_config(&Config::default().scene).unwrap();
     scene.scene.environment = Some(uniform_hdri());
     add_colored_wall(&mut scene);
-    let renderer = Renderer::new(RenderSetting {
+    let settings = RenderSetting {
         width: 11,
         height: 9,
         samples_per_pixel_axis: 2,
         ..Default::default()
-    })
-    .unwrap();
+    };
     let photons = crate::integrator::photon::integrate_xyz(
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        &settings,
     )
     .unwrap();
     let baseline = crate::integrator::camera::integrate_rgb(
@@ -199,7 +197,7 @@ fn deep_render_repeats_across_threads_mis_and_components_and_preserves_photons()
             &scene,
             scene.photon.caustics_object_id,
             scene.photon.ground_id.expect("receiver"),
-            (renderer).settings(),
+            &settings,
         )
         .unwrap();
         assert_eq!(
@@ -382,15 +380,10 @@ fn invalid_and_empty_continuation_samples_at_later_vertices_are_handled() {
     }
 }
 
-struct Absorber;
-impl Material for Absorber {
-    fn evaluate_rgb(&self, _: Vector3<f64>, _: Vector3<f64>, _: Vector3<f64>) -> Vector3<f64> {
-        Vector3::zeros()
-    }
-}
+use super::support::Absorber;
 #[test]
 fn third_hit_absorbing_and_backface_still_terminate() {
-    for kind in 2..4 {
+    for kind in 1..4 {
         let mut scene = two_planes(Vector3::repeat(0.8), Vector3::repeat(0.7));
         scene.camera_options.max_diffuse_bounces = 5;
         let mut vertices = [
@@ -422,7 +415,12 @@ fn third_hit_absorbing_and_backface_still_terminate() {
                 );
             }
         }
-        let actual = trace_chain(&scene, &mut SequenceRng::new(&[0.25, 0.0, 0.5, 0.25]));
+        let draws = if kind == 1 {
+            &[0.25, 0.0, 0.5, 0.25, 0.25, 0.0][..]
+        } else {
+            &[0.25, 0.0, 0.5, 0.25][..]
+        };
+        let actual = trace_chain(&scene, &mut SequenceRng::new(draws));
         close(
             actual.direct,
             analytic_chain(Vector3::repeat(0.8), Vector3::repeat(0.7), 1, 1.0),

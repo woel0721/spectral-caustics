@@ -27,15 +27,26 @@ pub struct Config {
 
 impl Config {
     pub fn build(&self) -> Result<RenderJob, Box<dyn Error + Send + Sync>> {
+        #[cfg(feature = "diagnostics")]
+        if self
+            .render
+            .diagnostics
+            .target
+            .is_some_and(|id| id >= self.scene.objects.len())
+        {
+            return Err("invalid diagnostic target".into());
+        }
         let job = RenderJob::from_config(&self.scene)?;
         #[cfg(feature = "diagnostics")]
         let job = {
             let mut job = job;
-            job.diagnostics = self.render.diagnostics.clone();
-            job.diagnostics.target = job.diagnostics.target.or(job.photon.caustics_object_id);
-            if job
+            job.diagnostic_target = self
+                .render
                 .diagnostics
                 .target
+                .or(job.photon.caustics_object_id);
+            if job
+                .diagnostic_target
                 .is_some_and(|id| id >= job.scene.objects.len())
             {
                 return Err("invalid diagnostic target".into());
@@ -52,17 +63,23 @@ impl Config {
     pub fn validate(&self) -> Result<(), String> {
         self.render.validate()?;
         self.scene.validate()?;
+        #[cfg(feature = "diagnostics")]
+        if self
+            .render
+            .diagnostics
+            .target
+            .is_some_and(|id| id >= self.scene.objects.len())
+        {
+            return Err("invalid diagnostic target".into());
+        }
+        if self.render.camera_mode == render::CameraMode::Rgb
+            && self.scene.has_wavelength_dependent_medium()
+        {
+            return Err(crate::medium::SPECTRAL_CAMERA_REQUIRED.into());
+        }
         if self.render.camera_mode == render::CameraMode::Spectral {
             for object in &self.scene.objects {
-                use scene::ObjectConfig;
-                let material = match object {
-                    ObjectConfig::Prism { material, .. }
-                    | ObjectConfig::VerticalPrism { material, .. }
-                    | ObjectConfig::Sphere { material, .. }
-                    | ObjectConfig::BeveledPrism { material, .. }
-                    | ObjectConfig::Ground { material, .. } => material,
-                };
-                if matches!(material, material::MaterialConfig::GgxMetal { .. }) {
+                if matches!(object.material(), material::MaterialConfig::GgxMetal { .. }) {
                     return Err(
                         "spectral 相机暂不支持 GGX Metal：RGB eta/k 没有唯一的物理光谱".into(),
                     );
@@ -80,9 +97,9 @@ impl Config {
         Ok(())
     }
 
-    /// 读取 JSON 文本并校验，供文件加载或内存配置使用。
+    /// 读取 JSON 文本并做 Serde 结构解析，供文件加载或内存配置使用。
     ///
-    /// 输入：json 字符串；输出：Config，语法、字段或配置数值无效时 Err。
+    /// 输入：json 字符串；输出：Config，语法或字段结构无效时 Err；完整数值校验由 validate / build 执行。
     pub fn from_json(json: &str) -> Result<Self, Box<dyn Error + Send + Sync>> {
         Ok(serde_json::from_str(json)?)
     }
@@ -96,7 +113,7 @@ impl Config {
         Ok(serde_json::to_string_pretty(self)?)
     }
 
-    /// 从文件读取并校验配置。输入：配置文件路径；输出：Config，读取、JSON 解析或参数无效时 Err。
+    /// 从文件读取配置并做 Serde 结构解析。输入：配置文件路径；输出：Config，读取或 JSON 结构无效时 Err。
     pub fn load(path: impl AsRef<Path>) -> Result<Self, Box<dyn Error + Send + Sync>> {
         Self::from_json(&fs::read_to_string(path)?)
     }
@@ -650,6 +667,14 @@ mod tests {
     #[test]
     fn finite_geometry_coordinates_roundtrip_without_losing_f64_bits() {
         let mut config = Config::default();
+        // 使用圆盘光源测试包括 f64::MAX 在内的任意有限地面高度，不受平行光发射高度上限限制。
+        config.scene.light = light::DiskAreaLightConfig {
+            center: [0.0, 0.0, 3.0],
+            normal: [0.0, 0.0, -1.0],
+            radius: 0.5,
+            total_flux: 8.0,
+        }
+        .into();
         for height_m in [
             -0.0,
             f64::from_bits(1),
@@ -1055,5 +1080,74 @@ mod tests {
             }
         }
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn config_validate_matches_build_and_render_preconditions() {
+        // Missing ground
+        let mut missing_ground = Config::default();
+        missing_ground.scene.objects.pop();
+        assert!(missing_ground.validate().is_err());
+        assert!(missing_ground.build().is_err());
+
+        // Duplicate ground
+        let mut duplicate_ground = Config::default();
+        duplicate_ground.scene.objects.push(ObjectConfig::Ground {
+            height_m: -1.0,
+            material: Default::default(),
+        });
+        assert!(duplicate_ground.validate().is_err());
+        assert!(duplicate_ground.build().is_err());
+
+        // Ground at or above parallel light
+        let mut high_ground = Config::default();
+        high_ground.scene.objects[1] = ObjectConfig::Ground {
+            height_m: 3.0,
+            material: Default::default(),
+        };
+        assert!(high_ground.validate().is_err());
+        assert!(high_ground.build().is_err());
+
+        // Non-downward parallel light or overflowing irradiance
+        let mut upward = Config::default();
+        upward.scene.light.as_parallel_mut().unwrap().direction = [0.0, 0.0, 1.0];
+        assert!(upward.validate().is_err());
+        assert!(upward.build().is_err());
+
+        let mut overflow = Config::default();
+        overflow.scene.light.as_parallel_mut().unwrap().total_flux = f64::MAX;
+        overflow
+            .scene
+            .light
+            .as_parallel_mut()
+            .unwrap()
+            .aperture_max_m = [-1.999_999, -1.999_999];
+        assert!(overflow.validate().is_err());
+        assert!(overflow.build().is_err());
+
+        // RGB camera with wavelength-dependent medium
+        let mut chromatic = Config::default();
+        chromatic.scene.medium = Some(crate::medium::MediumConfig::Homogeneous(
+            crate::medium::HomogeneousMediumConfig {
+                min_m: [-1.0; 3],
+                max_m: [1.0; 3],
+                sigma_a: crate::medium::MediumCoefficient::Curve {
+                    samples: vec![[380.0, 0.1], [780.0, 0.5]],
+                },
+                sigma_s: 0.0.into(),
+                g: 0.0.into(),
+            },
+        ));
+        assert!(chromatic.validate().is_err());
+        chromatic.render.camera_mode = render::CameraMode::Spectral;
+        assert!(chromatic.validate().is_ok());
+
+        #[cfg(feature = "diagnostics")]
+        {
+            let mut bad_target = Config::default();
+            bad_target.render.diagnostics.target = Some(bad_target.scene.objects.len());
+            assert!(bad_target.validate().is_err());
+            assert!(bad_target.build().is_err());
+        }
     }
 }

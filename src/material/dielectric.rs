@@ -44,7 +44,7 @@ impl Dielectric {
 }
 
 impl Material for Dielectric {
-    /// 按输入 mode 返回零 BSDF：理想玻璃只在离散的反射/透射方向贡献，需用 sample 计算，不能用有限函数值代替。
+    /// 返回零 BSDF：理想玻璃只在离散的反射/透射方向贡献，需用 sample 计算，不能用有限函数值代替。
     fn evaluate_rgb(
         &self,
         _wi: Vector3<f64>,
@@ -131,6 +131,10 @@ impl Material for Dielectric {
             _ => Some(self.ior),
         }
     }
+
+    fn has_wavelength_dependent_ior(&self, mode: IorMode) -> bool {
+        mode == IorMode::Dispersion && self.dispersion.is_some()
+    }
 }
 
 /// 计算一次理想玻璃界面散射，供 RGB 和光谱采样共用几何及事件选择。
@@ -167,15 +171,6 @@ fn sample_interface(
     })
 }
 
-/// 计算非偏振光在理想介质界面上的能量反射比例，用于决定反射/透射。
-///
-/// 输入：入射角余弦 cos_i，以及正有限入射/透射折射率 η_i/η_t；cos_i 取绝对值并夹到 `[0,1]`。
-///
-/// 输出：F∈`[0,1]`；全反射返回 Some(1)，相同介质返回 Some(0)，非法输入返回 None。
-///
-/// 公式：sinθ_t=(η_i/η_t)sinθ_i，c_i=cosθ_i，c_t=cosθ_t；
-/// R_s=((η_i c_i-η_t c_t)/(η_i c_i+η_t c_t))²，R_p=((η_t c_i-η_i c_t)/(η_t c_i+η_i c_t))²，F=(R_s+R_p)/2。
-/// 调用方按传播方向指定两侧折射率，本函数不会根据 cos_i 的符号交换它们。
 #[cfg(test)]
 mod tests {
     use super::*;

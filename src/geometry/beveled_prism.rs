@@ -5,7 +5,6 @@ use super::object::Hittable;
 use super::ray::INTERSECTION_EPSILON;
 use super::ray::PARALLEL_EPSILON;
 use super::ray::Ray;
-use super::triangle::Triangle;
 use nalgebra::Vector2;
 use nalgebra::Vector3;
 
@@ -14,42 +13,20 @@ pub const ROUND_SEGMENTS: usize = 8;
 const ARC_POINTS: usize = ROUND_SEGMENTS + 1;
 const RING_VERTICES: usize = 3 * ARC_POINTS;
 const VERTEX_COUNT: usize = 2 * RING_VERTICES;
-const TRIANGLE_COUNT: usize = 4 * RING_VERTICES - 4;
-const FACE_INDICES: [[usize; 3]; TRIANGLE_COUNT] = face_indices();
-
-/// 生成圆角三棱柱的三角面索引，供构建时校验和网格导出共用。
-///
-/// 输入：无，使用固定截面顶点数；输出：连接两圈顶点的侧面与两个端面索引。
-/// 每圈 27 点，侧面 54 片、端面各 25 片，共 104 个三角形；不增加端面中心点。
-const fn face_indices() -> [[usize; 3]; TRIANGLE_COUNT] {
-    let mut faces = [[0; 3]; TRIANGLE_COUNT];
-    let mut i = 0;
-    while i < RING_VERTICES {
-        let j = (i + 1) % RING_VERTICES;
-        faces[2 * i] = [i, i + RING_VERTICES, j + RING_VERTICES];
-        faces[2 * i + 1] = [i, j + RING_VERTICES, j];
-        i += 1;
-    }
-    let mut k = 1;
-    while k < RING_VERTICES - 1 {
-        faces[2 * RING_VERTICES + k - 1] = [0, k, k + 1];
-        faces[3 * RING_VERTICES - 2 + k - 1] =
-            [RING_VERTICES, RING_VERTICES + k + 1, RING_VERTICES + k];
-        k += 1;
-    }
-    faces
-}
 
 #[derive(Debug)]
 pub struct BeveledPrism {
-    vertices: [Vector3<f64>; VERTEX_COUNT],
-    planes: [Plane; RING_VERTICES + 2],
+    y_min: f64,
+    y_max: f64,
+    side_planes: [SidePlane; RING_VERTICES],
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Plane {
-    point: Vector3<f64>,
-    normal: Vector3<f64>,
+struct SidePlane {
+    px: f64,
+    pz: f64,
+    nx: f64,
+    nz: f64,
 }
 
 impl BeveledPrism {
@@ -57,7 +34,7 @@ impl BeveledPrism {
     ///
     /// 输入：三个 (x,z) 截面顶点、y_min/y_max 及沿原边截取的长度 bevel_size，单位均为米。
     ///
-    /// 输出：缓存顶点和裁剪平面的 BeveledPrism；退化、非有限或圆角过大时返回 None。
+    /// 输出：缓存裁剪平面的 BeveledPrism；退化、非有限或圆角过大时返回 None。
     /// 要求 y_min<y_max 且 0<2·bevel_size<每条边长；bevel_size 不是圆弧半径。
     /// 每个圆角离散成 8 段，法线按平面段计算。
     pub fn new(
@@ -67,44 +44,52 @@ impl BeveledPrism {
         bevel_size: f64,
     ) -> Option<Self> {
         let vertices = mesh_vertices(cross_section, y_min, y_max, bevel_size)?;
-        for [a, b, c] in FACE_INDICES {
-            Triangle::new(vertices[a], vertices[b], vertices[c])?;
-        }
-        let planes = std::array::from_fn(|i| {
-            if i < RING_VERTICES {
-                let edge = vertices[(i + 1) % RING_VERTICES] - vertices[i];
-                Plane {
-                    point: vertices[i],
-                    normal: Vector3::new(edge.z, 0.0, -edge.x).normalize(),
-                }
-            } else {
-                Plane {
-                    point: vertices[if i == RING_VERTICES { 0 } else { RING_VERTICES }],
-                    normal: if i == RING_VERTICES {
-                        -Vector3::y()
-                    } else {
-                        Vector3::y()
-                    },
-                }
+        let length_y = y_max - y_min;
+        let mut side_planes = [SidePlane {
+            px: 0.0,
+            pz: 0.0,
+            nx: 0.0,
+            nz: 0.0,
+        }; RING_VERTICES];
+        for (i, plane) in side_planes.iter_mut().enumerate() {
+            let p = vertices[i];
+            let next = vertices[(i + 1) % RING_VERTICES];
+            let dx = next.x - p.x;
+            let dz = next.z - p.z;
+            let edge_len = dx.hypot(dz);
+            if !edge_len.is_finite() || edge_len == 0.0 || !(edge_len * length_y).is_finite() {
+                return None;
             }
-        });
-        if planes
-            .iter()
-            .any(|plane| plane.normal.iter().any(|v| !v.is_finite()))
-        {
-            return None;
+            let nx = dz / edge_len;
+            let nz = -dx / edge_len;
+            if !nx.is_finite() || !nz.is_finite() {
+                return None;
+            }
+            *plane = SidePlane {
+                px: p.x,
+                pz: p.z,
+                nx,
+                nz,
+            };
         }
-        Some(Self { vertices, planes })
+        Some(Self {
+            y_min,
+            y_max,
+            side_planes,
+        })
     }
 
-    /// 返回圆角网格的只读世界坐标顶点（米）：前 27 点位于 y_min，后 27 点位于 y_max。
-    pub fn vertices(&self) -> &[Vector3<f64>; VERTEX_COUNT] {
-        &self.vertices
-    }
-
-    /// 返回与 vertices() 配套的只读三角面索引：54 个侧面三角形加 50 个端面三角形，共 104 片。
-    pub fn triangle_indices(&self) -> &[[usize; 3]; TRIANGLE_COUNT] {
-        &FACE_INDICES
+    /// 按需重建圆角网格的世界坐标顶点（米）：前 27 点位于 y_min，后 27 点位于 y_max。
+    pub fn vertices(&self) -> [Vector3<f64>; VERTEX_COUNT] {
+        std::array::from_fn(|i| {
+            let plane = self.side_planes[i % RING_VERTICES];
+            let y = if i < RING_VERTICES {
+                self.y_min
+            } else {
+                self.y_max
+            };
+            Vector3::new(plane.px, y, plane.pz)
+        })
     }
 }
 
@@ -202,13 +187,23 @@ fn mesh_vertices(
 }
 
 impl Hittable for BeveledPrism {
+    fn intersect(&self, ray: &Ray) -> Option<Hit> {
+        self.intersect_after(ray, INTERSECTION_EPSILON)
+    }
+
+    fn intersect_from_volume(&self, ray: &Ray) -> Option<Hit> {
+        self.intersect_after(ray, 0.0)
+    }
+}
+
+impl BeveledPrism {
     /// 用凸体的各个外向平面裁剪光线，避免三角面共享边的舍入缝隙。
     ///
-    /// 输入：Ray；输出：最近正向 Hit，从内部发射时取出射点；无交集或数值无效返回 None。
+    /// 输入：Ray 和最小距离下限；输出：最近正向 Hit，从内部发射时取出射点；无交集或数值无效返回 None。
     ///
     /// 公式：每面要求 (o+t·d-p)·n≤0，其边界距离 t=-(o-p)·n/(d·n)。
     /// 所有面的允许区间取交集 `[enter,exit]`，法线来自决定最终端点的平面。
-    fn intersect(&self, ray: &Ray) -> Option<Hit> {
+    fn intersect_after(&self, ray: &Ray, min_distance: f64) -> Option<Hit> {
         if ray
             .origin
             .iter()
@@ -217,21 +212,59 @@ impl Hittable for BeveledPrism {
         {
             return None;
         }
-        // 该 mesh 为凸体。直接裁剪侧面与两端面的外向半空间，避免共享边重心舍入缝。
+        // 该 mesh 为凸体。先裁剪 Y-slab 再裁剪 27 条 2D 侧面半空间，避免共享边重心舍入缝。
         // 平面通过顶点而非世界原点表示，减小平移后的消减误差。
         let mut enter = f64::NEG_INFINITY;
         let mut exit = f64::INFINITY;
         let mut enter_normal = None;
         let mut exit_normal = None;
-        for plane in &self.planes {
-            let offset = ray.origin - plane.point;
-            let signed_distance = offset.dot(&plane.normal);
-            let facing = ray.direction.dot(&plane.normal);
+        let dy = ray.direction.y;
+        let oy_min = ray.origin.y - self.y_min;
+        let oy_max = ray.origin.y - self.y_max;
+        if !oy_min.is_finite() || !oy_max.is_finite() {
+            return None;
+        }
+        if dy.abs() <= PARALLEL_EPSILON {
+            let roundoff_min = 32.0 * f64::EPSILON * oy_min.abs().max(1.0);
+            let roundoff_max = 32.0 * f64::EPSILON * oy_max.abs().max(1.0);
+            if -oy_min > roundoff_min || oy_max > roundoff_max {
+                return None;
+            }
+        } else {
+            let t_min = -oy_min / dy;
+            let t_max = -oy_max / dy;
+            if !t_min.is_finite() || !t_max.is_finite() {
+                return None;
+            }
+            if dy > 0.0 {
+                enter = t_min;
+                enter_normal = Some(-Vector3::y());
+                exit = t_max;
+                exit_normal = Some(Vector3::y());
+            } else {
+                enter = t_max;
+                enter_normal = Some(Vector3::y());
+                exit = t_min;
+                exit_normal = Some(-Vector3::y());
+            }
+            if exit <= min_distance {
+                return None;
+            }
+        }
+        let ox0 = ray.origin.x;
+        let oz0 = ray.origin.z;
+        let dx = ray.direction.x;
+        let dz = ray.direction.z;
+        for plane in &self.side_planes {
+            let ox = ox0 - plane.px;
+            let oz = oz0 - plane.pz;
+            let signed_distance = ox * plane.nx + oz * plane.nz;
+            let facing = dx * plane.nx + dz * plane.nz;
             if !signed_distance.is_finite() || !facing.is_finite() {
                 return None;
             }
             if facing.abs() <= PARALLEL_EPSILON {
-                let roundoff = 32.0 * f64::EPSILON * offset.amax().max(1.0);
+                let roundoff = 32.0 * f64::EPSILON * ox.abs().max(oz.abs()).max(1.0);
                 if signed_distance > roundoff {
                     return None;
                 }
@@ -241,12 +274,23 @@ impl Hittable for BeveledPrism {
             if !distance.is_finite() {
                 return None;
             }
-            if facing < 0.0 && distance > enter {
-                enter = distance;
-                enter_normal = Some(plane.normal);
-            } else if facing > 0.0 && distance < exit {
+            if facing < 0.0 {
+                if distance > enter {
+                    enter = distance;
+                    enter_normal = Some(Vector3::new(plane.nx, 0.0, plane.nz));
+                }
+            } else if distance < exit {
                 exit = distance;
-                exit_normal = Some(plane.normal);
+                exit_normal = Some(Vector3::new(plane.nx, 0.0, plane.nz));
+                if exit <= min_distance {
+                    return None;
+                }
+            }
+            if enter.is_finite() && exit.is_finite() {
+                let roundoff = 32.0 * f64::EPSILON * enter.abs().max(exit.abs()).max(1.0);
+                if enter > exit + roundoff {
+                    return None;
+                }
             }
         }
         // 仅容许浮点精度量级的区间差，不使用米制自相交 epsilon 扩大实体。
@@ -254,9 +298,9 @@ impl Hittable for BeveledPrism {
         if enter > exit + roundoff {
             return None;
         }
-        let (distance, normal) = if enter > INTERSECTION_EPSILON {
+        let (distance, normal) = if enter > min_distance {
             (enter, enter_normal?)
-        } else if exit > INTERSECTION_EPSILON {
+        } else if exit > min_distance {
             (exit, exit_normal?)
         } else {
             return None;
@@ -278,6 +322,28 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    const TRIANGLE_COUNT: usize = 4 * RING_VERTICES - 4;
+    const FACE_INDICES: [[usize; 3]; TRIANGLE_COUNT] = face_indices();
+
+    const fn face_indices() -> [[usize; 3]; TRIANGLE_COUNT] {
+        let mut faces = [[0; 3]; TRIANGLE_COUNT];
+        let mut i = 0;
+        while i < RING_VERTICES {
+            let j = (i + 1) % RING_VERTICES;
+            faces[2 * i] = [i, i + RING_VERTICES, j + RING_VERTICES];
+            faces[2 * i + 1] = [i, j + RING_VERTICES, j];
+            i += 1;
+        }
+        let mut k = 1;
+        while k < RING_VERTICES - 1 {
+            faces[2 * RING_VERTICES + k - 1] = [0, k, k + 1];
+            faces[3 * RING_VERTICES - 2 + k - 1] =
+                [RING_VERTICES, RING_VERTICES + k + 1, RING_VERTICES + k];
+            k += 1;
+        }
+        faces
+    }
+
     fn section() -> [Vector2<f64>; 3] {
         [
             Vector2::new(-0.5, 0.03),
@@ -291,9 +357,9 @@ mod tests {
         for bevel in [0.02, 0.035, 0.05] {
             let vertices = mesh_vertices(section(), -1.0, 1.0, bevel).unwrap();
             let prism = BeveledPrism::new(section(), -1.0, 1.0, bevel).unwrap();
-            assert_eq!(prism.triangle_indices().len(), 104);
+            assert_eq!(FACE_INDICES.len(), 104);
             assert_eq!(vertices.len(), 54);
-            assert_eq!(prism.vertices(), &vertices);
+            assert_eq!(prism.vertices(), vertices);
             let mut edges = BTreeMap::<_, Vec<_>>::new();
             for [a, b, c] in FACE_INDICES {
                 assert!(a != b && b != c && c != a);
@@ -569,5 +635,22 @@ mod tests {
             ray.direction.x = value;
             assert!(prism.intersect(&ray).is_none());
         }
+    }
+
+    #[test]
+    fn intersect_from_volume_accepts_sub_epsilon_positive_hits() {
+        let prism = BeveledPrism::new(section(), -1.0, 1.0, 0.02).unwrap();
+        let near = INTERSECTION_EPSILON * 0.25;
+        let outside = Ray::new(Vector3::new(0.0, -1.0 - near, 0.3), Vector3::y()).unwrap();
+        assert!((prism.intersect(&outside).unwrap().distance - (2.0 + near)).abs() < 1e-12);
+        let hit = prism.intersect_from_volume(&outside).unwrap();
+        assert!((hit.distance - near).abs() < 1e-14);
+        assert_eq!(hit.normal, -Vector3::y());
+
+        let inside = Ray::new(Vector3::new(0.0, 1.0 - near, 0.3), Vector3::y()).unwrap();
+        assert!(prism.intersect(&inside).is_none());
+        let exit = prism.intersect_from_volume(&inside).unwrap();
+        assert!((exit.distance - near).abs() < 1e-14);
+        assert_eq!(exit.normal, Vector3::y());
     }
 }

@@ -166,8 +166,10 @@ fn disk_and_parallel_tagged_config_roundtrip_and_reject_invalid_inputs() {
     let c = config();
     assert!(matches!(c.build().unwrap().scene.light, Light::DiskArea(_)));
     assert_eq!(Config::from_json(&c.to_json().unwrap()).unwrap(), c);
-    let parallel =
-        Config::from_json(include_str!("../configs/vertical_prism_caustics.json")).unwrap();
+    let parallel = Config::from_json(include_str!(
+        "../configs/vertical_prism_spectral_caustics.json"
+    ))
+    .unwrap();
     let mut tagged = serde_json::to_value(&parallel).unwrap();
     assert_eq!(tagged["scene"]["light"]["type"], "parallel");
     assert_eq!(Config::from_json(&tagged.to_string()).unwrap(), parallel);
@@ -316,7 +318,7 @@ fn emitted_ground_flux_matches_fixed_spd_and_quadrature_for_all_radii_and_counts
                     &scene,
                     scene.photon.caustics_object_id,
                     scene.photon.ground_id.expect("receiver"),
-                    (Renderer::new(settings.clone()).unwrap()).settings(),
+                    &settings,
                 )
                 .unwrap();
                 let flux = light
@@ -446,7 +448,7 @@ fn disk_scalar_nodes_reintegrate_without_extra_fresnel_d65_or_pdf_factors() {
             &scene,
             scene.photon.caustics_object_id,
             scene.photon.ground_id.expect("receiver"),
-            (Renderer::new(c.render.clone()).unwrap()).settings(),
+            &c.render,
         )
         .unwrap();
         let mut integrated = vec![Vector3::zeros(); c.render.width * c.render.height];
@@ -570,26 +572,21 @@ fn disk_packet_components_and_rgb_repeat_across_threads_with_crn_preserved() {
             None;
         for threads in [1, 2, 4] {
             c.render.thread_count = Some(threads);
-            let r = Renderer::new(c.render.clone()).unwrap();
-            let light = spectral_caustics::integrator::photon::integrate_xyz(
-                &scene,
-                scene.photon.caustics_object_id,
-                scene.photon.ground_id.expect("receiver"),
-                (r).settings(),
-            )
-            .unwrap();
-            let image = spectral_caustics::integrator::camera::integrate_rgb(
-                &scene,
-                &spectral_caustics::config::render::RenderSetting {
-                    width: (r).settings().width,
-                    height: (r).settings().height,
-                    camera_spp: c.render.camera_spp,
-                    seed: c.render.seed,
-                    ..Default::default()
-                },
-                Some(&light),
-            )
-            .unwrap();
+            let image = support::run_in_threads(threads, || {
+                let light = spectral_caustics::integrator::photon::integrate_xyz(
+                    &scene,
+                    scene.photon.caustics_object_id,
+                    scene.photon.ground_id.expect("receiver"),
+                    &c.render,
+                )
+                .unwrap();
+                spectral_caustics::integrator::camera::integrate_rgb(
+                    &scene,
+                    &c.render,
+                    Some(&light),
+                )
+                .unwrap()
+            });
             assert!(image.direct.pixels().iter().any(|p| p.y > 0.0));
             assert!(image.caustics.pixels().iter().any(|p| p.y > 0.0));
             for ((d, k), sum) in image

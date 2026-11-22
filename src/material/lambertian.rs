@@ -3,13 +3,22 @@
 use super::BsdfSample;
 use super::Material;
 use super::ScatterType;
-use super::to_world;
+use super::to_world_unit;
 use super::unit_vector;
 use crate::spectrum::rgb_reflectance;
 use nalgebra::Vector3;
 use rand::Rng;
 use rand::RngCore;
 use std::f64::consts::PI;
+
+fn valid_positive_hemisphere(wi: Vector3<f64>, wo: Vector3<f64>, normal: Vector3<f64>) -> bool {
+    let (Some(wi), Some(wo), Some(normal)) =
+        (unit_vector(wi), unit_vector(wo), unit_vector(normal))
+    else {
+        return false;
+    };
+    normal.dot(&wi) > 0.0 && normal.dot(&wo) > 0.0
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lambertian {
@@ -70,22 +79,17 @@ impl Material for Lambertian {
         Some(self.albedo)
     }
 
-    /// 计算给定方向的漫反射 BSDF，供直接光与环境积分使用。
+    /// 计算给定方向的 RGB 漫反射 BSDF，供直接光与环境积分使用。
     ///
-    /// 输入：wi/wo、表面法线和 RGB/光谱模式；输出：f=albedo/π 或 fλ=ρ(λ)/π，单位 sr⁻¹。
-    /// 两个方向须在法线正半球；非法方向、非法波长或背面返回对应类型的零。
+    /// 输入：wi/wo 和表面法线；输出：f=albedo/π，单位 sr⁻¹。
+    /// 两个方向须在法线正半球；非法方向或背面返回零。
     fn evaluate_rgb(
         &self,
         wi: Vector3<f64>,
         wo: Vector3<f64>,
         normal: Vector3<f64>,
     ) -> Vector3<f64> {
-        let (Some(wi), Some(wo), Some(normal)) =
-            (unit_vector(wi), unit_vector(wo), unit_vector(normal))
-        else {
-            return Vector3::zeros();
-        };
-        if normal.dot(&wi) <= 0.0 || normal.dot(&wo) <= 0.0 {
+        if !valid_positive_hemisphere(wi, wo, normal) {
             return Vector3::zeros();
         }
         self.albedo / PI
@@ -97,12 +101,7 @@ impl Material for Lambertian {
         normal: Vector3<f64>,
         wavelength_nm: f64,
     ) -> f64 {
-        let (Some(wi), Some(wo), Some(normal)) =
-            (unit_vector(wi), unit_vector(wo), unit_vector(normal))
-        else {
-            return 0.0;
-        };
-        if normal.dot(&wi) <= 0.0 || normal.dot(&wo) <= 0.0 {
+        if !valid_positive_hemisphere(wi, wo, normal) {
             return 0.0;
         }
         rgb_reflectance(self.albedo, wavelength_nm).unwrap_or(0.0) / PI
@@ -127,14 +126,15 @@ impl Material for Lambertian {
         // 均匀圆盘采样再投影到半球：p(wi) = cosθ / π（相对于立体角）。
         // https://www.pbr-book.org/4ed/Sampling_Algorithms/Sampling_Multidimensional_Functions#Cosine-WeightedHemisphereSampling
         let u = rng.random::<f64>();
-        let phi = 2.0 * PI * rng.random::<f64>();
+        let (sin_phi, cos_phi) = (2.0 * PI * rng.random::<f64>()).sin_cos();
         let radius = u.sqrt();
-        let local = Vector3::new(radius * phi.cos(), radius * phi.sin(), (1.0 - u).sqrt());
-        let wi = unit_vector(to_world(local, normal)?)?;
+        let local = Vector3::new(radius * cos_phi, radius * sin_phi, (1.0 - u).sqrt());
+        let wi = unit_vector(to_world_unit(local, normal)?)?;
+        let pdf = normal.dot(&wi).clamp(0.0, 1.0) / PI;
         Some(BsdfSample {
             wi,
             weight: self.albedo,
-            pdf: Some(self.pdf(wi, wo, normal)),
+            pdf: Some(pdf),
             event: ScatterType::DiffuseReflection,
         })
     }

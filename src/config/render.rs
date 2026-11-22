@@ -113,11 +113,7 @@ pub(crate) fn spectral_sample_counts(
     if !spp.is_multiple_of(packet_size) {
         return Err("render.camera_spp 必须能被 spectral_packet_size 整除".into());
     }
-    let spatial_spp = spp / packet_size;
-    let total_paths = spatial_spp
-        .checked_mul(packet_size)
-        .ok_or("光谱 Packet 路径数量溢出")?;
-    Ok((spatial_spp, total_paths))
+    Ok((spp / packet_size, spp))
 }
 
 impl Default for RenderSetting {
@@ -198,7 +194,7 @@ impl RenderSetting {
     /// 只检查数值，不分配图像或创建线程池。
     pub fn validate(&self) -> Result<(), String> {
         if !(1..=1024).contains(&self.photon_max_events) {
-            return Err("render.photon_max_events 必须位于 1..1024".into());
+            return Err("render.photon_max_events 必须位于 1..=1024".into());
         }
         if self.photon_max_volume_scatters > MAX_PHOTON_VOLUME_SCATTERS {
             return Err(format!(
@@ -211,13 +207,13 @@ impl RenderSetting {
         if u32::try_from(self.width).is_err() || u32::try_from(self.height).is_err() {
             return Err("render 图片尺寸超出 PNG 支持的 u32 范围".into());
         }
-        self.width
+        let pixels = self
+            .width
             .checked_mul(self.height)
             .ok_or("render 像素数量溢出")?;
         let (_, total_paths) = spectral_sample_counts(self.camera_spp, self.spectral_packet_size)?;
-        self.width
-            .checked_mul(self.height)
-            .and_then(|pixels| pixels.checked_mul(total_paths))
+        pixels
+            .checked_mul(total_paths)
             .ok_or("render 相机路径样本总数溢出")?;
         self.width
             .checked_mul(self.samples_per_pixel_axis)

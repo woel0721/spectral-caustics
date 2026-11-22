@@ -1,7 +1,7 @@
 //! NEE at each volume vertex. There is no surface cosine at a medium vertex.
-use super::{environment::power_heuristic, shadow_transmittance};
+use super::{mis_weighted_value, shadow_transmittance};
 use crate::{
-    config::{RenderJob, scene::EnvironmentMisHeuristic},
+    config::RenderJob,
     geometry::ray::Ray,
     integrator::camera::transport::CameraTransport,
     medium::{Medium, phase::HenyeyGreenstein},
@@ -24,7 +24,7 @@ pub(in crate::integrator::camera) fn volume_lighting<T: CameraTransport>(
 ) -> Result<T::Value, Box<dyn Error + Send + Sync>> {
     let transmittance = |ray: &Ray, distance| {
         shadow_transmittance(
-            job.scene.intersect_from_volume(ray),
+            job.scene.is_occluded_from_volume(ray, distance),
             ray,
             distance,
             Some(medium),
@@ -37,14 +37,20 @@ pub(in crate::integrator::camera) fn volume_lighting<T: CameraTransport>(
         result += sun * (phase.eval(wo, sun_wi) * transmittance(&ray, f64::INFINITY)?);
     }
     if let Some(disk) = job.scene.light.as_disk() {
+        let emission = transport.disk_emission();
+        let inv_samples = 1.0 / job.camera_options.light_samples as f64;
         for _ in 0..job.camera_options.light_samples {
             if let Some(s) = disk.sample_direct(position, [rng.random(), rng.random()])? {
+                if s.incident_weight == 0.0 {
+                    continue;
+                }
                 let ray = Ray::new(position, s.wi).ok_or("invalid volume disk ray")?;
                 // incident_weight already contains Le cos_light / (r² p_area).
-                let weight =
-                    s.incident_weight * phase.eval(wo, s.wi) * transmittance(&ray, s.distance)?
-                        / job.camera_options.light_samples as f64;
-                result += transport.disk_emission() * weight;
+                let weight = s.incident_weight
+                    * phase.eval(wo, s.wi)
+                    * transmittance(&ray, s.distance)?
+                    * inv_samples;
+                result += emission * weight;
             }
         }
     }
@@ -62,38 +68,43 @@ pub(in crate::integrator::camera) fn volume_lighting<T: CameraTransport>(
             } else {
                 i < phase_count
             };
-            let wi = if use_phase {
-                phase.sample(wo, rng).wi
+            let (wi, p, phase_pdf) = if use_phase {
+                let s = phase.sample(wo, rng);
+                (s.wi, s.p, s.pdf)
             } else {
-                env.sample_direction(rng)
-                    .ok_or("invalid volume environment sample")?
-                    .direction
+                let wi = env
+                    .sample_direction_only(rng)
+                    .ok_or("invalid volume environment sample")?;
+                let p = phase.eval(wo, wi);
+                (wi, p, p)
             };
-            let p = phase.eval(wo, wi);
-            let q_phase = a * phase.pdf(wo, wi);
-            let q_env = b * env
-                .pdf_direction(wi)
+            let q_phase = a * phase_pdf;
+            let (env_rgb, pdf_env) = env
+                .radiance_and_pdf(wi)
                 .ok_or("invalid volume environment PDF")?;
-            let weight =
-                if job.camera_options.environment_mis_heuristic == EnvironmentMisHeuristic::Power {
-                    let (sampled, other) = if use_phase {
-                        (q_phase, q_env)
-                    } else {
-                        (q_env, q_phase)
-                    };
-                    p * power_heuristic(sampled, other)
-                        .ok_or("invalid volume MIS PDF")?
-                        .1
-                } else {
-                    p / (q_phase + q_env)
-                };
-            let ray = Ray::new(position, wi).ok_or("invalid volume environment ray")?;
+            if !pdf_env.is_finite() || pdf_env < 0.0 {
+                return Err("invalid volume environment PDF".into());
+            }
+            let q_env = b * pdf_env;
+            let (sampled, other) = if use_phase {
+                (q_phase, q_env)
+            } else {
+                (q_env, q_phase)
+            };
+            let weight = mis_weighted_value(
+                p,
+                sampled,
+                other,
+                job.camera_options.environment_mis_heuristic,
+            )
+            .ok_or("invalid volume MIS PDF")?;
             let li = transport
-                .emission(
-                    env.radiance(wi)
-                        .ok_or("invalid volume environment radiance")?,
-                )
+                .emission(env_rgb)
                 .ok_or("volume emission overflow")?;
+            if weight == 0.0 || li == T::Value::default() {
+                continue;
+            }
+            let ray = Ray::new(position, wi).ok_or("invalid volume environment ray")?;
             result += li * (weight * transmittance(&ray, f64::INFINITY)?);
         }
     }

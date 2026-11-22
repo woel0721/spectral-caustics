@@ -23,11 +23,10 @@ pub fn tone_map(rgb: Vector3<f64>) -> Vector3<f64> {
     rgb.map(aces_filmic)
 }
 
-pub fn save_png_with_exposure(
+fn encode_rgb_image(
     framebuffer: &Framebuffer,
-    path: impl AsRef<Path>,
     exposure: f64,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+) -> Result<RgbImage, Box<dyn Error + Send + Sync>> {
     if !exposure.is_finite() || exposure < 0.0 {
         return Err("曝光必须有限且非负".into());
     }
@@ -55,15 +54,25 @@ pub fn save_png_with_exposure(
             *pixel = Rgb(rgb8);
         }
     }
+    Ok(image)
+}
 
+fn save_rgb_image(image: &RgbImage, path: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
     // 保存 output/test.png 时，自动创建 output 目录。
-    let path = path.as_ref();
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
-
     image.save_with_format(path, ImageFormat::Png)?;
     Ok(())
+}
+
+pub fn save_png_with_exposure(
+    framebuffer: &Framebuffer,
+    path: impl AsRef<Path>,
+    exposure: f64,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let image = encode_rgb_image(framebuffer, exposure)?;
+    save_rgb_image(&image, path.as_ref())
 }
 
 /// The output policy is shared by RGB and hero rendering; auxiliary paths never overwrite the primary.
@@ -72,23 +81,24 @@ pub fn save_components(
     primary: &Path,
     exposure: f64,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    save_png_with_exposure(&images.combined, primary, exposure)?;
+    let combined_image = encode_rgb_image(&images.combined, exposure)?;
+    save_rgb_image(&combined_image, primary)?;
     let directory = primary.parent().unwrap_or(Path::new("."));
     for (image, name) in [
         (&images.direct, "camera_direct.png"),
         (&images.caustics, "camera_caustics.png"),
-        (&images.combined, "camera_combined.png"),
     ] {
         let path = directory.join(name);
-        if path == primary && name == "camera_combined.png" {
-            continue;
-        }
         let path = if path == primary {
             directory.join(format!("aux_{name}"))
         } else {
             path
         };
         save_png_with_exposure(image, path, exposure)?;
+    }
+    let combined_path = directory.join("camera_combined.png");
+    if combined_path != primary {
+        save_rgb_image(&combined_image, &combined_path)?;
     }
     Ok(())
 }

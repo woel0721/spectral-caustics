@@ -149,6 +149,56 @@ fn fine_and_coarse_dda_match_independent_block_slab_intersections() {
     }
 }
 
+#[test]
+fn transmittance_with_coarse_empty_block_skip_matches_fine_dda() {
+    let resolution = [19, 17, 13];
+    let mut densities = vec![0.0; resolution.iter().product()];
+    for z in 0..resolution[2] {
+        for y in 0..resolution[1] {
+            for x in 0..resolution[0] {
+                let in_clump_a = (1..5).contains(&x) && (2..6).contains(&y) && (1..4).contains(&z);
+                let in_clump_b =
+                    (11..16).contains(&x) && (10..15).contains(&y) && (8..12).contains(&z);
+                if in_clump_a || in_clump_b {
+                    let i = x + resolution[0] * (y + resolution[1] * z);
+                    densities[i] = 0.25 + ((x * 7 + y * 13 + z * 19) % 11) as f64 * 0.15;
+                }
+            }
+        }
+    }
+    let mut c = config(resolution, densities);
+    c.min_m = [-1.3, -0.7, 0.1];
+    c.max_m = [2.2, 3.1, 4.8];
+    let grid = GridMedium::try_from(&c).unwrap();
+    assert!(grid.majorants.has_empty_blocks);
+    let mut rng = StdRng::seed_from_u64(404);
+    for _ in 0..500 {
+        let r = Ray::new(
+            Vector3::from_fn(|_, _| rng.random_range(-3.0..6.0)),
+            Vector3::from_fn(|_, _| rng.random_range(-1.0..1.0)),
+        )
+        .unwrap();
+        let limit = rng.random_range(0.0..15.0);
+        let actual = grid.transmittance_ray(&r, limit, 550.0);
+        let expected = grid.interval(&r, limit).map_or(1.0, |(enter, exit)| {
+            let base = grid.base.at(550.0);
+            let mut tau = 0.0;
+            for segment in VoxelDda::new(&grid, &r, enter, exit, 1) {
+                let density = grid.densities[grid.index(segment.cell)];
+                if density > 0.0 {
+                    tau +=
+                        base.scaled_by_density(density).sigma_t() * (segment.end - segment.start);
+                }
+            }
+            (-tau).exp()
+        });
+        assert!(
+            (actual - expected).abs() <= 1e-14,
+            "actual={actual} expected={expected} ray={r:?} limit={limit}"
+        );
+    }
+}
+
 fn layered() -> GridMediumConfig {
     config([9, 1, 1], vec![0.1, 0.1, 0.1, 0.1, 0.0, 0.0, 0.0, 0.0, 3.0])
 }

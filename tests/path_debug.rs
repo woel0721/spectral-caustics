@@ -5,48 +5,25 @@ use spectral_caustics::config::material::MaterialConfig;
 use spectral_caustics::config::scene::EnvironmentConfig;
 use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 use spectral_caustics::config::scene::ObjectConfig;
-#[cfg(feature = "diagnostics")]
 use spectral_caustics::diagnostics::StopReason;
-use spectral_caustics::renderer::Renderer;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
+use support::{TempDir, assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
-struct TemporaryDirectory(PathBuf);
+struct TemporaryDirectory(TempDir);
 impl TemporaryDirectory {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "spectral-path-debug-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).unwrap();
-        Self(path)
+        Self(TempDir::new("spectral-path-debug"))
     }
     fn hdr(&self) -> PathBuf {
-        let path = self.0.join("test.hdr");
-        let mut bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 4\n".to_vec();
-        for _ in 0..2 {
-            for pixel in [
-                [128, 64, 32, 130],
-                [64, 128, 32, 131],
-                [32, 64, 128, 132],
-                [128, 32, 64, 133],
-            ] {
-                bytes.extend_from_slice(&pixel);
-            }
-        }
-        fs::write(&path, bytes).unwrap();
-        path
+        self.0.write_rgbe_4x2_hdr("test.hdr", false, false)
     }
 }
-impl Drop for TemporaryDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+impl std::ops::Deref for TemporaryDirectory {
+    type Target = PathBuf;
+    fn deref(&self) -> &Self::Target {
+        &self.0.0
     }
 }
 
@@ -63,7 +40,6 @@ fn config() -> Config {
     config
 }
 
-#[cfg(feature = "diagnostics")]
 #[test]
 fn debug_path_defaults_false_roundtrips_and_rejects_non_bool_values() {
     let config = config();
@@ -104,7 +80,6 @@ fn debug_path_defaults_false_roundtrips_and_rejects_non_bool_values() {
     }
 }
 
-#[cfg(feature = "diagnostics")]
 #[test]
 fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_environments() {
     let directory = TemporaryDirectory::new();
@@ -149,23 +124,17 @@ fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_en
                     *m = material.clone();
                 }
                 let scene = config.build().unwrap();
-                let renderer = Renderer::new(config.render.clone()).unwrap();
+                config.render.seed = 42;
                 let lighting = spectral_caustics::integrator::photon::integrate_xyz(
                     &scene,
                     scene.photon.caustics_object_id,
                     scene.photon.ground_id.expect("receiver"),
-                    (renderer).settings(),
+                    &config.render,
                 )
                 .unwrap();
                 let ordinary = spectral_caustics::integrator::camera::integrate_rgb(
                     &scene,
-                    &spectral_caustics::config::render::RenderSetting {
-                        width: (renderer).settings().width,
-                        height: (renderer).settings().height,
-                        camera_spp: config.render.camera_spp,
-                        seed: 42,
-                        ..Default::default()
-                    },
+                    &config.render,
                     Some(&lighting),
                 )
                 .unwrap();
@@ -173,35 +142,29 @@ fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_en
                 let mut reference = None;
                 for threads in [1, 2, 4, 1] {
                     config.render.thread_count = Some(threads);
-                    #[cfg(feature = "diagnostics")]
-                    {
-                        config.render.diagnostics.path = true;
-                    }
-                    let renderer = Renderer::new(config.render.clone()).unwrap();
-                    let photons = spectral_caustics::integrator::photon::integrate_xyz(
-                        &scene,
-                        scene.photon.caustics_object_id,
-                        scene.photon.ground_id.expect("receiver"),
-                        (renderer).settings(),
-                    )
-                    .unwrap();
+                    config.render.seed = 42;
+                    config.render.diagnostics.path = true;
+                    let (photons, images) = support::run_in_threads(threads, || {
+                        let photons = spectral_caustics::integrator::photon::integrate_xyz(
+                            &scene,
+                            scene.photon.caustics_object_id,
+                            scene.photon.ground_id.expect("receiver"),
+                            &config.render,
+                        )
+                        .unwrap();
+                        let images = spectral_caustics::integrator::camera::integrate_rgb(
+                            &scene,
+                            &config.render,
+                            Some(&photons),
+                        )
+                        .unwrap();
+                        (photons, images)
+                    });
                     assert_framebuffer_bits_eq(
                         photons.direct.as_ref().unwrap(),
                         lighting.direct.as_ref().unwrap(),
                     );
                     assert_framebuffer_bits_eq(&photons.caustics, &lighting.caustics);
-                    let images = spectral_caustics::integrator::camera::integrate_rgb(
-                        &scene,
-                        &spectral_caustics::config::render::RenderSetting {
-                            width: (renderer).settings().width,
-                            height: (renderer).settings().height,
-                            camera_spp: config.render.camera_spp,
-                            seed: 42,
-                            ..config.render.clone()
-                        },
-                        Some(&photons),
-                    )
-                    .unwrap();
                     assert_camera_images_bits_eq(&images, &ordinary);
                     let stats = images.path_debug.as_ref().unwrap();
                     if let Some(expected) = &reference {
@@ -254,7 +217,6 @@ fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_en
     }
 }
 
-#[cfg(feature = "diagnostics")]
 #[test]
 fn command_line_gates_aovs_by_feature_and_protects_physical_outputs() {
     let directory = TemporaryDirectory::new();
@@ -295,10 +257,7 @@ fn command_line_gates_aovs_by_feature_and_protects_physical_outputs() {
         .iter()
         .map(|name| fs::read(directory.0.join(name)).unwrap())
         .collect();
-    #[cfg(feature = "diagnostics")]
-    {
-        config.render.diagnostics.path = true;
-    }
+    config.render.diagnostics.path = true;
     run(&config);
     for (name, expected) in ordinary_names.iter().zip(ordinary) {
         assert_eq!(fs::read(directory.0.join(name)).unwrap(), expected);

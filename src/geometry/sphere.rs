@@ -10,6 +10,7 @@ use nalgebra::Vector3;
 pub struct Sphere {
     center: Vector3<f64>,
     radius: f64,
+    radius_squared: f64,
 }
 
 impl Sphere {
@@ -30,7 +31,11 @@ impl Sphere {
         {
             return None;
         }
-        Some(Self { center, radius })
+        Some(Self {
+            center,
+            radius,
+            radius_squared,
+        })
     }
 }
 
@@ -41,8 +46,9 @@ impl ClosedVolume for Sphere {
         }
         let d = point - self.center;
         let distance = d.x.hypot(d.y).hypot(d.z);
-        // Roundoff band in metres, scaled to the radius rather than the ray's self-hit cutoff.
-        let tolerance = 8.0 * f64::EPSILON * self.radius;
+        // Roundoff band in metres, scaled to both radius and world coordinates.
+        let scale = self.radius.max(self.center.amax()).max(point.amax());
+        let tolerance = 8.0 * f64::EPSILON * scale;
         Ok(if (distance - self.radius).abs() <= tolerance {
             PointLocation::OnBoundary
         } else if distance < self.radius {
@@ -87,8 +93,7 @@ impl Sphere {
         let a = ray.direction.norm_squared();
         let half_b = offset.dot(&ray.direction);
         // 等价于 half_b² - a*c，但避免远处轴向光线中两个大数相减丢失半径。
-        let discriminant =
-            a * self.radius * self.radius - offset.cross(&ray.direction).norm_squared();
+        let discriminant = a * self.radius_squared - offset.cross(&ray.direction).norm_squared();
         if !a.is_finite()
             || a <= 0.0
             || !half_b.is_finite()
@@ -97,12 +102,18 @@ impl Sphere {
         {
             return None;
         }
-        let midpoint = -half_b / a;
-        let half_chord = discriminant.sqrt() / a;
-        let roots = [midpoint - half_chord, midpoint + half_chord];
-        let distance = roots
-            .into_iter()
-            .find(|t| t.is_finite() && *t > min_distance)?;
+        let sqrt_d = discriminant.sqrt();
+        let near = (-half_b - sqrt_d) / a;
+        let distance = if near.is_finite() && near > min_distance {
+            near
+        } else {
+            let far = (-half_b + sqrt_d) / a;
+            if far.is_finite() && far > min_distance {
+                far
+            } else {
+                return None;
+            }
+        };
         let coords = ray.at(distance);
         let outward = coords - self.center;
         let length = outward.norm();
@@ -193,5 +204,25 @@ mod tests {
         bad = ray;
         bad.origin = Vector3::repeat(f64::MAX);
         assert!(sphere.intersect(&bad).is_none());
+    }
+
+    #[test]
+    fn translated_sphere_classifies_surface_hits_as_on_boundary() {
+        let center = Vector3::new(1e6, -2e6, 3e6);
+        let sphere = Sphere::new(center, 1.0).unwrap();
+        let dir = Vector3::new(1.0, 2.0, 3.0).normalize();
+        let surface = center + dir;
+        assert_eq!(
+            sphere.classify_point(surface).unwrap(),
+            PointLocation::OnBoundary
+        );
+        assert_eq!(
+            sphere.classify_point(center + dir * 0.5).unwrap(),
+            PointLocation::Inside
+        );
+        assert_eq!(
+            sphere.classify_point(center + dir * 1.5).unwrap(),
+            PointLocation::Outside
+        );
     }
 }

@@ -47,9 +47,9 @@ impl GgxMetal {
 impl Material for GgxMetal {
     /// 计算金属将 wi 方向入射光反射到 wo 的 RGB BRDF。
     ///
-    /// 输入：wi/wo、法线及求值模式；输出：f=F·D·G/(4cosθ_i cosθ_o)，单位 sr⁻¹。
+    /// 输入：wi/wo 和法线；输出：f=F·D·G/(4cosθ_i cosθ_o)，单位 sr⁻¹。
     /// F 为导体 Fresnel、D 为 GGX 法线分布、G 为 Smith 遮蔽；不补偿微表面多次散射。
-    /// 背面、非法数值、光谱模式或理想镜面分支返回零；镜面分支通过 sample 计光。
+    /// 背面、非法数值或理想镜面分支返回零；镜面分支通过 sample 计光。
     fn evaluate_rgb(
         &self,
         wi: Vector3<f64>,
@@ -57,7 +57,7 @@ impl Material for GgxMetal {
         normal: Vector3<f64>,
     ) -> Vector3<f64> {
         // RGB eta/k 没有唯一的光谱解释；此材质不提供光谱 BSDF。
-        if false || self.smooth() {
+        if self.smooth() {
             return Vector3::zeros();
         }
         let (Some(wi), Some(wo), Some(n)) = (unit_vector(wi), unit_vector(wo), unit_vector(normal))
@@ -71,11 +71,11 @@ impl Material for GgxMetal {
         let Some(h) = unit_vector(wi + wo) else {
             return Vector3::zeros();
         };
-        let d = ggx::d(n.dot(&h).clamp(0.0, 1.0), self.alpha());
-        let g = ggx::g(ci, co, self.alpha());
+        let alpha = self.alpha();
+        let d = ggx::d(n.dot(&h).clamp(0.0, 1.0), alpha);
+        let v = ggx::visibility(ci, co, alpha);
         let f = ggx::fresnel(wo.dot(&h), self.eta, self.k);
-        // 先约去一个余弦，避免 ci*co 在近切线方向提前下溢。
-        let value = f * (d * (g / ci) / (4.0 * co));
+        let value = f * (d * v);
         if value.iter().all(|v| v.is_finite()) {
             value
         } else {
@@ -93,31 +93,42 @@ impl Material for GgxMetal {
         rng: &mut dyn RngCore,
     ) -> Option<BsdfSample> {
         let (wo, n) = (unit_vector(wo)?, unit_vector(normal)?);
-        if n.dot(&wo) <= 0.0 {
+        let co = n.dot(&wo);
+        if co <= 0.0 {
             return None;
         }
         if self.smooth() {
             return Some(BsdfSample {
-                wi: unit_vector(2.0 * n.dot(&wo) * n - wo)?,
-                weight: ggx::fresnel(n.dot(&wo), self.eta, self.k),
+                wi: unit_vector(2.0 * co * n - wo)?,
+                weight: ggx::fresnel(co, self.eta, self.k),
                 pdf: None,
                 event: ScatterType::SpecularReflection,
             });
         }
-        let h = ggx::sample_half_vector(n, self.alpha(), rng.random::<f64>(), rng.random::<f64>())?;
-        if wo.dot(&h) <= 0.0 {
+        let alpha = self.alpha();
+        let h_sample = ggx::sample_half_vector(n, alpha, rng.random::<f64>(), rng.random::<f64>())?;
+        let dot_o_sample = wo.dot(&h_sample);
+        if dot_o_sample <= 0.0 {
             return None;
         }
-        let wi = unit_vector(2.0 * wo.dot(&h) * h - wo)?;
-        if n.dot(&wi) <= 0.0 {
+        let wi = unit_vector(2.0 * dot_o_sample * h_sample - wo)?;
+        let ci = n.dot(&wi);
+        if ci <= 0.0 {
             return None;
         }
-        let pdf = self.pdf(wi, wo, n);
+        let h = unit_vector(wi + wo)?;
+        let cos_h = n.dot(&h).clamp(0.0, 1.0);
+        let dot_o = wo.dot(&h);
+        if dot_o <= 0.0 {
+            return None;
+        }
+        let d = ggx::d(cos_h, alpha);
+        let pdf = d * cos_h / (4.0 * dot_o);
         if !pdf.is_finite() || pdf <= 0.0 {
             return None;
         }
-        let f = self.evaluate_rgb(wi, wo, n);
-        let weight = f * (n.dot(&wi) / pdf);
+        let v = ggx::visibility(ci, co, alpha);
+        let weight = ggx::fresnel(dot_o, self.eta, self.k) * (d * v * (ci / pdf));
         if !weight.iter().all(|v| v.is_finite() && *v >= 0.0) {
             return None;
         }

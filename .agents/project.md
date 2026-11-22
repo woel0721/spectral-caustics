@@ -5,7 +5,6 @@
 ## 信息来源与范围
 
 - 运行与配置见 [README](../README.md)，公共 API 和传输细节见[技术指南](../docs/rendering_guide.md)。判断当前能力和限制时查 [ROADMAP](../ROADMAP.md) 对应章节。涉及实现声明时核对相关源码，后续功能以本次任务授权为准。
-- [重构记录](../docs/refactor.md) 是带日期的迁移与验收证据，其中的测试数量、日志路径和当时授权不代表当前状态或持续权限。
 - [颜色数据说明](../assets/color/README.md) 记录数据来源、许可证、校验和及对应的光谱实现入口。
 - 文档与实现冲突时先定位差异并报告，不为迎合陈旧文字恢复旧行为，也不借机修复任务外问题。改变接口或物理语义时同步其所属文档及相关链接。
 
@@ -26,10 +25,10 @@
 | [Config::load/from_json](../src/config/mod.rs) | 文件读取、Serde 结构解析；不等同于完整数值或场景验证 |
 | [Config::build](../src/config/mod.rs) → [RenderJob::from_config](../src/config/build.rs) | 实际构造相机、几何、材质、光源、环境、介质，验证参数及对象绑定；HDRI 缺失返回错误 |
 | [Renderer::new](../src/renderer.rs) | 验证 RenderSetting 并创建可选线程池 |
-| [光子计划与追踪器](../src/integrator/photon/generation.rs)、[PhotonTracer](../src/integrator/photon/path.rs) | 发射布局、接收区、目标、IOR、事件预算及归一化 |
+| [光子发射规划](../src/integrator/photon/emission.rs)、[光子积分](../src/integrator/photon/integrate.rs)、[PhotonTracer](../src/integrator/photon/path.rs) | 发射布局、接收区、目标、IOR、事件预算及归一化 |
 | [Camera Path 入口](../src/integrator/camera/path.rs) | 验证可由低层调用方提供的路径初态，检查自定义材质的事件/PDF/权重，以及介质采样结果的有限位置、非负有限权重与体散射预算 |
 
-`Config::validate` 用于显式配置检查和保存。[SceneConfig::validate](../src/config/scene.rs) 会试构建部分几何，并在配置了介质时构造后丢弃该介质。对[网格介质](../src/medium/grid.rs)，这一步会复制密度数组并构建局部 Majorant 缓存。正常渲染直接调用 `Config::build`，避免重复承担这些构造成本。
+`Config::validate` 用于显式配置检查和保存。[SceneConfig::validate](../src/config/scene.rs) 会校验相机、光源、材质与部分几何参数，对[介质配置](../src/medium/config.rs)则走无数组克隆、无 Majorant 缓存构建的纯参数校验，不加载 HDRI 文件。正常渲染直接调用 `Config::build`，避免先校验再构造的重复工作。
 
 - 私有构造不变量成立时，不在每次查询或每次反弹重复校验整对象；例如 [Framebuffer](../src/film.rs) 的尺寸与 Vec 长度由构造函数绑定。公开可修改的状态、独立调用入口和跨对象绑定仍需各自必要的检查。
 - 仅在证明所有调用方已有保障后移除冗余检查。保留非有限值、实际溢出/下溢导致的无效量、退化方向、分配尺寸、零 PDF、TIR、无命中、零吞吐量和预算终止的处理。

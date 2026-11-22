@@ -16,8 +16,7 @@ impl Ray {
     ///
     /// 输入：起点 origin（米）和非零方向 direction；方向不必预先归一化。
     ///
-    /// 输出：保存 d=direction/‖direction‖ 及逐分量倒数 1/d 的 Ray；非法值或长度溢出返回 None。
-    /// 预留距离范围为 (0,f64::MAX)，当前几何求交不读取它；零方向分量的倒数允许为无穷大。
+    /// 输出：保存单位方向 d=direction/‖direction‖ 的 Ray；非法值或长度溢出返回 None。
     pub fn new(origin: Vector3<f64>, direction: Vector3<f64>) -> Option<Self> {
         // 起点和方向都必须是有限值。
         if !origin.iter().all(|v| v.is_finite()) || !direction.iter().all(|v| v.is_finite()) {
@@ -32,8 +31,6 @@ impl Ray {
         }
 
         let direction = direction / length;
-        // IEEE 754 浮点除法：1 / (+0) = +inf，1 / (-0) = -inf。
-        // 必须先归一化，再计算倒数，保证缓存与实际保存的方向一致。
 
         Some(Self { origin, direction })
     }

@@ -6,6 +6,7 @@ pub use crate::integrator::camera::path::StopReason;
 use crate::material::Material;
 use crate::material::ScatterType;
 use crate::material::unit_vector;
+use crate::optics::dispersion::IorMode;
 use crate::optics::interface::fresnel_dielectric;
 use image::ImageFormat;
 use image::Rgb;
@@ -51,7 +52,7 @@ impl PathEventCounts {
     }
 }
 
-/// 只在 trace_camera_path_impl 的一次真实调用期间存在，不保存每条完整路径。
+/// 只在 trace_camera_path 的一次真实调用期间存在，不保存每条完整路径。
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct PathDebugSample {
     pub(crate) first_hit_object_id: Option<usize>,
@@ -78,35 +79,43 @@ impl PathDebugSample {
 
     /// 记录一次已接受的路径散射，供事件次数和全反射 AOV 使用。
     ///
-    /// 输入：event、材质、wo 和几何法线；输出：原地更新计数/TIR 标志，无返回值，不抽样或改变物理路径。
+    /// 输入：event、材质、wo、几何法线、当前路径可选波长（nm）与折射率模式；
+    /// 输出：原地更新计数/TIR 标志，无返回值，不抽样或改变物理路径。
     pub(crate) fn scatter(
         &mut self,
         event: ScatterType,
         material: &dyn Material,
         wo: Vector3<f64>,
         normal: Vector3<f64>,
+        wavelength_nm: Option<f64>,
+        ior_mode: IorMode,
     ) {
         self.events.record(event);
-        self.total_internal_reflection |= internal_tir(event, material, wo, normal);
+        self.total_internal_reflection |=
+            internal_tir(event, material, wo, normal, wavelength_nm, ior_mode);
     }
 }
 
 /// 判断一次理想反射是否确实由玻璃内部全反射造成，供调试标记。
 ///
-/// 输入：事件、材质、wo 和朝外法线；输出：bool，无效参数或普通反射返回 false。
-/// 条件：内部玻璃 n>1、事件为镜面反射且 sinθ_i≥1/n，并核对精确 Fresnel F=1。
+/// 输入：事件、材质、wo、朝外法线、可选波长（nm）与折射率模式；输出：bool，无效参数或普通反射返回 false。
+/// 条件：内部玻璃 n(λ)>1、事件为镜面反射且 sinθ_i≥1/n，并核对精确 Fresnel F=1。
 fn internal_tir(
     event: ScatterType,
     material: &dyn Material,
     wo: Vector3<f64>,
     normal: Vector3<f64>,
+    wavelength_nm: Option<f64>,
+    ior_mode: IorMode,
 ) -> bool {
     if event != ScatterType::SpecularReflection {
         return false;
     }
-    let (Some(ior), Some(wo), Some(normal)) =
-        (material.ior(), unit_vector(wo), unit_vector(normal))
-    else {
+    let ior = match wavelength_nm {
+        Some(nm) => material.photon_ior(Some(nm), ior_mode),
+        None => material.ior(),
+    };
+    let (Some(ior), Some(wo), Some(normal)) = (ior, unit_vector(wo), unit_vector(normal)) else {
         return false;
     };
     let cos_i = -wo.dot(&normal);
@@ -119,26 +128,22 @@ fn internal_tir(
     sin_i >= 1.0 / ior && fresnel_dielectric(cos_i, ior, 1.0) == Some(1.0)
 }
 
-/// 一像素的原始整数总计。除 samples / first_hit_objects 外，只统计首次命中调试目标的子样本。
-/// AOV 用总 samples 作分母，保留子像素覆盖率；不将一条路径放大成整像素。
-#[derive(Debug, Default, Clone, PartialEq, Serialize)]
-pub struct PathDebugPixel {
-    pub samples: u64,
-    pub first_hit_objects: BTreeMap<usize, u64>,
-    pub target_samples: u64,
-    pub first_hit_normal_sum: [f64; 3],
-    pub events: PathEventCounts,
-    pub reached_ground: u64,
-    pub escaped_environment: u64,
-    pub total_internal_reflection: u64,
-    pub terminations: BTreeMap<StopReason, u64>,
+/// 像素内热循环使用的栈上累加器，避免每个子样本查询 `BTreeMap`。
+#[derive(Default)]
+pub(crate) struct PathDebugAccumulator {
+    samples: u64,
+    primary_hit_object: Option<(usize, u64)>,
+    extra_hit_objects: BTreeMap<usize, u64>,
+    target_samples: u64,
+    first_hit_normal_sum: [f64; 3],
+    events: PathEventCounts,
+    reached_ground: u64,
+    escaped_environment: u64,
+    total_internal_reflection: u64,
+    terminations: [u64; StopReason::ALL.len()],
 }
 
-impl PathDebugPixel {
-    /// 把一条真实路径的统计合并到当前像素，供路径 AOV 累积。
-    ///
-    /// 输入：sample 和可选调试目标编号；输出：成功 Ok(())，计数溢出或目标路径缺少终止原因时 Err。
-    /// 所有样本都记总数/首次物体，仅首次命中调试目标的样本才累加事件和终止统计。
+impl PathDebugAccumulator {
     pub(crate) fn record(
         &mut self,
         sample: &PathDebugSample,
@@ -146,7 +151,11 @@ impl PathDebugPixel {
     ) -> Result<(), &'static str> {
         add(&mut self.samples, 1)?;
         if let Some(id) = sample.first_hit_object_id {
-            add(self.first_hit_objects.entry(id).or_default(), 1)?;
+            match &mut self.primary_hit_object {
+                Some((primary_id, count)) if *primary_id == id => add(count, 1)?,
+                None => self.primary_hit_object = Some((id, 1)),
+                Some(_) => add(self.extra_hit_objects.entry(id).or_default(), 1)?,
+            }
         }
         if target_object_id.is_none() || sample.first_hit_object_id != target_object_id {
             return Ok(());
@@ -168,8 +177,47 @@ impl PathDebugPixel {
             u64::from(sample.total_internal_reflection),
         )?;
         let termination = sample.termination.ok_or("调试路径缺少终止原因")?;
-        add(self.terminations.entry(termination).or_default(), 1)
+        add(&mut self.terminations[termination.index()], 1)
     }
+
+    pub(crate) fn finish(mut self) -> PathDebugPixel {
+        if let Some((id, count)) = self.primary_hit_object {
+            self.extra_hit_objects.insert(id, count);
+        }
+        let mut terminations = BTreeMap::new();
+        for reason in StopReason::ALL {
+            let count = self.terminations[reason.index()];
+            if count > 0 {
+                terminations.insert(reason, count);
+            }
+        }
+        PathDebugPixel {
+            samples: self.samples,
+            first_hit_objects: self.extra_hit_objects,
+            target_samples: self.target_samples,
+            first_hit_normal_sum: self.first_hit_normal_sum,
+            events: self.events,
+            reached_ground: self.reached_ground,
+            escaped_environment: self.escaped_environment,
+            total_internal_reflection: self.total_internal_reflection,
+            terminations,
+        }
+    }
+}
+
+/// 一像素的原始整数总计。除 samples / first_hit_objects 外，只统计首次命中调试目标的子样本。
+/// AOV 用总 samples 作分母，保留子像素覆盖率；不将一条路径放大成整像素。
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct PathDebugPixel {
+    pub samples: u64,
+    pub first_hit_objects: BTreeMap<usize, u64>,
+    pub target_samples: u64,
+    pub first_hit_normal_sum: [f64; 3],
+    pub events: PathEventCounts,
+    pub reached_ground: u64,
+    pub escaped_environment: u64,
+    pub total_internal_reflection: u64,
+    pub terminations: BTreeMap<StopReason, u64>,
 }
 
 /// 把输入 value 安全加到可变 u64 total，供调试统计共用；成功 Ok(())，溢出 Err。
@@ -188,7 +236,7 @@ pub struct PathDebugBuffer {
 }
 
 impl PathDebugBuffer {
-    /// 分配全零的逐像素路径统计，供开启 AOV 的 RGB 渲染使用。
+    /// 分配全零的逐像素路径统计，供开启 AOV 的 RGB 与光谱渲染共用。
     ///
     /// 输入：已校验宽高与可选目标物体编号；输出：PathDebugBuffer，像素按行存储，不分配逐路径历史。
     pub(crate) fn new(width: usize, height: usize, target_object_id: Option<usize>) -> Self {
@@ -231,6 +279,7 @@ impl PathDebugBuffer {
             }
         };
         let mut paths = Vec::new();
+        let mut image = RgbImage::new(width, height);
         for (index, name) in [
             "path_target.png",
             "reflection_count.png",
@@ -240,7 +289,6 @@ impl PathDebugBuffer {
         .iter()
         .enumerate()
         {
-            let mut image = RgbImage::new(width, height);
             for (pixel, statistics) in image.pixels_mut().zip(&self.pixels) {
                 *pixel = Rgb(aov_pixel(statistics, index));
             }

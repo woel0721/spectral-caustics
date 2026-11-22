@@ -1,7 +1,5 @@
-#[cfg(feature = "diagnostics")]
 mod support;
 use nalgebra::Vector3;
-use rand::RngCore;
 use serde_json::json;
 use spectral_caustics::config::Config;
 use spectral_caustics::config::material::MaterialConfig;
@@ -14,32 +12,9 @@ use spectral_caustics::geometry::sphere::Sphere;
 use spectral_caustics::material::Material;
 use spectral_caustics::material::ScatterType;
 use spectral_caustics::material::dielectric::Dielectric;
-#[cfg(feature = "diagnostics")]
-use spectral_caustics::renderer::Renderer;
+use support::{TransmissionRng as Transmit, test_materials as materials};
 #[cfg(feature = "diagnostics")]
 use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
-
-fn materials() -> [MaterialConfig; 4] {
-    [
-        MaterialConfig::Dielectric {
-            ior: 1.52,
-            dispersion: None,
-        },
-        MaterialConfig::Mirror {
-            reflectance: [0.95; 3],
-        },
-        MaterialConfig::GgxMetal {
-            eta: [0.2; 3],
-            k: [3.0; 3],
-            roughness: 0.0,
-        },
-        MaterialConfig::GgxMetal {
-            eta: [0.2; 3],
-            k: [3.0; 3],
-            roughness: 0.4,
-        },
-    ]
-}
 
 fn config(material: MaterialConfig) -> Config {
     let mut config = Config::from_json(include_str!("../configs/sphere.json")).unwrap();
@@ -79,7 +54,7 @@ fn sphere_json_binds_all_materials_and_keeps_prism_and_debug_ids_independent() {
             (
                 scene.photon.caustics_object_id,
                 scene.photon.ground_id,
-                scene.diagnostics.target
+                scene.diagnostic_target
             ),
             (None, Some(0), Some(1))
         );
@@ -107,14 +82,14 @@ fn sphere_json_binds_all_materials_and_keeps_prism_and_debug_ids_independent() {
     config.scene.objects.push(prism);
     let scene = config.build().unwrap();
     assert_eq!(scene.photon.caustics_object_id, Some(2));
-    assert_eq!(scene.diagnostics.target, Some(1));
+    assert_eq!(scene.diagnostic_target, Some(1));
     #[cfg(feature = "diagnostics")]
     {
         config.render.diagnostics.target = None;
     }
-    assert_eq!(config.build().unwrap().diagnostics.target, Some(2));
+    assert_eq!(config.build().unwrap().diagnostic_target, Some(2));
     config.scene.objects.pop();
-    assert_eq!(config.build().unwrap().diagnostics.target, None);
+    assert_eq!(config.build().unwrap().diagnostic_target, None);
 
     let mut json = serde_json::to_value(&config).unwrap();
     json["scene"]["objects"][1]
@@ -196,19 +171,6 @@ fn sphere_json_rejects_invalid_geometry_materials_fields_and_debug_targets() {
     }
 }
 
-struct Transmit;
-impl RngCore for Transmit {
-    fn next_u32(&mut self) -> u32 {
-        u32::MAX
-    }
-    fn next_u64(&mut self) -> u64 {
-        u64::MAX
-    }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        dest.fill(255);
-    }
-}
-
 #[test]
 fn sphere_two_interfaces_match_analytic_snell_direction_and_cancel_eta_squared() {
     let sphere = Sphere::new(Vector3::zeros(), 1.0).unwrap();
@@ -253,12 +215,11 @@ fn sphere_rgb_components_and_debug_repeat_across_threads_mis_depths_and_seeds() 
     for material in materials() {
         let mut config = config(material);
         let mut scene = config.build().unwrap();
-        let renderer = Renderer::new(config.render.clone()).unwrap();
         let lighting = spectral_caustics::integrator::photon::integrate_xyz(
             &scene,
             scene.photon.caustics_object_id,
             scene.photon.ground_id.expect("receiver"),
-            (renderer).settings(),
+            &config.render,
         )
         .unwrap();
         assert!(
@@ -276,23 +237,15 @@ fn sphere_rgb_components_and_debug_repeat_across_threads_mis_depths_and_seeds() 
             for depth in [0, 1, 4] {
                 scene.camera_options.max_diffuse_bounces = depth;
                 for seed in [42, 123] {
+                    config.render.camera_spp = 8;
+                    config.render.seed = seed;
                     #[cfg(feature = "diagnostics")]
                     {
                         config.render.diagnostics.path = false;
                     }
                     let ordinary = spectral_caustics::integrator::camera::integrate_rgb(
                         &scene,
-                        &spectral_caustics::config::render::RenderSetting {
-                            width: (Renderer::new(config.render.clone()).unwrap())
-                                .settings()
-                                .width,
-                            height: (Renderer::new(config.render.clone()).unwrap())
-                                .settings()
-                                .height,
-                            camera_spp: 8,
-                            seed,
-                            ..Default::default()
-                        },
+                        &config.render,
                         Some(&lighting),
                     )
                     .unwrap();
@@ -304,19 +257,14 @@ fn sphere_rgb_components_and_debug_repeat_across_threads_mis_depths_and_seeds() 
                         {
                             config.render.diagnostics.path = true;
                         }
-                        let renderer = Renderer::new(config.render.clone()).unwrap();
-                        let images = spectral_caustics::integrator::camera::integrate_rgb(
-                            &scene,
-                            &spectral_caustics::config::render::RenderSetting {
-                                width: (renderer).settings().width,
-                                height: (renderer).settings().height,
-                                camera_spp: 8,
-                                seed,
-                                ..Default::default()
-                            },
-                            Some(&lighting),
-                        )
-                        .unwrap();
+                        let images = support::run_in_threads(threads, || {
+                            spectral_caustics::integrator::camera::integrate_rgb(
+                                &scene,
+                                &config.render,
+                                Some(&lighting),
+                            )
+                            .unwrap()
+                        });
                         assert_camera_images_bits_eq(&ordinary, &images);
                         assert!(images.combined.pixels().iter().any(|p| p.norm() > 0.0));
                         for ((a, b), c) in images
@@ -329,7 +277,11 @@ fn sphere_rgb_components_and_debug_repeat_across_threads_mis_depths_and_seeds() 
                             assert!((a + b - c).norm() < 1e-12);
                         }
                         #[cfg(feature = "diagnostics")]
-                        if let Some(debug) = &images.path_debug {
+                        {
+                            let debug = images
+                                .path_debug
+                                .as_ref()
+                                .expect("path diagnostics must be populated");
                             assert_eq!(debug.target_object_id, Some(1));
                             assert!(debug.pixels.iter().any(|p| p.target_samples > 0));
                             for pixel in &debug.pixels {
@@ -382,13 +334,12 @@ fn adding_a_distant_sphere_preserves_prism_spectral_caustics() {
     config.render.height = 18;
     config.render.samples_per_pixel_axis = 1;
     config.render.thread_count = Some(2);
-    let renderer = Renderer::new(config.render.clone()).unwrap();
     let ordinary = config.build().unwrap();
     let expected = spectral_caustics::integrator::photon::integrate_xyz(
         &ordinary,
         ordinary.photon.caustics_object_id,
         ordinary.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        &config.render,
     )
     .unwrap();
     assert!(expected.caustics.pixels().iter().any(|p| p.norm() > 0.0));
@@ -412,7 +363,7 @@ fn adding_a_distant_sphere_preserves_prism_spectral_caustics() {
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        &config.render,
     )
     .unwrap();
     assert_framebuffer_bits_eq(
@@ -425,76 +376,66 @@ fn adding_a_distant_sphere_preserves_prism_spectral_caustics() {
 #[cfg(feature = "diagnostics")]
 #[test]
 fn debug_target_can_switch_between_sphere_ground_and_none_without_changing_radiance() {
-    let config = config(materials()[0].clone());
+    let mut config = config(materials()[0].clone());
+    config.render.camera_spp = 8;
+    config.render.seed = 42;
     let mut scene = config.build().unwrap();
-    let renderer = Renderer::new(config.render.clone()).unwrap();
     let lighting = spectral_caustics::integrator::photon::integrate_xyz(
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (renderer).settings(),
+        &config.render,
     )
     .unwrap();
+    config.render.diagnostics.path = false;
     let reference = spectral_caustics::integrator::camera::integrate_rgb(
         &scene,
-        &spectral_caustics::config::render::RenderSetting {
-            width: (renderer).settings().width,
-            height: (renderer).settings().height,
-            camera_spp: 8,
-            seed: 42,
-            ..Default::default()
-        },
+        &config.render,
         Some(&lighting),
     )
     .unwrap();
+    config.render.diagnostics.path = true;
     for target in [Some(1), Some(0), None] {
-        scene.diagnostics.target = target;
+        scene.diagnostic_target = target;
         let images = spectral_caustics::integrator::camera::integrate_rgb(
             &scene,
-            &spectral_caustics::config::render::RenderSetting {
-                width: (renderer).settings().width,
-                height: (renderer).settings().height,
-                camera_spp: 8,
-                seed: 42,
-                ..Default::default()
-            },
+            &config.render,
             Some(&lighting),
         )
         .unwrap();
         assert_camera_images_bits_eq(&images, &reference);
-        if let Some(debug) = images.path_debug {
-            assert_eq!(debug.target_object_id, target);
+        let debug = images
+            .path_debug
+            .expect("path diagnostics must be populated");
+        assert_eq!(debug.target_object_id, target);
+        assert_eq!(
+            debug.pixels.iter().any(|p| p.target_samples > 0),
+            target.is_some()
+        );
+        for pixel in debug.pixels {
             assert_eq!(
-                debug.pixels.iter().any(|p| p.target_samples > 0),
-                target.is_some()
+                pixel.target_samples,
+                target
+                    .and_then(|id| pixel.first_hit_objects.get(&id).copied())
+                    .unwrap_or(0)
             );
-            for pixel in debug.pixels {
-                assert_eq!(
-                    pixel.target_samples,
-                    target
-                        .and_then(|id| pixel.first_hit_objects.get(&id).copied())
-                        .unwrap_or(0)
-                );
-                assert_eq!(
-                    pixel.terminations.values().sum::<u64>(),
-                    pixel.target_samples
-                );
-            }
+            assert_eq!(
+                pixel.terminations.values().sum::<u64>(),
+                pixel.target_samples
+            );
         }
     }
-    scene.diagnostics.target = Some(scene.scene.objects.len());
+    scene.diagnostic_target = Some(scene.scene.objects.len());
     assert!(
         spectral_caustics::integrator::camera::integrate_rgb(
             &scene,
-            &spectral_caustics::config::render::RenderSetting {
-                width: (renderer).settings().width,
-                height: (renderer).settings().height,
-                camera_spp: 8,
-                seed: 42,
-                ..Default::default()
-            },
+            &config.render,
             Some(&lighting)
         )
         .is_err()
+    );
+    assert!(
+        spectral_caustics::integrator::camera::integrate_spectral(&scene, &config.render, None)
+            .is_err()
     );
 }

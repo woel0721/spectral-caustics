@@ -5,6 +5,7 @@ mod support;
 use nalgebra::Vector3;
 use serde_json::json;
 use spectral_caustics::config::Config;
+use spectral_caustics::config::render::CameraMode;
 use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 use spectral_caustics::config::scene::ObjectConfig;
 use spectral_caustics::geometry::ray::Ray;
@@ -13,12 +14,18 @@ use spectral_caustics::renderer::Renderer;
 use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 fn config(caustics: bool) -> Config {
-    Config::from_json(if caustics {
-        include_str!("../configs/vertical_prism_caustics.json")
+    if caustics {
+        let mut c = Config::from_json(include_str!(
+            "../configs/vertical_prism_spectral_caustics.json"
+        ))
+        .unwrap();
+        c.render.camera_mode = CameraMode::Rgb;
+        c.render.camera_spp = 64;
+        c.render.spectral_packet_size = 1;
+        c
     } else {
-        include_str!("../configs/vertical_prism_spectral.json")
-    })
-    .unwrap()
+        Config::from_json(include_str!("../configs/vertical_prism_spectral.json")).unwrap()
+    }
 }
 
 #[test]
@@ -145,14 +152,22 @@ fn vertical_prism_ground_caustics_are_additive_colored_and_thread_deterministic(
         let mut reference = None;
         for threads in [1, 2, 4, 1] {
             c.render.thread_count = Some(threads);
-            let renderer = Renderer::new(c.render.clone()).unwrap();
-            let lighting = spectral_caustics::integrator::photon::integrate_xyz(
-                &scene,
-                scene.photon.caustics_object_id,
-                scene.photon.ground_id.expect("receiver"),
-                (renderer).settings(),
-            )
-            .unwrap();
+            let (lighting, images) = support::run_in_threads(threads, || {
+                let lighting = spectral_caustics::integrator::photon::integrate_xyz(
+                    &scene,
+                    scene.photon.caustics_object_id,
+                    scene.photon.ground_id.expect("receiver"),
+                    &c.render,
+                )
+                .unwrap();
+                let images = spectral_caustics::integrator::camera::integrate_rgb(
+                    &scene,
+                    &c.render,
+                    Some(&lighting),
+                )
+                .unwrap();
+                (lighting, images)
+            });
             let pixel_area =
                 scene.photon.receiver.area() / (c.render.width * c.render.height) as f64;
             let flux: f64 = lighting
@@ -175,18 +190,6 @@ fn vertical_prism_ground_caustics_are_additive_colored_and_thread_deterministic(
             } else {
                 assert!(chroma > 0.1);
             }
-            let images = spectral_caustics::integrator::camera::integrate_rgb(
-                &scene,
-                &spectral_caustics::config::render::RenderSetting {
-                    width: (renderer).settings().width,
-                    height: (renderer).settings().height,
-                    camera_spp: 4,
-                    seed: c.render.seed,
-                    ..Default::default()
-                },
-                Some(&lighting),
-            )
-            .unwrap();
             assert!(images.caustics.pixels().iter().any(|p| p.y > 0.0));
             for ((d, k), sum) in images
                 .direct

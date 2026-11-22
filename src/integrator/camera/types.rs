@@ -113,6 +113,7 @@ impl<T: CameraTransport> CameraPathState<T> {
         self.radiance.direct + self.radiance.caustics
     }
     pub fn validate(&self) -> Result<(), String> {
+        let direction_norm_squared = self.ray.direction.norm_squared();
         if !self.transport.valid()
             || !self.transport.valid_weight(self.throughput)
             || !self.transport.finite(self.radiance.direct)
@@ -128,7 +129,8 @@ impl<T: CameraTransport> CameraPathState<T> {
                 .iter()
                 .chain(self.ray.direction.iter())
                 .any(|v| !v.is_finite())
-            || self.ray.direction.norm_squared() == 0.0
+            || !direction_norm_squared.is_finite()
+            || (direction_norm_squared - 1.0).abs() > 1e-6
         {
             return Err("invalid initial path state".into());
         }

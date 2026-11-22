@@ -28,8 +28,12 @@ pub struct EnvironmentMap {
     pixels: Vec<[f32; 3]>,
     /// 行优先的重要性 CDF，含起点 0 和终点 1；全黑贴图为空。
     importance_cdf: Vec<f64>,
+    /// 每行起点的累积概率（共 height + 1 项），与 importance_cdf 两级二分等价。
+    row_cdf: Vec<f64>,
     /// 每行上下边界的 cos(theta)，共 height + 1 项，由 +1 递减到 -1。
     row_cos_theta: Vec<f64>,
+    /// 每行单像素立体角的倒数 1/Ω_row，供 PDF 查询复用。
+    row_inv_solid_angle: Vec<f64>,
 }
 
 impl EnvironmentMap {
@@ -50,6 +54,35 @@ impl EnvironmentMap {
         Some(self.sample_uv(u, v))
     }
 
+    /// 一次方向映射同时查询贴图辐亮度与采样密度，避免重复三角函数计算。
+    pub(super) fn radiance_and_pdf(&self, direction: Vector3<f64>) -> Option<(Vector3<f64>, f64)> {
+        let (u, v) = direction_to_uv(direction)?;
+        Some((self.sample_uv(u, v), self.pdf_from_uv(u, v)))
+    }
+
+    /// 只抽取贴图局部单位方向（不重复查询 PDF），供外层统一做一次 radiance_and_pdf。
+    pub(super) fn sample_direction_unit(&self, rng: &mut dyn RngCore) -> Vector3<f64> {
+        if self.importance_cdf.is_empty() {
+            return sample_uniform_sphere(rng).direction;
+        }
+        if rng.random::<f64>() < IMPORTANCE_FRACTION {
+            let u = rng.random::<f64>();
+            // 两级上界查找与在整张 importance_cdf 上二分逐位等价，跳过零概率行与像素。
+            let y = self.row_cdf.partition_point(|&p| p <= u) - 1;
+            let row_start = y * self.width;
+            let row_slice = &self.importance_cdf[row_start..=row_start + self.width];
+            let x = row_slice.partition_point(|&p| p <= u) - 1;
+            let phi = ((x as f64 + rng.random::<f64>()) / self.width as f64 - 0.5) * TAU;
+            let top = self.row_cos_theta[y];
+            let bottom = self.row_cos_theta[y + 1];
+            // 均匀采样 cos(theta)，而非 theta；dω = dφ d(cos(theta))。
+            let cos_theta = top + (bottom - top) * rng.random::<f64>();
+            spherical_direction(phi, cos_theta)
+        } else {
+            sample_uniform_sphere(rng).direction
+        }
+    }
+
     /// 优先朝环境亮处抽方向，减少 HDRI 直接光积分的噪声。
     ///
     /// 输入：可变 RNG；输出：贴图局部单位方向及完整混合 PDF（sr⁻¹），分布查询失败返回 None。
@@ -59,25 +92,25 @@ impl EnvironmentMap {
         if self.importance_cdf.is_empty() {
             return Some(sample_uniform_sphere(rng));
         }
-        let direction = if rng.random::<f64>() < IMPORTANCE_FRACTION {
-            let u = rng.random::<f64>();
-            // 上界查找跳过零概率区间；u < 1，且 CDF 的最后一项恰为 1。
-            let index = self.importance_cdf.partition_point(|&p| p <= u) - 1;
-            let (x, y) = (index % self.width, index / self.width);
-            let phi = ((x as f64 + rng.random::<f64>()) / self.width as f64 - 0.5) * TAU;
-            let top = self.row_cos_theta[y];
-            let bottom = self.row_cos_theta[y + 1];
-            // 均匀采样 cos(theta)，而非 theta；dω = dφ d(cos(theta))。
-            let cos_theta = top + (bottom - top) * rng.random::<f64>();
-            spherical_direction(phi, cos_theta)
-        } else {
-            sample_uniform_sphere(rng).direction
-        };
+        let direction = self.sample_direction_unit(rng);
         Some(EnvironmentSample {
             direction,
             // 统一处理恰好落在接缝、像素边界或极点上的浮点样本。
             pdf: self.pdf_direction(direction)?,
         })
+    }
+
+    fn pdf_from_uv(&self, u: f64, v: f64) -> f64 {
+        if self.importance_cdf.is_empty() {
+            return UNIFORM_SPHERE_PDF;
+        }
+        let x = ((u.rem_euclid(1.0) * self.width as f64) as usize).min(self.width - 1);
+        let y = ((v * self.height as f64) as usize).min(self.height - 1);
+        let index = y * self.width + x;
+        // 使用实际 CDF 区间宽度，包含预计算舍入，保证查询与抽样的概率相同。
+        let probability = self.importance_cdf[index + 1] - self.importance_cdf[index];
+        IMPORTANCE_FRACTION * probability * self.row_inv_solid_angle[y]
+            + (1.0 - IMPORTANCE_FRACTION) * UNIFORM_SPHERE_PDF
     }
 
     /// 查询 sample_direction 的完整方向密度，供环境 MIS 计算权重。
@@ -88,18 +121,7 @@ impl EnvironmentMap {
     /// P_pixel 采用实际 CDF 区间宽度；U=1 绕回首列，极点取 U=0.5，与抽样约定一致。
     pub fn pdf_direction(&self, direction: Vector3<f64>) -> Option<f64> {
         let (u, v) = direction_to_uv(direction)?;
-        if self.importance_cdf.is_empty() {
-            return Some(UNIFORM_SPHERE_PDF);
-        }
-        let x = ((u.rem_euclid(1.0) * self.width as f64) as usize).min(self.width - 1);
-        let y = ((v * self.height as f64) as usize).min(self.height - 1);
-        let index = y * self.width + x;
-        // 使用实际 CDF 区间宽度，包含预计算舍入，保证查询与抽样的概率相同。
-        let probability = self.importance_cdf[index + 1] - self.importance_cdf[index];
-        Some(
-            IMPORTANCE_FRACTION * probability / self.pixel_solid_angle(y)
-                + (1.0 - IMPORTANCE_FRACTION) * UNIFORM_SPHERE_PDF,
-        )
+        Some(self.pdf_from_uv(u, v))
     }
 
     /// 从字节流解码 HDR 为浮点像素，再建立可查询的贴图。
@@ -111,10 +133,17 @@ impl EnvironmentMap {
         let (width, height) = decoder.dimensions();
         let (width, height) = (usize::try_from(width)?, usize::try_from(height)?);
         // 在解码分配像素缓冲之前拒绝零尺寸和地址空间溢出。
-        pixel_count(width, height)?;
+        let count = pixel_count(width, height)?;
         // HdrDecoder 输出 Rgb32F，into_rgb32f 直接取出浮点缓冲，不施加传递函数。
-        let image = DynamicImage::from_decoder(decoder)?.into_rgb32f();
-        let pixels = image.pixels().map(|pixel| pixel.0).collect();
+        let raw = DynamicImage::from_decoder(decoder)?
+            .into_rgb32f()
+            .into_raw();
+        let mut pixels = Vec::new();
+        pixels
+            .try_reserve_exact(count)
+            .map_err(|_| "环境贴图像素缓冲内存分配失败")?;
+        pixels.extend_from_slice(raw.as_chunks::<3>().0);
+        drop(raw);
         Ok(Self::from_pixels(width, height, pixels)?)
     }
 
@@ -138,12 +167,19 @@ impl EnvironmentMap {
         if row_cos_theta.windows(2).any(|edges| edges[0] <= edges[1]) {
             return Err("环境贴图纬度分辨率超出浮点精度".into());
         }
+        let width_scale = TAU / width as f64;
+        let row_inv_solid_angle: Vec<_> = row_cos_theta
+            .windows(2)
+            .map(|edges| 1.0 / (width_scale * (edges[0] - edges[1])))
+            .collect();
         let mut map = Self {
             width,
             height,
             pixels,
             importance_cdf: Vec::new(),
+            row_cdf: Vec::new(),
             row_cos_theta,
+            row_inv_solid_angle,
         };
         map.build_distribution();
         Ok(map)
@@ -178,7 +214,9 @@ impl EnvironmentMap {
             for value in &mut cdf {
                 *value /= total;
             }
+            let row_cdf = (0..=self.height).map(|row| cdf[row * self.width]).collect();
             self.importance_cdf = cdf;
+            self.row_cdf = row_cdf;
         }
     }
 
@@ -883,5 +921,39 @@ mod tests {
         let expected = 4.5 * 4.0 * PI;
         assert!((weighted / f64::from(count) / expected - 1.0).abs() < 0.02);
         assert!(unweighted / f64::from(count) > 4.5 * 1.2);
+    }
+
+    #[test]
+    fn two_level_row_cdf_lookup_matches_flat_cdf_including_zero_rows() {
+        let mut pixels = vec![[0.0; 3]; 5 * 6];
+        // Rows 0, 2, 5 completely black; rows 1, 3, 4 sparse bright pixels.
+        pixels[5 + 2] = [3.0, 2.0, 1.0];
+        pixels[3 * 5] = [10.0, 0.0, 0.0];
+        pixels[3 * 5 + 4] = [0.0, 5.0, 0.0];
+        pixels[4 * 5 + 1] = [1.0, 1.0, 8.0];
+        let map = EnvironmentMap::from_pixels(5, 6, pixels).unwrap();
+        let mut candidates = vec![0.0, 1.0_f64.next_down()];
+        for &c in &map.importance_cdf {
+            if c < 1.0 {
+                candidates.push(c);
+                candidates.push(c.next_down().max(0.0));
+                if c.next_up() < 1.0 {
+                    candidates.push(c.next_up());
+                }
+            }
+        }
+        let mut rng = StdRng::seed_from_u64(99);
+        for _ in 0..256 {
+            candidates.push(rng.random::<f64>());
+        }
+        for u in candidates {
+            let flat = map.importance_cdf.partition_point(|&p| p <= u) - 1;
+            let y = map.row_cdf.partition_point(|&p| p <= u) - 1;
+            let row_start = y * map.width;
+            let x = map.importance_cdf[row_start..=row_start + map.width]
+                .partition_point(|&p| p <= u)
+                - 1;
+            assert_eq!(y * map.width + x, flat, "u={u}");
+        }
     }
 }

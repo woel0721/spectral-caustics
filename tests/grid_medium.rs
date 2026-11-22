@@ -336,12 +336,13 @@ fn configured_grid_repeats_across_rgb_hero_packet_threads_and_zero_density_is_va
     ] {
         c.render.camera_mode = mode;
         c.render.spectral_packet_size = packet;
+        let built = c.build().unwrap();
         let mut reference = None;
         for threads in [1, 2, 4] {
             c.render.thread_count = Some(threads);
             let images = Renderer::new(c.render.clone())
                 .unwrap()
-                .render(&c.build().unwrap())
+                .render(&built)
                 .unwrap();
             for ((d, ca), combined) in images
                 .direct

@@ -14,11 +14,105 @@ use crate::geometry::ray::{INTERSECTION_EPSILON, PARALLEL_EPSILON, Ray};
 use crate::integrator::camera::transport::Caustics;
 use crate::material::Material;
 use crate::material::lambertian::Lambertian;
+use image::Rgb;
+use image::codecs::hdr::HdrEncoder;
 use nalgebra::Vector3;
 use rand::RngCore;
 use std::collections::VecDeque;
 use std::error::Error;
+use std::fs::{self, File};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Half-plane blocker covering `y > 0` on a horizontal `Ground` plane.
+pub(super) struct HalfPlane(pub(super) Ground);
+impl Hittable for HalfPlane {
+    fn intersect(&self, ray: &Ray) -> Option<GeometryHit> {
+        let hit = self.0.intersect(ray)?;
+        (hit.coords.y > 0.0).then_some(hit)
+    }
+}
+
+/// Purely absorbing material (zero BRDF, no scatter samples).
+pub(super) struct Absorber;
+impl Material for Absorber {
+    fn evaluate_rgb(&self, _: Vector3<f64>, _: Vector3<f64>, _: Vector3<f64>) -> Vector3<f64> {
+        Vector3::zeros()
+    }
+}
+
+/// RAII temporary `.hdr` file deleted automatically on drop (including panics).
+pub(super) struct TemporaryHdr(pub(super) PathBuf);
+
+impl TemporaryHdr {
+    fn unique_path(prefix: &str) -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{stamp}-{}.hdr",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    pub(super) fn new(width: usize, height: usize, pixels: Vec<[f32; 3]>) -> Self {
+        let path = Self::unique_path("environment-test");
+        let pixels: Vec<_> = pixels.into_iter().map(Rgb).collect();
+        HdrEncoder::new(File::create_new(&path).unwrap())
+            .encode(&pixels, width, height)
+            .unwrap();
+        Self(path)
+    }
+
+    pub(super) fn from_rgbe(prefix: &str, width: usize, height: usize, pixels: &[[u8; 4]]) -> Self {
+        let path = Self::unique_path(prefix);
+        let mut bytes =
+            format!("#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y {height} +X {width}\n").into_bytes();
+        for pixel in pixels {
+            bytes.extend_from_slice(pixel);
+        }
+        fs::write(&path, bytes).unwrap();
+        Self(path)
+    }
+
+    pub(super) fn uniform(rgb: [f32; 3]) -> Self {
+        Self::new(4, 2, vec![rgb; 8])
+    }
+
+    pub(super) fn high_contrast() -> Self {
+        let mut pixels = vec![[0.125; 3]; 64 * 32];
+        // 上半球约 0.22% 球面积的 2x2 高亮块；其余区域保持暗灰。
+        for row in 7..9 {
+            for col in 31..33 {
+                pixels[row * 64 + col] = [1024.0; 3];
+            }
+        }
+        Self::new(64, 32, pixels)
+    }
+
+    pub(super) fn scene(&self, rotation_degrees: f64) -> RenderJob {
+        let mut scene = RenderJob::new();
+        scene.scene.environment = Some(
+            Environment::try_from(&EnvironmentConfig {
+                map_path: Some(self.0.clone()),
+                rotation_degrees,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        scene
+    }
+}
+
+impl Drop for TemporaryHdr {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
 
 /// Real infinite planes: A at z=0 (+Z), B at x=1 (-X).
 pub(super) struct Plane {
@@ -115,24 +209,12 @@ impl RngCore for SequenceRng {
 }
 
 pub(crate) fn uniform_hdri() -> Environment {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "e1-uniform-{}-{}.hdr",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 4\n".to_vec();
-    for _ in 0..8 {
-        bytes.extend_from_slice(&[128, 64, 32, 132]);
-    }
-    std::fs::write(&path, bytes).unwrap();
-    let environment = Environment::try_from(&EnvironmentConfig {
-        map_path: Some(path.clone()),
+    let hdr = TemporaryHdr::from_rgbe("e1-uniform", 4, 2, &[[128, 64, 32, 132]; 8]);
+    Environment::try_from(&EnvironmentConfig {
+        map_path: Some(hdr.0.clone()),
         ..Default::default()
     })
-    .unwrap();
-    std::fs::remove_file(path).unwrap();
-    environment
+    .unwrap()
 }
 
 pub(super) fn evaluate_path(

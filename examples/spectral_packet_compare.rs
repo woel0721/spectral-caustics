@@ -4,6 +4,7 @@ use serde_json::Value;
 use serde_json::json;
 use spectral_caustics::config::Config;
 use spectral_caustics::config::RenderJob;
+use spectral_caustics::config::scene::ObjectConfig;
 use spectral_caustics::film::Framebuffer;
 use spectral_caustics::optics::dispersion::IorMode;
 use spectral_caustics::renderer::Renderer;
@@ -28,7 +29,7 @@ fn render_saved(
     spectral_caustics::output::save_png_with_exposure(
         &image,
         &config.render.output_path,
-        (renderer).settings().exposure,
+        renderer.settings().exposure,
     )?;
     // 无头部，行优先，每像素依次 X/Y/Z，IEEE f64 little-endian；尺寸在同名 JSON 中。
     let mut raw =
@@ -127,7 +128,20 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     config.render.height = size;
     config.render.camera_spp = spp;
     config.render.spectral_packet_size = 4;
-    config.validate()?;
+    let sphere_id = config
+        .scene
+        .objects
+        .iter()
+        .position(|object| matches!(object, ObjectConfig::Sphere { .. }))
+        .ok_or("configs/sphere_spectral.json 缺少球体")?;
+    for object in &mut config.scene.objects {
+        if let ObjectConfig::Sphere { caustics, .. }
+        | ObjectConfig::Prism { caustics, .. }
+        | ObjectConfig::VerticalPrism { caustics, .. } = object
+        {
+            *caustics = false;
+        }
+    }
     let scene = config.build()?;
     let threads = Renderer::new(config.render.clone())?.thread_count();
     fs::create_dir_all(&directory)?;
@@ -143,7 +157,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             scene
                 .scene
                 .intersect(&ray)
-                .is_some_and(|hit| Some(hit.object_id) == scene.photon.caustics_object_id)
+                .is_some_and(|hit| hit.object_id == sphere_id)
         })
         .collect();
     // 用四邻域中心射线定义球轮廓边缘；球内部不含这些像素。

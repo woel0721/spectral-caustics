@@ -1,20 +1,27 @@
 //! Binding for the selected ideal dielectric; path transport lives in photon/path.
-mod generation;
+mod emission;
+mod integrate;
 mod path;
+#[cfg(test)]
+mod tests;
+
 use crate::config::RenderJob;
-use crate::config::render::MAX_PHOTON_VOLUME_SCATTERS;
+use crate::config::render::{MAX_PHOTON_VOLUME_SCATTERS, RenderSetting};
 use crate::geometry::ray::Ray;
 use crate::medium::ACHROMATIC_QUERY_NM;
 use crate::optics::dispersion::IorMode;
 use crate::spectrum::emission::{WAVELENGTH_MAX_NM, WAVELENGTH_MIN_NM};
-pub(crate) use generation::integrate_camera_xyz;
-pub use generation::{integrate_spectral, integrate_xyz};
+pub(crate) use integrate::integrate_camera_xyz;
+pub use integrate::{integrate_spectral, integrate_xyz};
 use nalgebra::Vector3;
 pub use path::PhotonMedium;
 pub use path::PhotonPathResult;
 pub use path::PhotonPathState;
 pub use path::PhotonTermination;
 pub(crate) use path::PhotonTracer;
+
+pub(super) type PhotonError = Box<dyn std::error::Error + Send + Sync>;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PhotonLanding {
     pub position: Vector3<f64>,
@@ -35,7 +42,7 @@ pub fn trace_photon(
         wavelength_nm,
         job.scene.has_wavelength_dependent_medium_coefficients(),
     )?;
-    selected_tracer(job, wavelength_nm, mode, max_events)?.trace(
+    default_selected_tracer(job, wavelength_nm, mode, max_events)?.trace(
         job,
         ray,
         job.scene.intersect(&ray),
@@ -74,7 +81,7 @@ pub fn trace_photon_with_volume(
     }
     let medium_wavelength_nm =
         medium_wavelength(wavelength_nm, job.scene.has_wavelength_dependent_medium())?;
-    let tracer = selected_tracer(job, wavelength_nm, mode, max_events)?;
+    let tracer = default_selected_tracer(job, wavelength_nm, mode, max_events)?;
     let first_hit = job.scene.intersect(&ray);
     let state = tracer.initial_state(job, ray, first_hit, medium_wavelength_nm)?;
     tracer.trace_state_with_volume(
@@ -101,19 +108,52 @@ fn medium_wavelength(
     Ok(nm)
 }
 
-fn selected_tracer(
+pub(crate) fn selected_tracer(
+    job: &RenderJob,
+    object_id: usize,
+    ground_id: usize,
+    wavelength_nm: Option<f64>,
+    mode: IorMode,
+    max_events: usize,
+) -> Result<PhotonTracer, &'static str> {
+    PhotonTracer::new(
+        job,
+        object_id,
+        ground_id,
+        job.photon_ior(object_id, wavelength_nm, mode)
+            .ok_or("光子 IOR 无效")?,
+        max_events,
+    )
+}
+
+pub(super) fn photon_tracer(
+    job: &RenderJob,
+    settings: &RenderSetting,
+    target: Option<usize>,
+    ground: usize,
+    nm: f64,
+) -> Result<Option<PhotonTracer>, &'static str> {
+    target
+        .map(|id| {
+            selected_tracer(
+                job,
+                id,
+                ground,
+                Some(nm),
+                settings.mode,
+                settings.photon_max_events,
+            )
+        })
+        .transpose()
+}
+
+fn default_selected_tracer(
     job: &RenderJob,
     wavelength_nm: Option<f64>,
     mode: IorMode,
     max_events: usize,
 ) -> Result<PhotonTracer, &'static str> {
     let object_id = job.photon.caustics_object_id.ok_or("未选择焦散物体")?;
-    PhotonTracer::new(
-        job,
-        object_id,
-        job.photon.ground_id.ok_or("光子路径缺少地面")?,
-        job.photon_ior(object_id, wavelength_nm, mode)
-            .ok_or("光子 IOR 无效")?,
-        max_events,
-    )
+    let ground_id = job.photon.ground_id.ok_or("光子路径缺少地面")?;
+    selected_tracer(job, object_id, ground_id, wavelength_nm, mode, max_events)
 }

@@ -1,3 +1,4 @@
+use crate::caustics::GroundReceiver;
 use crate::geometry::ray::PARALLEL_EPSILON;
 use nalgebra::{Vector2, Vector3};
 #[derive(Debug, Clone)]
@@ -22,19 +23,15 @@ impl ParallelLight {
     /// 因此水平面 E=Φ/A；窗口只限定发射光子的位置，不裁切解析太阳直射。
     pub fn sunlight(&self) -> Option<(Vector3<f64>, f64)> {
         let length = self.direction.norm();
-        let span = self.aperture_max_m - self.aperture_min_m;
-        let area = span.x * span.y;
+        let (_, area) = GroundReceiver {
+            min_m: self.aperture_min_m,
+            max_m: self.aperture_max_m,
+        }
+        .checked_area()
+        .ok()?;
         if !self.height_m.is_finite()
             || !length.is_finite()
             || length == 0.0
-            || self
-                .aperture_min_m
-                .iter()
-                .chain(self.aperture_max_m.iter())
-                .any(|v| !v.is_finite())
-            || span.iter().any(|v| !v.is_finite() || *v <= 0.0)
-            || !area.is_finite()
-            || area <= 0.0
             || !self.total_flux.is_finite()
             || self.total_flux < 0.0
         {

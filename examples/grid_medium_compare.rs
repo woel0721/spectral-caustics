@@ -83,29 +83,39 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     });
     let layered = MediumConfig::Grid(density_field(&base, false));
     let clumped = MediumConfig::Grid(density_field(&base, true));
-    for (name, medium, budget) in [
-        ("homogeneous", homogeneous, 8),
-        ("uniform_grid", MediumConfig::Grid(base), 8),
-        ("layered_single", layered.clone(), 1),
-        ("layered_multiple", layered, 8),
-        ("clumped_extinction", clumped.clone(), 0),
-        ("clumped_single", clumped.clone(), 1),
-        ("clumped_multiple", clumped, 8),
+    let renderer = Renderer::new(c.render.clone())?;
+    for (medium, runs) in [
+        (homogeneous, vec![("homogeneous", 8)]),
+        (MediumConfig::Grid(base), vec![("uniform_grid", 8)]),
+        (
+            layered,
+            vec![("layered_single", 1), ("layered_multiple", 8)],
+        ),
+        (
+            clumped,
+            vec![
+                ("clumped_extinction", 0),
+                ("clumped_single", 1),
+                ("clumped_multiple", 8),
+            ],
+        ),
     ] {
         c.scene.medium = Some(medium);
-        c.scene.max_volume_scatters = budget;
-        c.render.output_path = directory.join(name).join("camera_combined.png");
-        let job = c.build()?;
-        let renderer = Renderer::new(c.render.clone())?;
-        let start = Instant::now();
-        let images = renderer.render(&job)?;
-        output::save_components(&images, &c.render.output_path, c.render.exposure)?;
-        c.save(directory.join(name).join("config.json"))?;
-        println!(
-            "{name}: {} ({:.3}s)",
-            c.render.output_path.display(),
-            start.elapsed().as_secs_f64()
-        );
+        let mut job = c.build()?;
+        for (name, budget) in runs {
+            c.scene.max_volume_scatters = budget;
+            job.camera_options.max_volume_scatters = budget;
+            c.render.output_path = directory.join(name).join("camera_combined.png");
+            let start = Instant::now();
+            let images = renderer.render(&job)?;
+            output::save_components(&images, &c.render.output_path, c.render.exposure)?;
+            c.save(directory.join(name).join("config.json"))?;
+            println!(
+                "{name}: {} ({:.3}s)",
+                c.render.output_path.display(),
+                start.elapsed().as_secs_f64()
+            );
+        }
     }
     Ok(())
 }

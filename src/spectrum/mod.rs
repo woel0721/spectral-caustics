@@ -37,39 +37,11 @@ pub fn rgb_reflectance(linear_rgb: Vector3<f64>, wavelength_nm: f64) -> Option<f
     {
         return None;
     }
+    if linear_rgb == Vector3::zeros() {
+        return Some(0.0);
+    }
 
-    let table = &*RGB_REFLECTANCE_BASIS;
-    let wavelength_nm = wavelength_nm.clamp(table[0][0], table[table.len() - 1][0]);
-    let right = table.partition_point(|row| row[0] < wavelength_nm).max(1);
-    let left = right - 1;
-    let t = (wavelength_nm - table[left][0]) / (table[right][0] - table[left][0]);
-    let [white, cyan, magenta, yellow, red, green, blue] = std::array::from_fn(|index| {
-        table[left][index + 1] * (1.0 - t) + table[right][index + 1] * t
-    });
-
-    let (r, g, b) = (linear_rgb.x, linear_rgb.y, linear_rgb.z);
-    let reflectance = if r <= g && r <= b {
-        r * white
-            + if g <= b {
-                (g - r) * cyan + (b - g) * blue
-            } else {
-                (b - r) * cyan + (g - b) * green
-            }
-    } else if g <= r && g <= b {
-        g * white
-            + if r <= b {
-                (r - g) * magenta + (b - r) * blue
-            } else {
-                (b - g) * magenta + (r - b) * red
-            }
-    } else {
-        b * white
-            + if r <= g {
-                (r - b) * yellow + (g - r) * green
-            } else {
-                (g - b) * yellow + (r - g) * red
-            }
-    };
+    let (reflectance, _) = smits_basis(&RGB_REFLECTANCE_BASIS, linear_rgb, wavelength_nm);
     Some((0.94 * reflectance).clamp(0.0, 1.0))
 }
 
@@ -79,8 +51,17 @@ pub fn rgb_reflectance(linear_rgb: Vector3<f64>, wavelength_nm: f64) -> Option<f
 /// 360–830 nm 之间按官方 1 nm 表线性插值，表外返回零；非正或非有限波长返回 None。
 /// 数据来源与许可见 assets/color/README.md。
 pub fn cie_xyz(wavelength_nm: f64) -> Option<Vector3<f64>> {
-    let row = interpolate(&CIE_CMF, wavelength_nm)?;
-    Some(Vector3::new(row[1], row[2], row[3]))
+    let Some((left, right, t)) = table_bracket(&CIE_CMF, wavelength_nm)? else {
+        return Some(Vector3::zeros());
+    };
+    let one_minus_t = 1.0 - t;
+    let l = &CIE_CMF[left];
+    let r = &CIE_CMF[right];
+    Some(Vector3::new(
+        l[1] * one_minus_t + r[1] * t,
+        l[2] * one_minus_t + r[2] * t,
+        l[3] * one_minus_t + r[3] * t,
+    ))
 }
 
 /// 查询 D65 日光在某波长处的相对光谱功率，供光谱积分和白光归一化使用。
@@ -88,7 +69,10 @@ pub fn cie_xyz(wavelength_nm: f64) -> Option<Vector3<f64>> {
 /// 输入：正有限波长（nm）；输出：D65(λ)，560 nm 处为 100。
 /// 300–830 nm 内线性插值，表外返回零；非法波长返回 None。它不是每条光子的总能量。
 pub fn d65_spd(wavelength_nm: f64) -> Option<f64> {
-    Some(interpolate(&D65_SPD, wavelength_nm)?[1])
+    let Some((left, right, t)) = table_bracket(&D65_SPD, wavelength_nm)? else {
+        return Some(0.0);
+    };
+    Some(D65_SPD[left][1] * (1.0 - t) + D65_SPD[right][1] * t)
 }
 
 /// 把一个波长的功率密度转换成一份线性 XYZ 积分贡献。
@@ -144,7 +128,7 @@ pub fn d65_normalization(samples: &[(f64, f64)]) -> Option<f64> {
 ///
 /// 输入：每行恰有 N 列、无表头的 CSV 文本；输出：`Vec<[f64;N]>`。
 /// 列数或数字格式错误会 panic，表示仓库内置数据损坏。
-fn parse_csv<const N: usize>(csv: &str) -> Vec<[f64; N]> {
+pub(super) fn parse_csv<const N: usize>(csv: &str) -> Vec<[f64; N]> {
     csv.lines()
         .map(|line| {
             let mut fields = line.split(',');
@@ -161,28 +145,74 @@ fn parse_csv<const N: usize>(csv: &str) -> Vec<[f64; N]> {
         .collect()
 }
 
-/// 在波长间距为 1 nm 的内置数据表中查询一行，供 CIE/D65 共同使用。
+/// 按 PBRT Smits 七基谱组合线性 RGB，返回 `(组合值, 白基谱值)`；仅插值当前通道顺序实际使用的基谱列。
+pub(super) fn smits_basis(table: &[[f64; 8]], rgb: Vector3<f64>, wavelength_nm: f64) -> (f64, f64) {
+    let nm = wavelength_nm.clamp(table[0][0], table[table.len() - 1][0]);
+    let right = table.partition_point(|row| row[0] < nm).max(1);
+    let left = right - 1;
+    let t = (nm - table[left][0]) / (table[right][0] - table[left][0]);
+    let one_minus_t = 1.0 - t;
+    let interp = |column: usize| table[left][column] * one_minus_t + table[right][column] * t;
+    let white = interp(1);
+    let (r, g, b) = (rgb.x, rgb.y, rgb.z);
+    let combined = if r <= g && r <= b {
+        r * white
+            + if g <= b {
+                let c = if g > r { (g - r) * interp(2) } else { 0.0 };
+                let b_term = if b > g { (b - g) * interp(7) } else { 0.0 };
+                c + b_term
+            } else {
+                let c = if b > r { (b - r) * interp(2) } else { 0.0 };
+                let g_term = if g > b { (g - b) * interp(6) } else { 0.0 };
+                c + g_term
+            }
+    } else if g <= r && g <= b {
+        g * white
+            + if r <= b {
+                let m = if r > g { (r - g) * interp(3) } else { 0.0 };
+                let b_term = if b > r { (b - r) * interp(7) } else { 0.0 };
+                m + b_term
+            } else {
+                let m = if b > g { (b - g) * interp(3) } else { 0.0 };
+                let r_term = if r > b { (r - b) * interp(5) } else { 0.0 };
+                m + r_term
+            }
+    } else {
+        b * white
+            + if r <= g {
+                let y = if r > b { (r - b) * interp(4) } else { 0.0 };
+                let g_term = if g > r { (g - r) * interp(6) } else { 0.0 };
+                y + g_term
+            } else {
+                let y = if g > b { (g - b) * interp(4) } else { 0.0 };
+                let r_term = if r > g { (r - g) * interp(5) } else { 0.0 };
+                y + r_term
+            }
+    };
+    (combined, white)
+}
+
+/// 在波长间距为 1 nm 的内置数据表中定位插值区间，供 CIE/D65 共同使用。
 ///
-/// 输入：首列为波长的非空表和正有限 wavelength_nm；输出：各列的线性插值。
-///
-/// 公式：v=(1-t)·v_left+t·v_right，t=λ-floor(λ)；表外返回全零，非法波长返回 None。
-fn interpolate<const N: usize>(table: &[[f64; N]], wavelength_nm: f64) -> Option<[f64; N]> {
+/// 返回：`None` 表示非法波长，`Some(None)` 表示表外（应返回零），`Some(Some((left, right, t)))` 表示插值权重。
+fn table_bracket<const N: usize>(
+    table: &[[f64; N]],
+    wavelength_nm: f64,
+) -> Option<Option<(usize, usize, f64)>> {
     if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
         return None;
     }
     let first_nm = table[0][0];
     let last_nm = table[table.len() - 1][0];
     if wavelength_nm < first_nm || wavelength_nm > last_nm {
-        return Some([0.0; N]);
+        return Some(None);
     }
 
     let position = wavelength_nm - first_nm;
     let left = position.floor() as usize;
     let right = (left + 1).min(table.len() - 1);
     let t = position - left as f64;
-    Some(std::array::from_fn(|column| {
-        table[left][column] * (1.0 - t) + table[right][column] * t
-    }))
+    Some(Some((left, right, t)))
 }
 
 #[cfg(test)]

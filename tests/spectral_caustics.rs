@@ -27,7 +27,9 @@ use spectral_caustics::spectrum::d65_spd;
 use spectral_caustics::spectrum::rgb_reflectance;
 use std::f64::consts::PI;
 use std::process::Command;
-use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
+use support::{
+    TempDir, TransmissionRng as Transmit, assert_camera_images_bits_eq, assert_framebuffer_bits_eq,
+};
 
 fn config() -> Config {
     let mut c = Config::from_json(include_str!(
@@ -77,7 +79,7 @@ fn scalar_nodes_reintegrate_to_original_xyz_flux_and_resolve_dispersion() {
             &scene,
             scene.photon.caustics_object_id,
             scene.photon.ground_id.expect("receiver"),
-            (Renderer::new(c.render.clone()).unwrap()).settings(),
+            &c.render,
         )
         .unwrap();
         let mut integral = vec![Vector3::zeros(); rgb.caustics.pixels().len()];
@@ -164,19 +166,6 @@ fn source_flux_does_not_gain_a_wavelength_width_or_spatial_sample_count_factor()
         {
             assert_eq!(a, 2.0 * b);
         }
-    }
-}
-
-struct Transmit;
-impl RngCore for Transmit {
-    fn next_u64(&mut self) -> u64 {
-        u64::MAX
-    }
-    fn next_u32(&mut self) -> u32 {
-        u32::MAX
-    }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        dest.fill(255);
     }
 }
 
@@ -286,21 +275,17 @@ fn spectral_components_preserve_direct_crn_additivity_and_thread_determinism() {
     let mut c = config();
     c.render.width = 12;
     c.render.height = 12;
-    let dir = std::env::temp_dir().join(format!("hero-caustics-mis-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let hdr = dir.join("test.hdr");
+    let dir = TempDir::new("hero-caustics-mis");
     let pixels: Vec<_> = (0..32)
         .map(|i| {
-            image::Rgb(if i % 3 == 0 {
+            if i % 3 == 0 {
                 [4.0_f32, 0.2, 1.0]
             } else {
                 [0.1; 3]
-            })
+            }
         })
         .collect();
-    image::codecs::hdr::HdrEncoder::new(std::fs::File::create(&hdr).unwrap())
-        .encode(&pixels, 8, 4)
-        .unwrap();
+    let hdr = dir.write_hdr("test.hdr", 8, 4, &pixels);
     c.scene.environment.as_mut().unwrap().map_path = Some(hdr);
     for mode in [IorMode::Constant, IorMode::Dispersion] {
         c.render.mode = mode;
@@ -358,7 +343,6 @@ fn spectral_components_preserve_direct_crn_additivity_and_thread_determinism() {
             }
         }
     }
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -479,7 +463,7 @@ fn ground_sun_debug_preserves_source_maps_caustics_rgb_and_packet_thread_results
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (Renderer::new(c.render.clone()).unwrap()).settings(),
+        &c.render,
     )
     .unwrap();
     #[cfg(feature = "diagnostics")]
@@ -496,7 +480,7 @@ fn ground_sun_debug_preserves_source_maps_caustics_rgb_and_packet_thread_results
         &scene,
         scene.photon.caustics_object_id,
         scene.photon.ground_id.expect("receiver"),
-        (Renderer::new(c.render.clone()).unwrap()).settings(),
+        &c.render,
     )
     .unwrap();
     assert_framebuffer_bits_eq(
@@ -571,34 +555,16 @@ fn ground_sun_debug_preserves_source_maps_caustics_rgb_and_packet_thread_results
     {
         c.render.diagnostics.disable_ground_sun = false;
     }
-    let baseline = spectral_caustics::integrator::camera::integrate_rgb(
-        &scene,
-        &spectral_caustics::config::render::RenderSetting {
-            width: (Renderer::new(c.render.clone()).unwrap()).settings().width,
-            height: (Renderer::new(c.render.clone()).unwrap()).settings().height,
-            camera_spp: c.render.camera_spp,
-            seed: c.render.seed,
-            ..Default::default()
-        },
-        Some(&rgb_source),
-    )
-    .unwrap();
+    let baseline =
+        spectral_caustics::integrator::camera::integrate_rgb(&scene, &c.render, Some(&rgb_source))
+            .unwrap();
     #[cfg(feature = "diagnostics")]
     {
         c.render.diagnostics.disable_ground_sun = true;
     }
-    let debug = spectral_caustics::integrator::camera::integrate_rgb(
-        &scene,
-        &spectral_caustics::config::render::RenderSetting {
-            width: (Renderer::new(c.render.clone()).unwrap()).settings().width,
-            height: (Renderer::new(c.render.clone()).unwrap()).settings().height,
-            camera_spp: c.render.camera_spp,
-            seed: c.render.seed,
-            ..Default::default()
-        },
-        Some(&rgb_source),
-    )
-    .unwrap();
+    let debug =
+        spectral_caustics::integrator::camera::integrate_rgb(&scene, &c.render, Some(&rgb_source))
+            .unwrap();
     assert_camera_images_bits_eq(&baseline, &debug);
     // 没有焦散目标时的单图入口也应传递调试开关，不依赖光源图集。
     c.render.camera_mode = spectral_caustics::config::render::CameraMode::Spectral;
@@ -644,8 +610,7 @@ fn enabled_cli_writes_three_components_and_map_mismatches_fail_explicitly() {
         spectral_caustics::integrator::photon::integrate_spectral(&invalid_scene, &c.render)
             .is_err()
     );
-    let dir = std::env::temp_dir().join(format!("hero-caustics-cli-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = TempDir::new("hero-caustics-cli");
     c.render.output_path = dir.join("hero.png");
     c.save(dir.join("config.json")).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_spectral-caustics"))
@@ -671,7 +636,6 @@ fn enabled_cli_writes_three_components_and_map_mismatches_fail_explicitly() {
         std::fs::read(dir.join("hero.png")).unwrap(),
         std::fs::read(dir.join("camera_combined.png")).unwrap()
     );
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

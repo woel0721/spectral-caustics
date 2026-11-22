@@ -12,17 +12,8 @@ pub const WAVELENGTH_MAX_NM: f64 = 780.0;
 pub const WAVELENGTH_PDF: f64 = 1.0 / (WAVELENGTH_MAX_NM - WAVELENGTH_MIN_NM);
 
 static ILLUMINANT: LazyLock<Vec<[f64; 8]>> = LazyLock::new(|| {
-    include_str!("../../assets/color/pbrt_rgb_illuminant.csv")
-        .lines()
-        .skip(1)
-        .map(|line| {
-            let values: Vec<f64> = line
-                .split(',')
-                .map(|v| v.parse().expect("发光基谱数值必须有效"))
-                .collect();
-            values.try_into().expect("发光基谱必须有八列")
-        })
-        .collect()
+    let csv = include_str!("../../assets/color/pbrt_rgb_illuminant.csv");
+    super::parse_csv(csv.split_once('\n').expect("发光基谱缺少表头").1)
 });
 
 /// 原数据在每个整数 nm 间均线性插值；SPD×CMF 为二次式，用 Simpson 精确积分。
@@ -84,46 +75,22 @@ pub fn d65_white_xyz() -> Vector3<f64> {
 /// 基谱在 380–720 nm 线性插值，720–780 nm 延用端点；只截负值，保留 HDR 强度。
 /// 这是 RGB 到光谱的近似，不代表实测 HDRI 光谱，也不保证任意 RGB 色度精确还原。
 pub fn rgb_emission(rgb: Vector3<f64>, wavelength_nm: f64) -> Option<f64> {
-    let white = d65_spectrum(wavelength_nm)?;
-    if rgb.iter().any(|v| !v.is_finite() || *v < 0.0) {
+    if !(WAVELENGTH_MIN_NM..=WAVELENGTH_MAX_NM).contains(&wavelength_nm)
+        || rgb.iter().any(|v| !v.is_finite() || *v < 0.0)
+    {
         return None;
     }
     let scale = rgb.max();
     if scale == 0.0 {
         return Some(0.0);
     }
-    let rgb = rgb / scale;
-    let table = &*ILLUMINANT;
-    let nm = wavelength_nm.clamp(table[0][0], table[table.len() - 1][0]);
-    let right = table.partition_point(|row| row[0] < nm).max(1);
-    let left = right - 1;
-    let t = (nm - table[left][0]) / (table[right][0] - table[left][0]);
-    let [w, c, m, y, r, g, b] =
-        std::array::from_fn(|i| table[left][i + 1] * (1.0 - t) + table[right][i + 1] * t);
-    let (red, green, blue) = (rgb.x, rgb.y, rgb.z);
-    let spectrum = if red <= green && red <= blue {
-        red * w
-            + if green <= blue {
-                (green - red) * c + (blue - green) * b
-            } else {
-                (blue - red) * c + (green - blue) * g
-            }
-    } else if green <= red && green <= blue {
-        green * w
-            + if red <= blue {
-                (red - green) * m + (blue - red) * b
-            } else {
-                (blue - green) * m + (red - blue) * r
-            }
+    let white = d65_spectrum(wavelength_nm)?;
+    let result = if rgb.x == rgb.y && rgb.y == rgb.z {
+        white * scale
     } else {
-        blue * w
-            + if red <= green {
-                (red - blue) * y + (green - red) * g
-            } else {
-                (green - blue) * y + (red - green) * r
-            }
+        let (spectrum, w) = super::smits_basis(&ILLUMINANT, rgb / scale, wavelength_nm);
+        (spectrum.max(0.0) / w * white) * scale
     };
-    let result = (spectrum.max(0.0) / w * white) * scale;
     (result.is_finite() && result >= 0.0).then_some(result)
 }
 

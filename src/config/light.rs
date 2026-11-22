@@ -1,6 +1,5 @@
-//! 显式光源类型；旧无 type 的 JSON 由场景字段反序列化入口补为 parallel。
+//! 显式带 `type` 标签的光源配置（`parallel` 或 `disk_area`）。
 
-pub use super::scene::ParallelLightConfig;
 use super::scene::validate_bounds;
 use crate::geometry::ray::Ray;
 use crate::light::DiskAreaLight;
@@ -20,6 +19,33 @@ pub enum LightConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ParallelLightConfig {
+    /// 平行光从水平发射孔径出发，长度单位为米。
+    pub height_m: f64,
+    /// 原始方向向量，由运行时光线构造器归一化。
+    pub direction: [f64; 3],
+    pub aperture_min_m: [f64; 2],
+    pub aperture_max_m: [f64; 2],
+    /// 穿过水平发射窗口的相对通量 Phi；默认 8/16=0.5 为水平面辐照度。
+    /// 光束法向辐照度为 Phi/(窗口面积*|归一化 direction.z|)，无瓦特标定。
+    pub total_flux: f64,
+}
+
+impl Default for ParallelLightConfig {
+    /// 返回内置平行光配置：发射高度 3 m、方向 [0.45,0,-1]、4×4 m 窗口及相对通量 8。
+    fn default() -> Self {
+        Self {
+            height_m: 3.0,
+            direction: [0.45, 0.0, -1.0],
+            aperture_min_m: [-2.0; 2],
+            aperture_max_m: [2.0; 2],
+            total_flux: 8.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DiskAreaLightConfig {
     pub center: [f64; 3],
     pub normal: [f64; 3],
@@ -27,9 +53,6 @@ pub struct DiskAreaLightConfig {
     pub total_flux: f64,
 }
 
-/// 将场景 light 字段解码成光源类型，支持省略 type 的平行光 JSON。
-///
-/// 输入：Serde 反序列化器；输出：LightConfig 或字段解析错误，缺少 type 时按 parallel 解析。
 impl Default for LightConfig {
     /// 返回内置平行光配置，供缺省场景构建使用。
     fn default() -> Self {
@@ -63,13 +86,6 @@ impl LightConfig {
             Self::DiskArea(_) => None,
         }
     }
-    /// 返回配置中的相对总通量 Φ，供两种光源共用能量归一化。
-    pub fn total_flux(&self) -> f64 {
-        match self {
-            Self::Parallel(light) => light.total_flux,
-            Self::DiskArea(light) => light.total_flux,
-        }
-    }
     /// 检查当前类型的光源参数，供场景配置加载使用。
     ///
     /// 输入：self；输出：有效时 Ok(())，平行光窗口/方向/通量或圆盘几何无效时 Err。
@@ -84,12 +100,22 @@ impl LightConfig {
                     || light.total_flux < 0.0
                 {
                     return Err(
-                        "scene.scene.light 的高度须有限、方向须有限且非零、总通量须有限且非负"
-                            .into(),
+                        "scene.light 的高度须有限、方向须有限且非零、总通量须有限且非负".into(),
                     );
                 }
                 validate_bounds(light.aperture_min_m, light.aperture_max_m)
-                    .map_err(|message| format!("scene.scene.light 发射孔径：{message}"))
+                    .map_err(|message| format!("scene.light 发射孔径：{message}"))?;
+                let parallel = ParallelLight {
+                    height_m: light.height_m,
+                    direction: light.direction.into(),
+                    aperture_min_m: Vector2::from(light.aperture_min_m),
+                    aperture_max_m: Vector2::from(light.aperture_max_m),
+                    total_flux: light.total_flux,
+                };
+                parallel
+                    .sunlight()
+                    .map(|_| ())
+                    .ok_or_else(|| "scene.light 平行光要求有效的向下方向、窗口与有限辐照度".into())
             }
             Self::DiskArea(light) => DiskAreaLight::new(
                 light.center.into(),

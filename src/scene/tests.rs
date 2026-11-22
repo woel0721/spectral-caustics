@@ -348,7 +348,7 @@ fn scene_validation_still_precedes_environment_loading_and_geometry_construction
     config.max_diffuse_bounces = crate::config::scene::MAX_DIFFUSE_BOUNCES + 1;
     assert_eq!(
         RenderJob::from_config(&config).err().unwrap().to_string(),
-        "scene.camera_options.max_diffuse_bounces 不能超过 1024"
+        "scene.max_diffuse_bounces 不能超过 1024"
     );
     config.max_diffuse_bounces = 0;
     assert!(
