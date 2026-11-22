@@ -19,6 +19,85 @@ use rand_chacha::ChaCha12Rng;
 use rayon::prelude::*;
 use std::ops::Range;
 
+/// Soft byte cap for concurrent per-block temporary scalar irradiance buffers.
+const BLOCK_SCRATCH_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
+pub(super) fn block_batch_size(total_blocks: usize, pixels: usize, active_buffers: usize) -> usize {
+    block_batch_size_for_threads(
+        total_blocks,
+        pixels,
+        active_buffers,
+        rayon::current_num_threads(),
+    )
+}
+
+pub(super) fn block_batch_size_for_threads(
+    total_blocks: usize,
+    pixels: usize,
+    active_buffers: usize,
+    threads: usize,
+) -> usize {
+    if total_blocks == 0 {
+        return 0;
+    }
+    if active_buffers == 0 {
+        return total_blocks;
+    }
+    let per_block_bytes = active_buffers
+        .saturating_mul(pixels)
+        .saturating_mul(size_of::<f64>());
+    let memory_cap = (BLOCK_SCRATCH_BUDGET_BYTES / per_block_bytes.max(1)).max(1);
+    threads.clamp(1, memory_cap).min(total_blocks)
+}
+
+pub(super) fn alloc_zeroed_irradiance(pixels: usize) -> Result<Vec<f64>, &'static str> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(pixels)
+        .map_err(|_| "cannot allocate photon irradiance buffer")?;
+    values.resize(pixels, 0.0);
+    Ok(values)
+}
+
+pub(super) fn prepare_scratch_buffer<'a>(
+    slot: &'a mut Option<Vec<f64>>,
+    initialized: &mut bool,
+    pixels: usize,
+) -> Result<&'a mut [f64], &'static str> {
+    let buf = match slot {
+        Some(buf) => {
+            if !*initialized {
+                buf.fill(0.0);
+                *initialized = true;
+            }
+            buf
+        }
+        None => {
+            let buf = alloc_zeroed_irradiance(pixels)?;
+            *initialized = true;
+            slot.insert(buf)
+        }
+    };
+    Ok(buf.as_mut_slice())
+}
+
+pub(super) fn accumulate_irradiance(
+    dst: &mut Option<Vec<f64>>,
+    src: &[f64],
+) -> Result<(), &'static str> {
+    let dst = match dst {
+        Some(dst) => dst,
+        None => dst.insert(alloc_zeroed_irradiance(src.len())?),
+    };
+    for (a, &b) in dst.iter_mut().zip(src) {
+        *a += b;
+        if !a.is_finite() {
+            return Err("irradiance accumulation overflow");
+        }
+    }
+    Ok(())
+}
+
 pub(super) struct EmissionHit {
     pub(super) index: usize,
     pub(super) segment: PhotonSegment,
@@ -227,113 +306,158 @@ impl PhotonPlan {
         let dimensions = [settings.width, settings.height];
         let receiver = &job.photon.receiver;
         let base_events = ChaCha12Rng::seed_from_u64(settings.seed);
-        let raw_blocks: Result<Vec<_>, PhotonError> = spectral_sample_blocks(
+        let mut sample_blocks = spectral_sample_blocks(
             nx,
             ny,
             settings.seed,
             settings.max_spectral_blocks,
             job.scene.light.emission_dimensions(),
-        )
-        .into_par_iter()
-        .map(|(rows, mut rng)| {
-            let mut block = EmissionBlock {
-                hits: Vec::new(),
-                paths: CachedPaths::default(),
-                spectral_direct: Vec::new(),
-            };
-            let mut direct_fixed: Option<Vec<f64>> = None;
-            let mut caustics_fixed: Option<Vec<f64>> = None;
-            for_each_emitted_hit(job, nx, ny, rows, &mut rng, |index, ray, hit, region| {
-                let segment = PhotonSegment {
-                    ray,
-                    region,
-                    distance: hit.distance,
-                };
-                if hit.object_id == ground {
-                    if direct && hit.is_front_face(ray.direction) {
-                        if let Some(tr) = fixed_transmittance(job, segment)? {
-                            let buf = direct_fixed.get_or_insert_with(|| vec![0.0; pixels]);
-                            deposit(buf, hit.coords, weight * tr, dimensions, receiver)?;
-                        } else {
-                            block
-                                .spectral_direct
-                                .try_reserve(1)
-                                .map_err(|_| "cannot allocate spectral direct hits")?;
-                            block.spectral_direct.push((segment, hit.coords));
-                        }
-                    }
-                } else if Some(hit.object_id) == target {
-                    if cache_spectral_segments {
-                        let tracer = fixed_tracer.as_ref().expect("cached tracer");
-                        let mut events = event_rng_from_base(&base_events, index);
-                        block.paths.trace(job, tracer, segment, hit, &mut events)?;
-                    } else if single_pass_caustics {
-                        let tracer = fixed_tracer.as_ref().expect("single-pass tracer");
-                        let tr = fixed_transmittance(job, segment)?.expect("achromatic segment");
-                        let state =
-                            PhotonPathState::new(segment.ray, segment.region, tracer.object_id, tr);
-                        let mut events = event_rng_from_base(&base_events, index);
-                        let path = if settings.photon_max_volume_scatters == 0 {
-                            tracer.trace_state(job, state, Some(hit), &mut events, |seg| {
-                                seg.transmittance(&job.scene, ACHROMATIC_QUERY_NM)
-                            })?
-                        } else {
-                            tracer
-                                .trace_state_with_volume(
-                                    job,
-                                    state,
-                                    Some(hit),
-                                    ACHROMATIC_QUERY_NM,
-                                    settings.photon_max_volume_scatters,
-                                    &mut events,
-                                )
-                                .map_err(|e| -> PhotonError { e.into() })?
-                        };
-                        if let Some(landing) = path.landing() {
-                            let buf = caustics_fixed.get_or_insert_with(|| vec![0.0; pixels]);
-                            deposit(
-                                buf,
-                                landing.position,
-                                weight * landing.weight,
-                                dimensions,
-                                receiver,
-                            )?;
-                        }
-                    } else {
-                        block
-                            .hits
-                            .try_reserve(1)
-                            .map_err(|_| "cannot allocate photon hits")?;
-                        block.hits.push(EmissionHit {
-                            index,
-                            segment,
-                            coords: hit.coords,
-                            normal: hit.normal,
-                            tr: fixed_transmittance(job, segment)?,
-                        });
-                    }
+        );
+        let active_buffers = usize::from(direct) + usize::from(single_pass_caustics);
+        let batch_size = block_batch_size(sample_blocks.len(), pixels, active_buffers).max(1);
+        let mut blocks = Vec::with_capacity(sample_blocks.len());
+        let mut fixed_direct: Option<Vec<f64>> = None;
+        let mut fixed_caustics: Option<Vec<f64>> = None;
+        let mut direct_scratch: Vec<Option<Vec<f64>>> = vec![None; batch_size];
+        let mut caustics_scratch: Vec<Option<Vec<f64>>> = vec![None; batch_size];
+        for chunk in sample_blocks.chunks_mut(batch_size) {
+            let len = chunk.len();
+            let batch_blocks: Result<Vec<_>, PhotonError> = chunk
+                .par_iter_mut()
+                .zip(direct_scratch[..len].par_iter_mut())
+                .zip(caustics_scratch[..len].par_iter_mut())
+                .map(|(((rows, rng), direct_slot), caustics_slot)| {
+                    let mut block = EmissionBlock {
+                        hits: Vec::new(),
+                        paths: CachedPaths::default(),
+                        spectral_direct: Vec::new(),
+                    };
+                    let mut wrote_direct = false;
+                    let mut wrote_caustics = false;
+                    for_each_emitted_hit(
+                        job,
+                        nx,
+                        ny,
+                        rows.clone(),
+                        rng,
+                        |index, ray, hit, region| {
+                            let segment = PhotonSegment {
+                                ray,
+                                region,
+                                distance: hit.distance,
+                            };
+                            if hit.object_id == ground {
+                                if direct && hit.is_front_face(ray.direction) {
+                                    if let Some(tr) = fixed_transmittance(job, segment)? {
+                                        let buf = prepare_scratch_buffer(
+                                            direct_slot,
+                                            &mut wrote_direct,
+                                            pixels,
+                                        )?;
+                                        deposit(
+                                            buf,
+                                            hit.coords,
+                                            weight * tr,
+                                            dimensions,
+                                            receiver,
+                                        )?;
+                                    } else {
+                                        block
+                                            .spectral_direct
+                                            .try_reserve(1)
+                                            .map_err(|_| "cannot allocate spectral direct hits")?;
+                                        block.spectral_direct.push((segment, hit.coords));
+                                    }
+                                }
+                            } else if Some(hit.object_id) == target {
+                                if cache_spectral_segments {
+                                    let tracer = fixed_tracer.as_ref().expect("cached tracer");
+                                    let mut events = event_rng_from_base(&base_events, index);
+                                    block.paths.trace(job, tracer, segment, hit, &mut events)?;
+                                } else if single_pass_caustics {
+                                    let tracer = fixed_tracer.as_ref().expect("single-pass tracer");
+                                    let tr = fixed_transmittance(job, segment)?
+                                        .expect("achromatic segment");
+                                    let state = PhotonPathState::new(
+                                        segment.ray,
+                                        segment.region,
+                                        tracer.object_id,
+                                        tr,
+                                    );
+                                    let mut events = event_rng_from_base(&base_events, index);
+                                    let path = if settings.photon_max_volume_scatters == 0 {
+                                        tracer.trace_state(
+                                            job,
+                                            state,
+                                            Some(hit),
+                                            &mut events,
+                                            |seg| {
+                                                seg.transmittance(&job.scene, ACHROMATIC_QUERY_NM)
+                                            },
+                                        )?
+                                    } else {
+                                        tracer
+                                            .trace_state_with_volume(
+                                                job,
+                                                state,
+                                                Some(hit),
+                                                ACHROMATIC_QUERY_NM,
+                                                settings.photon_max_volume_scatters,
+                                                &mut events,
+                                            )
+                                            .map_err(|e| -> PhotonError { e.into() })?
+                                    };
+                                    if let Some(landing) = path.landing() {
+                                        let buf = prepare_scratch_buffer(
+                                            caustics_slot,
+                                            &mut wrote_caustics,
+                                            pixels,
+                                        )?;
+                                        deposit(
+                                            buf,
+                                            landing.position,
+                                            weight * landing.weight,
+                                            dimensions,
+                                            receiver,
+                                        )?;
+                                    }
+                                } else {
+                                    block
+                                        .hits
+                                        .try_reserve(1)
+                                        .map_err(|_| "cannot allocate photon hits")?;
+                                    block.hits.push(EmissionHit {
+                                        index,
+                                        segment,
+                                        coords: hit.coords,
+                                        normal: hit.normal,
+                                        tr: fixed_transmittance(job, segment)?,
+                                    });
+                                }
+                            }
+                            Ok(())
+                        },
+                    )?;
+                    Ok((block, wrote_direct, wrote_caustics))
+                })
+                .collect();
+            for (slot_index, (block, wrote_direct, wrote_caustics)) in
+                batch_blocks?.into_iter().enumerate()
+            {
+                if wrote_direct {
+                    let src = direct_scratch[slot_index]
+                        .as_deref()
+                        .expect("written direct scratch");
+                    accumulate_irradiance(&mut fixed_direct, src)?;
                 }
-                Ok(())
-            })?;
-            Ok((block, direct_fixed, caustics_fixed))
-        })
-        .collect();
-        let raw_blocks = raw_blocks?;
-        let mut blocks = Vec::with_capacity(raw_blocks.len());
-        let mut fixed_direct = direct.then(|| vec![0.0; pixels]);
-        let mut fixed_caustics = (!spectral_caustics).then(|| vec![0.0; pixels]);
-        for (block, block_direct, block_caustics) in raw_blocks {
-            if let (Some(dst), Some(src)) = (&mut fixed_direct, block_direct) {
-                for (a, b) in dst.iter_mut().zip(src) {
-                    *a += b;
+                if wrote_caustics {
+                    let src = caustics_scratch[slot_index]
+                        .as_deref()
+                        .expect("written caustics scratch");
+                    accumulate_irradiance(&mut fixed_caustics, src)?;
                 }
+                blocks.push(block);
             }
-            if let (Some(dst), Some(src)) = (&mut fixed_caustics, block_caustics) {
-                for (a, b) in dst.iter_mut().zip(src) {
-                    *a += b;
-                }
-            }
-            blocks.push(block);
         }
         Ok(Self {
             width: settings.width,
