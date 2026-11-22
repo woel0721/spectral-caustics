@@ -982,3 +982,77 @@ fn photon_volume_uses_the_wavelength_of_the_interior_phase() {
     assert!(trace(Some(550.0), 1025).is_err());
     assert_eq!(trace(None, 0).unwrap().state.volume_scatters, 0);
 }
+
+#[test]
+fn photon_volume_rejects_out_of_segment_and_off_ray_custom_medium_collisions() {
+    use crate::integrator::photon::trace_photon_with_volume;
+    use crate::medium::{MediumCoefficients, MediumSample, phase::HenyeyGreenstein};
+
+    struct FixedCollision(Vector3<f64>);
+    impl Medium for FixedCollision {
+        fn density_at(&self, _: Vector3<f64>) -> f64 {
+            1.0
+        }
+        fn coefficients_at(&self, _: Vector3<f64>, _: f64) -> MediumCoefficients {
+            MediumCoefficients {
+                sigma_a: 0.0,
+                sigma_s: 1.0,
+            }
+        }
+        fn sigma_t_majorant(&self, _: f64) -> f64 {
+            1.0
+        }
+        fn phase(&self, _: f64) -> HenyeyGreenstein {
+            HenyeyGreenstein::new(0.0).unwrap()
+        }
+        fn transmittance_ray(&self, _: &Ray, _: f64, _: f64) -> f64 {
+            1.0
+        }
+        fn sample_segment(
+            &self,
+            _: &Ray,
+            _: f64,
+            _: f64,
+            allow_scattering: bool,
+            _: &mut dyn RngCore,
+        ) -> Result<MediumSample, String> {
+            Ok(MediumSample {
+                position: allow_scattering.then_some(self.0),
+                weight: 1.0,
+            })
+        }
+    }
+
+    // Ray hits the top of the unit sphere at z=3 from z=5 and reflects upward (+z),
+    // or transmits downward (-z) across z=3..1. Force transmission (draw = 1.0) so
+    // the second segment is finite: origin=(0,0,3), dir=(0,0,-1), max_distance=2.
+    for (position, expected) in [
+        (
+            Vector3::new(0.0, 0.0, 3.5),
+            "medium collision lies outside the ray segment",
+        ),
+        (
+            Vector3::new(0.0, 0.0, 0.5),
+            "medium collision lies outside the ray segment",
+        ),
+        (
+            Vector3::new(0.25, 0.0, 2.0),
+            "medium collision lies off the ray",
+        ),
+    ] {
+        let (mut job, _, ray) = reflecting_sphere();
+        job.scene.medium = Some(Box::new(FixedCollision(position)));
+        let draws = [uniform_draw(1.0)];
+        let error = trace_photon_with_volume(
+            &job,
+            ray,
+            None,
+            IorMode::Constant,
+            2,
+            1,
+            &mut Sequence::new(&draws),
+        )
+        .unwrap_err();
+        assert_eq!(error, expected);
+    }
+}

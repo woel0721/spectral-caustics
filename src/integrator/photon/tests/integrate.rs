@@ -1,5 +1,7 @@
-use super::super::emission::{event_rng_from_base, spectral_sample_blocks};
-use super::super::integrate::{integrate_spectral, integrate_xyz};
+use super::super::emission::{
+    PhotonPlan, block_batch_size_for_threads, event_rng_from_base, spectral_sample_blocks,
+};
+use super::super::integrate::{integrate_spectral, integrate_xyz, irradiance_layer};
 use crate::caustics::map::ground_splat_weights;
 use crate::caustics::map::ground_to_pixel;
 use crate::config::RenderJob;
@@ -719,5 +721,182 @@ fn non_dispersive_glass_under_dispersion_mode_traces_single_pass_like_constant()
     assert_eq!(
         dispersion_xyz.caustics.pixels(),
         constant_xyz.caustics.pixels()
+    );
+}
+
+#[test]
+fn block_batch_size_respects_threads_block_count_and_memory_budget() {
+    assert_eq!(block_batch_size_for_threads(0, 512 * 512, 1, 8), 0);
+    // No temporary image buffers -> run all blocks without batching.
+    assert_eq!(block_batch_size_for_threads(64, 4096 * 4096, 0, 4), 64);
+    // 512x512 * 8 B = 2 MiB/block -> 64 MiB budget allows 32 blocks; capped by threads/total.
+    assert_eq!(block_batch_size_for_threads(32, 512 * 512, 1, 1), 1);
+    assert_eq!(block_batch_size_for_threads(32, 512 * 512, 1, 16), 16);
+    assert_eq!(block_batch_size_for_threads(3, 512 * 512, 1, 16), 3);
+    // 2048x2048 * 8 B = 32 MiB/block -> 64 MiB budget caps single-buffer batch at 2, dual at 1.
+    assert_eq!(block_batch_size_for_threads(64, 2048 * 2048, 1, 16), 2);
+    assert_eq!(block_batch_size_for_threads(64, 2048 * 2048, 2, 16), 1);
+    // Extreme pixel count or zero thread hint degrades cleanly to 1 without overflow.
+    assert_eq!(block_batch_size_for_threads(16, usize::MAX, 2, 8), 1);
+    assert_eq!(block_batch_size_for_threads(16, 64, 1, 0), 1);
+}
+
+#[test]
+fn batched_emission_and_parallel_irradiance_layer_are_bit_identical_across_threads() {
+    use crate::geometry::sphere::Sphere;
+    use crate::material::{dielectric::Dielectric, lambertian::Lambertian};
+    use crate::medium::{HomogeneousMedium, HomogeneousMediumConfig, MediumCoefficient};
+
+    let mut job = vertical_light_scene();
+    let target = job.scene.add(
+        Box::new(Sphere::new(Vector3::z(), 0.8).unwrap()),
+        Box::new(
+            Dielectric::with_dispersion(1.52, Some(crate::optics::dispersion::Cauchy::default()))
+                .unwrap(),
+        ),
+    );
+    let ground = job.scene.add(
+        Box::new(Ground::new(0.0).unwrap()),
+        Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()),
+    );
+    job.photon.ground_id = Some(ground);
+    job.select_caustics_object(target).unwrap();
+
+    // 16 blocks with 1 / 2 / 4 threads exercise 16 / 8 / 4 batched reductions and scratch reuse.
+    let constant_settings = RenderSetting {
+        width: 12,
+        height: 16,
+        samples_per_pixel_axis: 2,
+        mode: IorMode::Constant,
+        max_spectral_blocks: 16,
+        ..Default::default()
+    };
+    let bits_xyz = |pixels: &[Vector3<f64>]| -> Vec<[u64; 3]> {
+        pixels
+            .iter()
+            .map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()])
+            .collect()
+    };
+    let bits_f64 = |values: &[f64]| -> Vec<u64> { values.iter().map(|v| v.to_bits()).collect() };
+
+    let mut ref_xyz_direct = None;
+    let mut ref_xyz_caustics = None;
+    let mut ref_atlas_layer = None;
+    for threads in [1, 2, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let xyz = pool
+            .install(|| integrate_xyz(&job, Some(target), ground, &constant_settings))
+            .unwrap();
+        let direct_bits = bits_xyz(xyz.direct.as_ref().unwrap().pixels());
+        let caustics_bits = bits_xyz(xyz.caustics.pixels());
+        assert!(
+            xyz.direct
+                .as_ref()
+                .unwrap()
+                .pixels()
+                .iter()
+                .any(|p| p.y > 0.0)
+        );
+        assert!(xyz.caustics.pixels().iter().any(|p| p.y > 0.0));
+        if let Some(expected) = &ref_xyz_direct {
+            assert_eq!(&direct_bits, expected);
+        } else {
+            ref_xyz_direct = Some(direct_bits);
+        }
+        if let Some(expected) = &ref_xyz_caustics {
+            assert_eq!(&caustics_bits, expected);
+        } else {
+            ref_xyz_caustics = Some(caustics_bits);
+        }
+
+        let atlas = pool
+            .install(|| integrate_spectral(&job, &constant_settings))
+            .unwrap()
+            .unwrap();
+        let layer_bits = bits_f64(atlas.layer_irradiance(0).unwrap());
+        assert!(atlas.layer_irradiance(0).unwrap().iter().any(|&v| v > 0.0));
+        if let Some(expected) = &ref_atlas_layer {
+            assert_eq!(&layer_bits, expected);
+        } else {
+            ref_atlas_layer = Some(layer_bits);
+        }
+    }
+
+    // Exercise parallel=true vs parallel=false in irradiance_layer across 1/2/4 threads
+    // when both spectral caustics and spectral direct hits are active.
+    job.scene.medium = Some(Box::new(
+        HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+            min_m: [-10.0; 3],
+            max_m: [10.0; 3],
+            sigma_a: MediumCoefficient::Curve {
+                samples: vec![[380.0, 0.8], [780.0, 0.1]],
+            },
+            sigma_s: 0.0.into(),
+            g: 0.0.into(),
+        })
+        .unwrap(),
+    ));
+    let spectral_settings = RenderSetting {
+        mode: IorMode::Dispersion,
+        ..constant_settings.clone()
+    };
+    let plan = PhotonPlan::new(&job, &spectral_settings, Some(target), ground, true).unwrap();
+    assert!(plan.fixed_direct.is_none());
+    assert!(plan.fixed_caustics.is_none());
+    let serial =
+        irradiance_layer(&job, &spectral_settings, &plan, 550.0, true, true, false).unwrap();
+    let serial_caustics = bits_f64(serial.caustics.as_deref().unwrap());
+    let serial_direct = bits_f64(serial.direct.as_deref().unwrap());
+    assert!(serial.caustics.as_deref().unwrap().iter().any(|&v| v > 0.0));
+    assert!(serial.direct.as_deref().unwrap().iter().any(|&v| v > 0.0));
+    for threads in [1, 2, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let parallel = pool
+            .install(|| irradiance_layer(&job, &spectral_settings, &plan, 550.0, true, true, true))
+            .unwrap();
+        assert_eq!(
+            bits_f64(parallel.caustics.as_deref().unwrap()),
+            serial_caustics
+        );
+        assert_eq!(bits_f64(parallel.direct.as_deref().unwrap()), serial_direct);
+    }
+
+    // Single-pass caustics with zero hits keeps fixed_caustics lazily None and yields zero atlas.
+    let mut missed = vertical_light_scene();
+    let far_target = missed.scene.add(
+        Box::new(Sphere::new(Vector3::new(100.0, 0.0, 1.0), 0.5).unwrap()),
+        Box::new(Dielectric::new(1.5).unwrap()),
+    );
+    let missed_ground = missed.scene.add(
+        Box::new(Ground::new(0.0).unwrap()),
+        Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()),
+    );
+    missed.photon.ground_id = Some(missed_ground);
+    missed.select_caustics_object(far_target).unwrap();
+    let missed_plan = PhotonPlan::new(
+        &missed,
+        &constant_settings,
+        Some(far_target),
+        missed_ground,
+        false,
+    )
+    .unwrap();
+    assert!(missed_plan.fixed_direct.is_none());
+    assert!(missed_plan.fixed_caustics.is_none());
+    let missed_atlas = integrate_spectral(&missed, &constant_settings)
+        .unwrap()
+        .unwrap();
+    assert!(
+        missed_atlas
+            .layer_irradiance(0)
+            .unwrap()
+            .iter()
+            .all(|&v| v == 0.0)
     );
 }

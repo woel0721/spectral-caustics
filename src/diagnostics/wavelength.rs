@@ -70,7 +70,7 @@ pub fn render_fixed_wavelength_camera(
         });
     }
     let has_environment = scene.scene.environment.is_some();
-    let has_medium = scene.scene.medium.is_some();
+    let has_medium = scene.scene.has_medium();
     let strip_pixels = pixel_count.clamp(1, 4096);
     let strip_len = strip_pixels
         .checked_mul(lanes)

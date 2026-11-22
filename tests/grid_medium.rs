@@ -118,6 +118,8 @@ fn camera_rejects_invalid_custom_medium_samples_before_accumulating_radiance() {
     let origin = Vector3::z() * 2.0;
     let invalid_sample = "invalid medium sample";
     let endpoint = "rounds to a ray segment endpoint";
+    let outside = "lies outside the ray segment";
+    let off_ray = "lies off the ray";
     for (weight, position, budget, expected_error) in [
         (-1.0, None, 1, invalid_sample),
         (f64::NAN, None, 1, invalid_sample),
@@ -126,6 +128,9 @@ fn camera_rejects_invalid_custom_medium_samples_before_accumulating_radiance() {
         (1.0, Some(Vector3::z()), 0, invalid_sample),
         (1.0, Some(origin), 1, endpoint),
         (1.0, Some(Vector3::zeros()), 1, endpoint),
+        (1.0, Some(Vector3::z() * 2.5), 1, outside),
+        (1.0, Some(-Vector3::z() * 0.5), 1, outside),
+        (1.0, Some(Vector3::new(0.5, 0.0, 1.0)), 1, off_ray),
     ] {
         job.camera_options.max_volume_scatters = budget;
         job.scene.medium = Some(Box::new(CustomMedium {
