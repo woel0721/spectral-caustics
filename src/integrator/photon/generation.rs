@@ -187,7 +187,9 @@ impl PhotonPlan {
                     distance: hit.distance,
                 };
                 if hit.object_id == ground {
-                    if let Some(direct) = &mut block.direct {
+                    if let Some(direct) = &mut block.direct
+                        && hit.is_front_face(ray.direction)
+                    {
                         if let Some(tr) = fixed_transmittance(job, segment)? {
                             deposit(
                                 &mut direct.fixed,

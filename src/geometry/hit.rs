@@ -14,3 +14,10 @@ pub struct Hit {
     pub object_id: usize,
     pub material_id: usize,
 }
+
+impl Hit {
+    /// True when the ray approaches the surface from its outward side.
+    pub(crate) fn is_front_face(&self, incoming: Vector3<f64>) -> bool {
+        incoming.dot(&self.normal) < 0.0
+    }
+}

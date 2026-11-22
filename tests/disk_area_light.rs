@@ -247,6 +247,37 @@ fn finite_light_workload_counts_every_camera_path_before_rendering() {
 }
 
 #[test]
+fn photon_direct_preview_rejects_the_back_of_the_receiver() {
+    let mut scene = ground_scene(0.5);
+    scene.scene.light = DiskAreaLight::new(-Vector3::z() * 2.0, Vector3::z(), 0.5, 20.0)
+        .unwrap()
+        .into();
+    scene.photon.receiver.min_m = [-1e6; 2].into();
+    scene.photon.receiver.max_m = [1e6; 2].into();
+    let settings = RenderSetting {
+        width: 8,
+        height: 8,
+        samples_per_pixel_axis: 1,
+        ..Default::default()
+    };
+    let light = spectral_caustics::integrator::photon::integrate_xyz(
+        &scene,
+        None,
+        scene.photon.ground_id.unwrap(),
+        &settings,
+    )
+    .unwrap();
+    assert!(
+        light
+            .direct
+            .unwrap()
+            .pixels()
+            .iter()
+            .all(|pixel| *pixel == Vector3::zeros())
+    );
+}
+
+#[test]
 fn emitted_ground_flux_matches_fixed_spd_and_quadrature_for_all_radii_and_counts() {
     let mut scene_config = SceneConfig {
         environment: None,
