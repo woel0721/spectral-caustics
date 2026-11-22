@@ -26,6 +26,7 @@ use support::assert_camera_images_bits_eq;
 struct CustomMedium {
     inner: HomogeneousMedium,
     sample_override: Option<MediumSample>,
+    transmittance_override: Option<f64>,
 }
 
 impl Medium for CustomMedium {
@@ -42,8 +43,10 @@ impl Medium for CustomMedium {
         self.inner.phase(wavelength_nm)
     }
     fn transmittance_ray(&self, ray: &Ray, max_distance: f64, wavelength_nm: f64) -> f64 {
-        self.inner
-            .transmittance_ray(ray, max_distance, wavelength_nm)
+        self.transmittance_override.unwrap_or_else(|| {
+            self.inner
+                .transmittance_ray(ray, max_distance, wavelength_nm)
+        })
     }
     fn sample_segment(
         &self,
@@ -87,6 +90,7 @@ fn custom_medium_runs_rgb_hero_packet_in_parallel_without_a_config_variant() {
         job.scene.medium = Some(Box::new(CustomMedium {
             inner: HomogeneousMedium::try_from(&coefficients).unwrap(),
             sample_override: None,
+            transmittance_override: None,
         }));
         let custom = renderer.render(&job).unwrap();
         assert_eq!(custom.direct.pixels(), builtin.direct.pixels());
@@ -106,19 +110,30 @@ fn camera_rejects_invalid_custom_medium_samples_before_accumulating_radiance() {
     })
     .unwrap();
     let mut job = RenderJob::new();
-    for (weight, position, budget) in [
-        (-1.0, None, 1),
-        (f64::NAN, None, 1),
-        (f64::INFINITY, None, 1),
-        (1.0, Some(Vector3::repeat(f64::NAN)), 1),
-        (1.0, Some(Vector3::zeros()), 0),
+    job.scene.environment = None;
+    job.scene.add(
+        Box::new(Ground::new(0.0).unwrap()),
+        Box::new(Lambertian::new(Vector3::repeat(0.5)).unwrap()),
+    );
+    let origin = Vector3::z() * 2.0;
+    let invalid_sample = "invalid medium sample";
+    let endpoint = "rounds to a ray segment endpoint";
+    for (weight, position, budget, expected_error) in [
+        (-1.0, None, 1, invalid_sample),
+        (f64::NAN, None, 1, invalid_sample),
+        (f64::INFINITY, None, 1, invalid_sample),
+        (1.0, Some(Vector3::repeat(f64::NAN)), 1, invalid_sample),
+        (1.0, Some(Vector3::z()), 0, invalid_sample),
+        (1.0, Some(origin), 1, endpoint),
+        (1.0, Some(Vector3::zeros()), 1, endpoint),
     ] {
         job.camera_options.max_volume_scatters = budget;
         job.scene.medium = Some(Box::new(CustomMedium {
             inner: inner.clone(),
             sample_override: Some(MediumSample { position, weight }),
+            transmittance_override: None,
         }));
-        let mut rgb = CameraPathState::new(Ray::new(Vector3::z() * 2.0, -Vector3::z()).unwrap(), 0);
+        let mut rgb = CameraPathState::new(Ray::new(origin, -Vector3::z()).unwrap(), 0);
         let mut scalar = CameraPathState::spectral(rgb.ray, 550.0, 0).unwrap();
         let mut rng = StdRng::seed_from_u64(42);
         let mut untouched = rng.clone();
@@ -126,18 +141,47 @@ fn camera_rejects_invalid_custom_medium_samples_before_accumulating_radiance() {
             trace(&job, &mut rgb, 0.0, &mut rng)
                 .unwrap_err()
                 .to_string()
-                .contains("invalid medium sample")
+                .contains(expected_error)
         );
         assert!(
             trace(&job, &mut scalar, 0.0, &mut rng)
                 .unwrap_err()
                 .to_string()
-                .contains("invalid medium sample")
+                .contains(expected_error)
         );
         assert_eq!(rgb.radiance.direct, Vector3::zeros());
         assert_eq!(scalar.radiance.direct, 0.0);
         assert_eq!(rng.next_u64(), untouched.next_u64());
     }
+}
+
+#[test]
+fn camera_rejects_out_of_range_shadow_transmittance() {
+    let mut job = RenderJob::new();
+    job.scene.environment = None;
+    job.scene.add(
+        Box::new(Ground::new(0.0).unwrap()),
+        Box::new(Lambertian::new(Vector3::repeat(0.5)).unwrap()),
+    );
+    let inner = HomogeneousMedium::try_from(&HomogeneousMediumConfig {
+        min_m: [-1.0; 3],
+        max_m: [1.0; 3],
+        sigma_a: 0.0.into(),
+        sigma_s: 0.0.into(),
+        g: 0.0.into(),
+    })
+    .unwrap();
+    job.scene.medium = Some(Box::new(CustomMedium {
+        inner,
+        sample_override: None,
+        transmittance_override: Some(1.1),
+    }));
+    let ray = Ray::new(Vector3::z() * 2.0, -Vector3::z()).unwrap();
+    let mut rgb = CameraPathState::new(ray, 0);
+    let mut rng = StdRng::seed_from_u64(42);
+    let err = trace(&job, &mut rgb, 1.0, &mut rng).unwrap_err();
+    assert_eq!(err.to_string(), "invalid medium transmittance");
+    assert_eq!(rgb.radiance.direct, Vector3::zeros());
 }
 
 fn layers(a: f64, s: f64) -> GridMediumConfig {

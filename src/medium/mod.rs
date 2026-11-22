@@ -45,8 +45,9 @@ pub trait Medium: Send + Sync {
     /// Deterministic transmittance in [0, 1] from the ray origin up to max_distance.
     fn transmittance_ray(&self, ray: &Ray, max_distance: f64, wavelength_nm: f64) -> f64;
 
-    /// Return a position on the input ray within the clipped segment and a finite,
-    /// nonnegative compensated weight, or a segment weight without a collision.
+    /// Return a real collision on the input ray, strictly between the ray origin
+    /// and any finite segment endpoint, or a segment weight without a collision.
+    /// The compensated weight must be finite and nonnegative in either case.
     /// Return only real scattering events; null events do not escape this method.
     /// Respect allow_scattering;
     /// deterministic extinction must not consume RNG or use an incorrect distance PDF.
@@ -58,6 +59,19 @@ pub trait Medium: Send + Sync {
         allow_scattering: bool,
         rng: &mut dyn RngCore,
     ) -> Result<MediumSample, String>;
+}
+
+pub(crate) fn checked_transmittance(
+    medium: &dyn Medium,
+    ray: &Ray,
+    max_distance: f64,
+    wavelength_nm: f64,
+) -> Result<f64, &'static str> {
+    let tr = medium.transmittance_ray(ray, max_distance, wavelength_nm);
+    if !(0.0..=1.0).contains(&tr) {
+        return Err("invalid medium transmittance");
+    }
+    Ok(tr)
 }
 
 /// Used only for achromatic transport, where the query wavelength has no effect.
