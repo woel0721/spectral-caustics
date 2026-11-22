@@ -283,7 +283,7 @@ impl PhotonTracer {
             };
             if current.object_id == self.ground_id
                 && state.medium == PhotonMedium::Air
-                && state.ray.direction.dot(&current.normal) < 0.0
+                && current.is_front_face(state.ray.direction)
             {
                 break PhotonTermination::Ground(current.coords);
             }
