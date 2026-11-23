@@ -1,7 +1,7 @@
 //! Irradiance data and receiver layout; no photon transport lives here.
 pub mod map;
 use crate::film::Framebuffer;
-pub use map::{SpectralCausticsMap, ground_to_pixel};
+pub use map::{LayerIrradiance, SpectralCausticsMap, ground_to_pixel};
 use nalgebra::{Vector2, Vector3};
 use std::error::Error;
 pub struct SpectralLighting {

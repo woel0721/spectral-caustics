@@ -30,7 +30,7 @@ fn wavelength_lighting(
     let cmf = spectral_caustics::spectrum::cie_xyz(wavelength_nm).ok_or("invalid wavelength")?;
     let (width, height) = atlas.dimensions();
     let mut caustics = Framebuffer::new(width, height)?;
-    for (p, &e) in caustics
+    for (p, e) in caustics
         .pixels_mut()
         .iter_mut()
         .zip(atlas.layer_irradiance(index).unwrap())

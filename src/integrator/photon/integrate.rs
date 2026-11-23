@@ -11,7 +11,7 @@ use super::{
     photon_tracer,
 };
 use crate::{
-    caustics::{SpectralCausticsMap, SpectralLighting},
+    caustics::{SpectralCausticsMap, SpectralLighting, map::SpectralAtlasStorage},
     config::{RenderJob, render::RenderSetting},
     film::Framebuffer,
     geometry::hit::Hit,
@@ -71,7 +71,7 @@ fn trace_block_caustics(
                 material_id,
             };
             let state = PhotonPathState::new(segment.ray, segment.region, tracer.object_id, tr);
-            let mut events = event_rng_from_base(&plan.base_events, index);
+            let mut events = event_rng_from_base(plan.base_seed, index);
             let path = if plan.max_volume_scatters == 0 {
                 tracer.trace_state(job, state, Some(hit), &mut events, transmittance)?
             } else {
@@ -419,21 +419,13 @@ pub fn integrate_spectral(
     if material.irradiance_reflectance().is_none() {
         return Err("caustics require a Lambertian receiver".into());
     }
-    let nodes = settings.wavelength_samples()?;
-    settings
-        .width
-        .checked_mul(settings.height)
-        .and_then(|n| n.checked_mul(nodes.len()))
-        .and_then(|n| n.checked_mul(size_of::<f64>()))
-        .filter(|&n| n <= isize::MAX as usize)
-        .ok_or("atlas size overflow")?;
-    let plan = PhotonPlan::new(job, settings, Some(target), ground, false)?;
+    let plan = PhotonPlan::new_atlas(job, settings, target, ground)?;
     let count = plan.width * plan.height;
-    let mut layers = Vec::new();
-    layers
-        .try_reserve_exact(plan.nodes.len())
-        .map_err(|_| "cannot allocate photon irradiance buffer")?;
-    if plan.spectral_caustics {
+    let storage = if plan.spectral_caustics {
+        let mut layers = Vec::new();
+        layers
+            .try_reserve_exact(plan.nodes.len())
+            .map_err(|_| "cannot allocate photon irradiance buffer")?;
         // Atlas layers are returned to the caller. Only the scratch pool is temporary.
         let wavelength_batch = irradiance_batch_size(
             plan.nodes.len(),
@@ -465,23 +457,24 @@ pub fn integrate_spectral(
                 layers.push(trace_layer(nm, &mut scratch)?);
             }
         }
+        SpectralAtlasStorage::PerWavelength(layers)
     } else {
-        layers.resize_with(plan.nodes.len(), Vec::new);
-        plan.nodes
-            .par_iter()
-            .zip(layers.par_iter_mut())
-            .try_for_each(|(&(nm, _), layer)| -> Result<(), PhotonError> {
-                if let Some(fixed) = &plan.fixed_caustics {
-                    layer
-                        .try_reserve_exact(fixed.len())
-                        .map_err(|_| "cannot allocate photon irradiance buffer")?;
-                    layer.extend_from_slice(fixed);
-                } else {
-                    *layer = alloc_zeroed_irradiance(count)?;
-                }
-                scale_irradiance(layer, plan.source_density(nm))
-            })?;
-    }
+        let mut node_densities = Vec::new();
+        node_densities
+            .try_reserve_exact(plan.nodes.len())
+            .map_err(|_| "cannot allocate spectral node densities")?;
+        node_densities.extend(plan.nodes.iter().map(|&(nm, _)| plan.source_density(nm)));
+        if let Some(base) = &plan.fixed_caustics {
+            let max_density = node_densities.iter().copied().fold(0.0, f64::max);
+            if base.iter().any(|&value| !(value * max_density).is_finite()) {
+                return Err("spectral irradiance overflow".into());
+            }
+        }
+        SpectralAtlasStorage::ScaledSingle {
+            base: plan.fixed_caustics,
+            node_densities,
+        }
+    };
     Ok(Some(SpectralCausticsMap {
         width: plan.width,
         height: plan.height,
@@ -489,7 +482,7 @@ pub fn integrate_spectral(
         ground_id: ground,
         mode: settings.mode,
         samples: plan.nodes,
-        layers,
+        storage,
     }))
 }
 

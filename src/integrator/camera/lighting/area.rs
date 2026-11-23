@@ -6,13 +6,14 @@ use crate::{
     geometry::{hit::Hit, ray::Ray},
     material::{Material, unit_vector},
     medium::Medium,
+    sampling::rng::RenderRng,
 };
 use nalgebra::Vector3;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{Rng, SeedableRng};
 use std::error::Error;
 pub struct AreaLightSampler {
     seed: Option<u64>,
-    rng: Option<StdRng>,
+    rng: Option<RenderRng>,
     has_medium_interface: bool,
 }
 impl AreaLightSampler {
@@ -40,7 +41,9 @@ impl AreaLightSampler {
         let Some(seed) = self.seed else {
             return Ok(result);
         };
-        let rng = self.rng.get_or_insert_with(|| StdRng::seed_from_u64(seed));
+        let rng = self
+            .rng
+            .get_or_insert_with(|| RenderRng::seed_from_u64(seed));
         let disk = job.scene.light.as_disk().expect("disk-bound sampler");
         let normal = unit_vector(hit.normal).ok_or("invalid surface normal")?;
         let emission = transport.disk_emission();

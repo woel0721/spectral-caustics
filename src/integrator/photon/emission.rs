@@ -10,14 +10,17 @@ use crate::{
     config::{RenderJob, render::RenderSetting},
     geometry::{hit::Hit, ray::Ray},
     medium::ACHROMATIC_QUERY_NM,
+    sampling::rng::{RenderRng, pixel_seed},
     scene::MediumRegion,
     spectrum::d65_spd,
 };
 use nalgebra::Vector3;
 use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha12Rng;
 use rayon::prelude::*;
 use std::ops::Range;
+
+const PHOTON_EVENT_STREAM: u64 = 0x7068_6f74_6f6e_0001;
+const PHOTON_EMISSION_ROW_STREAM: u64 = 0xc274_b10a_8d53_91ef;
 
 /// Soft byte cap for concurrent temporary scalar irradiance buffers.
 pub(super) const BLOCK_SCRATCH_BUDGET_BYTES: usize = 64 * 1024 * 1024;
@@ -132,7 +135,7 @@ impl CachedPaths {
         tracer: &PhotonTracer,
         segment: PhotonSegment,
         hit: Hit,
-        rng: &mut ChaCha12Rng,
+        rng: &mut RenderRng,
     ) -> Result<(), &'static str> {
         let start = self.segments.len();
         let mut record = |segment: PhotonSegment| {
@@ -176,7 +179,7 @@ pub(super) struct PhotonPlan {
     pub(super) uncached_target: Option<usize>,
     pub(super) ground: usize,
     pub(super) max_volume_scatters: usize,
-    pub(super) base_events: ChaCha12Rng,
+    pub(super) base_seed: u64,
 }
 
 struct PreparedPhotonPlan {
@@ -274,6 +277,36 @@ impl PhotonPlan {
         direct: bool,
     ) -> Result<Self, PhotonError> {
         let prepared = Self::validate_and_prepare(job, settings, target, ground)?;
+        Self::from_prepared(job, settings, prepared, direct)
+    }
+
+    pub(super) fn new_atlas(
+        job: &RenderJob,
+        settings: &RenderSetting,
+        target: usize,
+        ground: usize,
+    ) -> Result<Self, PhotonError> {
+        let prepared = Self::validate_and_prepare(job, settings, Some(target), ground)?;
+        let layers = if prepared.spectral_caustics {
+            prepared.nodes.len()
+        } else {
+            1
+        };
+        prepared
+            .pixels
+            .checked_mul(layers)
+            .and_then(|n| n.checked_mul(size_of::<f64>()))
+            .filter(|&n| n <= isize::MAX as usize)
+            .ok_or("atlas size overflow")?;
+        Self::from_prepared(job, settings, prepared, false)
+    }
+
+    fn from_prepared(
+        job: &RenderJob,
+        settings: &RenderSetting,
+        prepared: PreparedPhotonPlan,
+        direct: bool,
+    ) -> Result<Self, PhotonError> {
         let fixed_tracer = if prepared.cache_spectral_segments || prepared.single_pass_caustics {
             photon_tracer(
                 job,
@@ -311,14 +344,8 @@ impl PhotonPlan {
         } = prepared;
         let dimensions = [settings.width, settings.height];
         let receiver = &job.photon.receiver;
-        let base_events = ChaCha12Rng::seed_from_u64(settings.seed);
-        let mut sample_blocks = spectral_sample_blocks(
-            nx,
-            ny,
-            settings.seed,
-            settings.max_spectral_blocks,
-            job.scene.light.emission_dimensions(),
-        );
+        let base_seed = settings.seed;
+        let sample_blocks = spectral_sample_blocks(ny, settings.max_spectral_blocks);
         let active_buffers = usize::from(direct) + usize::from(single_pass_caustics);
         let batch_size = block_batch_size(sample_blocks.len(), pixels, active_buffers).max(1);
         let mut blocks = Vec::with_capacity(sample_blocks.len());
@@ -326,13 +353,13 @@ impl PhotonPlan {
         let mut fixed_caustics: Option<Vec<f64>> = None;
         let mut direct_scratch: Vec<Option<Vec<f64>>> = vec![None; batch_size];
         let mut caustics_scratch: Vec<Option<Vec<f64>>> = vec![None; batch_size];
-        for chunk in sample_blocks.chunks_mut(batch_size) {
+        for chunk in sample_blocks.chunks(batch_size) {
             let len = chunk.len();
             let batch_blocks: Result<Vec<_>, PhotonError> = chunk
-                .par_iter_mut()
+                .par_iter()
                 .zip(direct_scratch[..len].par_iter_mut())
                 .zip(caustics_scratch[..len].par_iter_mut())
-                .map(|(((rows, rng), direct_slot), caustics_slot)| {
+                .map(|((rows, direct_slot), caustics_slot)| {
                     let mut block = EmissionBlock {
                         hits: Vec::new(),
                         paths: CachedPaths::default(),
@@ -345,7 +372,7 @@ impl PhotonPlan {
                         nx,
                         ny,
                         rows.clone(),
-                        rng,
+                        base_seed,
                         |index, ray, hit, region| {
                             let segment = PhotonSegment {
                                 ray,
@@ -378,7 +405,7 @@ impl PhotonPlan {
                             } else if Some(hit.object_id) == target {
                                 if cache_spectral_segments {
                                     let tracer = fixed_tracer.as_ref().expect("cached tracer");
-                                    let mut events = event_rng_from_base(&base_events, index);
+                                    let mut events = event_rng_from_base(base_seed, index);
                                     block.paths.trace(job, tracer, segment, hit, &mut events)?;
                                 } else if single_pass_caustics {
                                     let tracer = fixed_tracer.as_ref().expect("single-pass tracer");
@@ -390,7 +417,7 @@ impl PhotonPlan {
                                         tracer.object_id,
                                         tr,
                                     );
-                                    let mut events = event_rng_from_base(&base_events, index);
+                                    let mut events = event_rng_from_base(base_seed, index);
                                     let path = if settings.photon_max_volume_scatters == 0 {
                                         tracer.trace_state(
                                             job,
@@ -480,7 +507,7 @@ impl PhotonPlan {
             },
             ground,
             max_volume_scatters: settings.photon_max_volume_scatters,
-            base_events,
+            base_seed,
             blocks,
             fixed_direct,
             fixed_caustics,
@@ -501,10 +528,8 @@ fn fixed_transmittance(
     }
 }
 
-pub(super) fn event_rng_from_base(base: &ChaCha12Rng, index: usize) -> ChaCha12Rng {
-    let mut rng = base.clone();
-    rng.set_stream((index as u64) ^ 0x7068_6f74_6f6e_0001);
-    rng
+pub(super) fn event_rng_from_base(base_seed: u64, index: usize) -> RenderRng {
+    RenderRng::seed_from_u64(pixel_seed(base_seed, index, PHOTON_EVENT_STREAM))
 }
 
 pub(super) fn deposit(
@@ -533,35 +558,24 @@ pub(super) fn deposit(
     Ok(())
 }
 
-pub(super) fn spectral_sample_blocks(
-    samples_x: usize,
-    samples_y: usize,
-    seed: u64,
-    max_blocks: usize,
-    random_dimensions: usize,
-) -> Vec<(Range<usize>, ChaCha12Rng)> {
+pub(super) fn spectral_sample_blocks(samples_y: usize, max_blocks: usize) -> Vec<Range<usize>> {
     let rows_per_block = samples_y.div_ceil(max_blocks);
-    let mut blocks = Vec::new();
-    for start in (0..samples_y).step_by(rows_per_block) {
-        let end = start.saturating_add(rows_per_block).min(samples_y);
-        let mut rng = ChaCha12Rng::seed_from_u64(seed);
-        // 一个 f64 消耗两个 u32 word；平行光两维、圆盘位置/方向共四维。
-        // u128 避免大采样数在 usize 中溢出。
-        let first_sample = start as u128 * samples_x as u128;
-        rng.set_word_pos(first_sample * random_dimensions as u128 * 2);
-        blocks.push((start..end, rng));
-    }
-    blocks
+    (0..samples_y)
+        .step_by(rows_per_block)
+        .map(|start| start..start.saturating_add(rows_per_block).min(samples_y))
+        .collect()
 }
 
-fn for_each_emitted_hit(
+pub(super) fn for_each_emitted_hit(
     scene: &RenderJob,
     samples_x: usize,
     samples_y: usize,
     rows: Range<usize>,
-    rng: &mut ChaCha12Rng,
+    seed: u64,
     mut visit: impl FnMut(usize, Ray, Hit, MediumRegion) -> Result<(), PhotonError>,
 ) -> Result<(), PhotonError> {
+    // Rows replay identically even when the execution blocks are regrouped.
+    let row_rng = |y| RenderRng::seed_from_u64(pixel_seed(seed, y, PHOTON_EMISSION_ROW_STREAM));
     let has_medium_interface = scene.scene.has_medium_interface();
     match &scene.scene.light {
         crate::light::Light::Parallel(light) => {
@@ -571,6 +585,7 @@ fn for_each_emitted_hit(
             let min = light.aperture_min_m;
             let z = light.height_m;
             for sample_y in rows {
+                let mut rng = row_rng(sample_y);
                 for sample_x in 0..samples_x {
                     let ux = (sample_x as f64 + rng.random::<f64>()) / samples_x as f64;
                     let uy = (sample_y as f64 + rng.random::<f64>()) / samples_y as f64;
@@ -592,6 +607,7 @@ fn for_each_emitted_hit(
         }
         crate::light::Light::DiskArea(disk) => {
             for sample_y in rows {
+                let mut rng = row_rng(sample_y);
                 for sample_x in 0..samples_x {
                     let u = [
                         (sample_x as f64 + rng.random::<f64>()) / samples_x as f64,

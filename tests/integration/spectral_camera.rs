@@ -755,7 +755,6 @@ fn fixed_wavelength_camera_is_thread_invariant_and_rejects_invalid_work() {
 
 #[test]
 fn packet_one_keeps_independent_seeded_primary_sampling() {
-    use rand::Rng;
     let (scene, records) = packet_probe_scene(false);
     let reference = spectral_caustics::integrator::camera::integrate_spectral(
         &scene,
@@ -772,21 +771,35 @@ fn packet_one_keeps_independent_seeded_primary_sampling() {
     )
     .map(|images| images.combined)
     .unwrap();
-    // pixel_seed(42, 0, CAMERA_STREAM=0) 的原种子；波长流和路径流不能扰动抖动。
-    let mut jitter = StdRng::seed_from_u64(12058926934050108962);
-    for &(_, wo, _) in records.lock().unwrap().iter() {
-        let ray = scene
-            .camera
-            .ray_for_pixel_sample(
-                0,
-                0,
-                1,
-                1,
-                nalgebra::Vector2::new(jitter.random(), jitter.random()),
-            )
+    // Evaluate the first seven R2 points in floating point with the known pixel shift.
+    let shift = nalgebra::Vector2::new(0.6537157389870545, 0.47077132931763355);
+    let step = nalgebra::Vector2::new(0.754_877_666_246_692_7, 0.569_840_290_998_053_2);
+    let directions: Vec<_> = (0..7)
+        .map(|k| {
+            let offset = (shift + step * f64::from(k)).map(f64::fract);
+            -scene
+                .camera
+                .ray_for_pixel_sample(0, 0, 1, 1, offset)
+                .unwrap()
+                .direction
+        })
+        .collect();
+    let mut used = Vec::new();
+    let logged = records.lock().unwrap();
+    assert_eq!(logged.len(), 7);
+    for (i, &(nm, wo, _)) in logged.iter().enumerate() {
+        let lower = 380.0 + 400.0 * i as f64 / 7.0;
+        let upper = 380.0 + 400.0 * (i + 1) as f64 / 7.0;
+        assert!((lower..upper).contains(&nm));
+        let k = directions
+            .iter()
+            .position(|expected| (expected - wo).norm() < 1e-14)
             .unwrap();
-        assert_eq!(-ray.direction, wo);
+        assert!(!used.contains(&k));
+        used.push(k);
     }
+    assert_ne!(used, (0..7).collect::<Vec<_>>());
+    drop(logged);
     assert_framebuffer_bits_eq(
         &reference,
         &Renderer::new(RenderSetting {
