@@ -1,5 +1,9 @@
-use super::super::emission::{PhotonPlan, block_batch_size_for_threads, spectral_sample_blocks};
-use super::super::integrate::{integrate_spectral, integrate_xyz, irradiance_layer};
+use super::super::emission::{
+    BLOCK_SCRATCH_BUDGET_BYTES, PhotonPlan, irradiance_batch_size, spectral_sample_blocks,
+};
+use super::super::integrate::{
+    integrate_spectral, integrate_xyz, irradiance_layer, xyz_block_batch_size,
+};
 use crate::caustics::map::ground_splat_weights;
 use crate::caustics::map::ground_to_pixel;
 use crate::config::RenderJob;
@@ -588,19 +592,41 @@ fn non_dispersive_glass_under_dispersion_mode_traces_single_pass_like_constant()
 
 #[test]
 fn block_batch_size_respects_threads_block_count_and_memory_budget() {
-    assert_eq!(block_batch_size_for_threads(0, 512 * 512, 1, 8), 0);
+    let batch_size = |total, pixels, buffers, threads| {
+        irradiance_batch_size(total, pixels, buffers, BLOCK_SCRATCH_BUDGET_BYTES, threads)
+    };
+    assert_eq!(batch_size(0, 512 * 512, 1, 8), 0);
     // No temporary image buffers -> run all blocks without batching.
-    assert_eq!(block_batch_size_for_threads(64, 4096 * 4096, 0, 4), 64);
+    assert_eq!(batch_size(64, 4096 * 4096, 0, 4), 64);
     // 512x512 * 8 B = 2 MiB/block -> 64 MiB budget allows 32 blocks; capped by threads/total.
-    assert_eq!(block_batch_size_for_threads(32, 512 * 512, 1, 1), 1);
-    assert_eq!(block_batch_size_for_threads(32, 512 * 512, 1, 16), 16);
-    assert_eq!(block_batch_size_for_threads(3, 512 * 512, 1, 16), 3);
+    assert_eq!(batch_size(32, 512 * 512, 1, 1), 1);
+    assert_eq!(batch_size(32, 512 * 512, 1, 16), 16);
+    assert_eq!(batch_size(3, 512 * 512, 1, 16), 3);
     // 2048x2048 * 8 B = 32 MiB/block -> 64 MiB budget caps single-buffer batch at 2, dual at 1.
-    assert_eq!(block_batch_size_for_threads(64, 2048 * 2048, 1, 16), 2);
-    assert_eq!(block_batch_size_for_threads(64, 2048 * 2048, 2, 16), 1);
+    assert_eq!(batch_size(64, 2048 * 2048, 1, 16), 2);
+    assert_eq!(batch_size(64, 2048 * 2048, 2, 16), 1);
     // Extreme pixel count or zero thread hint degrades cleanly to 1 without overflow.
-    assert_eq!(block_batch_size_for_threads(16, usize::MAX, 2, 8), 1);
-    assert_eq!(block_batch_size_for_threads(16, 64, 1, 0), 1);
+    assert_eq!(batch_size(16, usize::MAX, 2, 8), 1);
+    assert_eq!(batch_size(16, 64, 1, 0), 1);
+}
+
+#[test]
+fn wavelength_and_xyz_fallback_batches_respect_temporary_buffer_budget() {
+    let wavelength_batch = |pixels, buffers| {
+        irradiance_batch_size(41, pixels, buffers, BLOCK_SCRATCH_BUDGET_BYTES, 16)
+    };
+    // A 1024² scalar layer uses 8 MiB. XYZ holds its temporary layers and
+    // scratch per wavelength, while the atlas counts only scratch.
+    assert_eq!(wavelength_batch(1024 * 1024, 1 + 1), 4);
+    assert_eq!(wavelength_batch(1024 * 1024, 2 + 1), 2);
+    assert_eq!(wavelength_batch(1024 * 1024, 1), 8);
+    assert_eq!(wavelength_batch(2048 * 2048, 2 + 1), 1);
+    assert_eq!(wavelength_batch(2048 * 2048, 1), 2);
+
+    // 16 MiB per buffer leaves 32 MiB for scratch after reserving two layers.
+    assert_eq!(xyz_block_batch_size(16, 2048 * 1024, 2, 16), 2);
+    assert_eq!(xyz_block_batch_size(16, 2048 * 2048, 2, 16), 1);
+    assert_eq!(xyz_block_batch_size(16, usize::MAX, 2, 16), 1);
 }
 
 #[test]
@@ -703,6 +729,7 @@ fn batched_emission_and_parallel_irradiance_layer_are_bit_identical_across_threa
     ));
     let spectral_settings = RenderSetting {
         mode: IorMode::Dispersion,
+        wavelength_step_nm: 100.0,
         ..constant_settings.clone()
     };
     let plan = PhotonPlan::new(&job, &spectral_settings, Some(target), ground, true).unwrap();
@@ -714,6 +741,11 @@ fn batched_emission_and_parallel_irradiance_layer_are_bit_identical_across_threa
     let serial_direct = bits_f64(serial.direct.as_deref().unwrap());
     assert!(serial.caustics.as_deref().unwrap().iter().any(|&v| v > 0.0));
     assert!(serial.direct.as_deref().unwrap().iter().any(|&v| v > 0.0));
+    // Five nodes give both wavelength-parallel batch sizes a short final chunk.
+    assert_eq!(plan.nodes.len(), 5);
+    assert!(plan.spectral_caustics && plan.spectral_extinction);
+    assert!(plan.blocks.len() > 1);
+    let mut reference = None;
     for threads in [1, 2, 4] {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
@@ -727,6 +759,54 @@ fn batched_emission_and_parallel_irradiance_layer_are_bit_identical_across_threa
             serial_caustics
         );
         assert_eq!(bits_f64(parallel.direct.as_deref().unwrap()), serial_direct);
+
+        // One thread selects block batching for each node. Two and four threads
+        // select wavelength batching for both integrations at this resolution.
+        for buffers in [3, 1] {
+            assert_eq!(
+                irradiance_batch_size(
+                    plan.nodes.len(),
+                    plan.width * plan.height,
+                    buffers,
+                    BLOCK_SCRATCH_BUDGET_BYTES,
+                    threads,
+                ),
+                threads
+            );
+        }
+        let (xyz, atlas) = pool.install(|| {
+            (
+                integrate_xyz(&job, Some(target), ground, &spectral_settings).unwrap(),
+                integrate_spectral(&job, &spectral_settings)
+                    .unwrap()
+                    .unwrap(),
+            )
+        });
+        let direct = xyz.direct.as_ref().unwrap();
+        assert!(direct.pixels().iter().any(|p| p.y > 0.0));
+        assert!(xyz.caustics.pixels().iter().any(|p| p.y > 0.0));
+        assert_eq!(atlas.wavelength_samples(), plan.nodes);
+        let atlas_bits: Vec<_> = (0..plan.nodes.len())
+            .map(|index| {
+                let layer = atlas.layer_irradiance(index).unwrap();
+                assert!(layer.iter().any(|&v| v > 0.0));
+                bits_f64(layer)
+            })
+            .collect();
+        assert_ne!(atlas_bits[0], atlas_bits[4]);
+        let bits = (
+            bits_xyz(direct.pixels()),
+            bits_xyz(xyz.caustics.pixels()),
+            atlas_bits,
+        );
+        if let Some(expected) = &reference {
+            assert_eq!(
+                &bits, expected,
+                "{threads} threads vs. 1-thread block batching"
+            );
+        } else {
+            reference = Some(bits);
+        }
     }
 
     // Single-pass caustics with zero hits keeps fixed_caustics lazily None and yields zero atlas.

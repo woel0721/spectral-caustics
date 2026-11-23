@@ -3,8 +3,9 @@
 use super::{
     PhotonError, PhotonTracer,
     emission::{
-        EmissionBlock, EmissionHit, PhotonPlan, accumulate_irradiance, alloc_zeroed_irradiance,
-        block_batch_size, deposit, event_rng_from_base, prepare_scratch_buffer,
+        BLOCK_SCRATCH_BUDGET_BYTES, EmissionBlock, EmissionHit, PhotonPlan, accumulate_irradiance,
+        alloc_zeroed_irradiance, block_batch_size, deposit, event_rng_from_base,
+        irradiance_batch_size, irradiance_buffer_bytes, prepare_scratch_buffer,
     },
     path::{PhotonPathState, PhotonSegment},
     photon_tracer,
@@ -119,6 +120,122 @@ fn trace_block_direct(
     Ok(())
 }
 
+impl IrradianceLayer {
+    fn new(count: usize, caustics: bool, direct: bool) -> Result<Self, PhotonError> {
+        Ok(Self {
+            caustics: caustics
+                .then(|| alloc_zeroed_irradiance(count))
+                .transpose()?,
+            direct: direct.then(|| alloc_zeroed_irradiance(count)).transpose()?,
+        })
+    }
+}
+
+#[derive(Default)]
+struct BlockScratch {
+    values: Option<Vec<f64>>,
+    written: bool,
+}
+
+fn trace_blocks(
+    plan: &PhotonPlan,
+    scratch: &mut [BlockScratch],
+    layer: &mut Option<Vec<f64>>,
+    contributes: impl Fn(&EmissionBlock) -> bool + Sync,
+    trace: impl Fn(&EmissionBlock, &mut [f64]) -> Result<(), PhotonError> + Sync,
+) -> Result<(), PhotonError> {
+    let trace_slot = |source: &EmissionBlock, slot: &mut BlockScratch| {
+        slot.written = false;
+        if contributes(source) {
+            let values = prepare_scratch_buffer(
+                &mut slot.values,
+                &mut slot.written,
+                plan.width * plan.height,
+            )?;
+            trace(source, values)?;
+        }
+        Ok::<_, PhotonError>(())
+    };
+    let mut reduce = |slot: &BlockScratch| -> Result<(), PhotonError> {
+        if slot.written {
+            accumulate_irradiance(layer, slot.values.as_deref().expect("written scratch"))?;
+        }
+        Ok(())
+    };
+    if let [slot] = scratch {
+        for source in &plan.blocks {
+            trace_slot(source, slot)?;
+            reduce(slot)?;
+        }
+    } else {
+        for chunk in plan.blocks.chunks(scratch.len()) {
+            let slots = &mut scratch[..chunk.len()];
+            chunk
+                .par_iter()
+                .zip(slots.par_iter_mut())
+                .try_for_each(|(source, slot)| trace_slot(source, slot))?;
+            for slot in slots {
+                reduce(slot)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn trace_wavelength(
+    job: &RenderJob,
+    settings: &RenderSetting,
+    plan: &PhotonPlan,
+    nm: f64,
+    layer: &mut IrradianceLayer,
+    scratch: &mut [BlockScratch],
+) -> Result<(), PhotonError> {
+    // The components are independent and share the same scratch pool.
+    if let Some(values) = &mut layer.caustics {
+        values.fill(0.0);
+        let tracer = photon_tracer(job, settings, plan.uncached_target, plan.ground, nm)?;
+        trace_blocks(
+            plan,
+            scratch,
+            &mut layer.caustics,
+            |source| {
+                !source.paths.landings.is_empty() || (tracer.is_some() && !source.hits.is_empty())
+            },
+            |source, values| trace_block_caustics(job, plan, source, tracer.as_ref(), nm, values),
+        )?;
+    }
+    if let Some(values) = &mut layer.direct {
+        match &plan.fixed_direct {
+            Some(fixed) => values.copy_from_slice(fixed),
+            None => values.fill(0.0),
+        }
+        trace_blocks(
+            plan,
+            scratch,
+            &mut layer.direct,
+            |source| !source.spectral_direct.is_empty(),
+            |source, values| trace_block_direct(job, plan, source, nm, values),
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn xyz_block_batch_size(
+    total_blocks: usize,
+    pixels: usize,
+    active_layers: usize,
+    threads: usize,
+) -> usize {
+    let remaining_budget =
+        BLOCK_SCRATCH_BUDGET_BYTES.saturating_sub(irradiance_buffer_bytes(pixels, active_layers));
+    irradiance_batch_size(total_blocks, pixels, 1, remaining_budget, threads).max(1)
+}
+
+fn scratch_pool(batch: usize) -> Vec<BlockScratch> {
+    (0..batch).map(|_| BlockScratch::default()).collect()
+}
+
+#[cfg(test)]
 pub(super) fn irradiance_layer(
     job: &RenderJob,
     settings: &RenderSetting,
@@ -129,110 +246,21 @@ pub(super) fn irradiance_layer(
     parallel: bool,
 ) -> Result<IrradianceLayer, PhotonError> {
     let count = plan.width * plan.height;
-    let tracer = if need_caustics {
-        photon_tracer(job, settings, plan.uncached_target, plan.ground, nm)?
+    let batch = if parallel {
+        block_batch_size(plan.blocks.len(), count, 1).max(1)
     } else {
-        None
+        1
     };
-    let mut caustics = need_caustics
-        .then(|| alloc_zeroed_irradiance(count))
-        .transpose()?;
-    let mut direct = need_direct
-        .then(|| match &plan.fixed_direct {
-            Some(fixed) => {
-                let mut cloned = Vec::new();
-                cloned
-                    .try_reserve_exact(fixed.len())
-                    .map_err(|_| "cannot allocate photon irradiance buffer")?;
-                cloned.extend_from_slice(fixed);
-                Ok(cloned)
-            }
-            None => alloc_zeroed_irradiance(count),
-        })
-        .transpose()?;
-    if parallel {
-        let active_buffers = usize::from(need_caustics) + usize::from(need_direct);
-        let batch_size = block_batch_size(plan.blocks.len(), count, active_buffers).max(1);
-        let mut caustics_scratch: Vec<Option<Vec<f64>>> = vec![None; batch_size];
-        let mut direct_scratch: Vec<Option<Vec<f64>>> = vec![None; batch_size];
-        for chunk in plan.blocks.chunks(batch_size) {
-            let len = chunk.len();
-            let written: Result<Vec<_>, PhotonError> = chunk
-                .par_iter()
-                .zip(caustics_scratch[..len].par_iter_mut())
-                .zip(direct_scratch[..len].par_iter_mut())
-                .map(|((source, caustics_slot), direct_slot)| {
-                    let mut wrote_caustics = false;
-                    if need_caustics
-                        && (!source.paths.landings.is_empty()
-                            || (tracer.is_some() && !source.hits.is_empty()))
-                    {
-                        let buf =
-                            prepare_scratch_buffer(caustics_slot, &mut wrote_caustics, count)?;
-                        trace_block_caustics(job, plan, source, tracer.as_ref(), nm, buf)?;
-                    }
-                    let mut wrote_direct = false;
-                    if need_direct && !source.spectral_direct.is_empty() {
-                        let buf = prepare_scratch_buffer(direct_slot, &mut wrote_direct, count)?;
-                        trace_block_direct(job, plan, source, nm, buf)?;
-                    }
-                    Ok((wrote_caustics, wrote_direct))
-                })
-                .collect();
-            for (slot_index, (wrote_caustics, wrote_direct)) in written?.into_iter().enumerate() {
-                if wrote_caustics {
-                    let src = caustics_scratch[slot_index]
-                        .as_deref()
-                        .expect("written caustics scratch");
-                    accumulate_irradiance(&mut caustics, src)?;
-                }
-                if wrote_direct {
-                    let src = direct_scratch[slot_index]
-                        .as_deref()
-                        .expect("written direct scratch");
-                    accumulate_irradiance(&mut direct, src)?;
-                }
-            }
-        }
-    } else {
-        let mut scratch = Vec::new();
-        for source in &plan.blocks {
-            if let Some(dst) = &mut caustics
-                && (!source.paths.landings.is_empty()
-                    || (tracer.is_some() && !source.hits.is_empty()))
-            {
-                if scratch.is_empty() {
-                    scratch = alloc_zeroed_irradiance(count)?;
-                } else {
-                    scratch.fill(0.0);
-                }
-                trace_block_caustics(job, plan, source, tracer.as_ref(), nm, &mut scratch)?;
-                for (a, &b) in dst.iter_mut().zip(&scratch) {
-                    *a += b;
-                    if !a.is_finite() {
-                        return Err("irradiance accumulation overflow".into());
-                    }
-                }
-            }
-            if let Some(dst) = &mut direct
-                && !source.spectral_direct.is_empty()
-            {
-                if scratch.is_empty() {
-                    scratch = alloc_zeroed_irradiance(count)?;
-                } else {
-                    scratch.fill(0.0);
-                }
-                trace_block_direct(job, plan, source, nm, &mut scratch)?;
-                for (a, &b) in dst.iter_mut().zip(&scratch) {
-                    *a += b;
-                    if !a.is_finite() {
-                        return Err("irradiance accumulation overflow".into());
-                    }
-                }
-            }
-        }
-    }
-    Ok(IrradianceLayer { direct, caustics })
+    let mut layer = IrradianceLayer::new(count, need_caustics, need_direct)?;
+    trace_wavelength(
+        job,
+        settings,
+        plan,
+        nm,
+        &mut layer,
+        &mut scratch_pool(batch),
+    )?;
+    Ok(layer)
 }
 
 fn accumulate_xyz(
@@ -295,18 +323,18 @@ fn integrate_xyz_impl(
     {
         accumulate_xyz(frame, fixed, white)?;
     }
-    if spectral_caustics || spectral_direct {
-        if plan.nodes.len() == 1 {
-            let (nm, width) = plan.nodes[0];
-            let layer = irradiance_layer(
-                job,
-                settings,
-                &plan,
-                nm,
-                spectral_caustics,
-                spectral_direct,
-                true,
-            )?;
+    let active_layers = usize::from(spectral_caustics) + usize::from(spectral_direct);
+    if active_layers > 0 {
+        let count = plan.width * plan.height;
+        let threads = rayon::current_num_threads();
+        let wavelength_batch = irradiance_batch_size(
+            plan.nodes.len(),
+            count,
+            active_layers + 1,
+            BLOCK_SCRATCH_BUDGET_BYTES,
+            threads,
+        );
+        let mut accumulate_layer = |(nm, width), layer: &IrradianceLayer| {
             let xyz =
                 cie_xyz(nm).expect("validated wavelength") * (plan.source_density(nm) * width);
             if let Some(values) = &layer.caustics {
@@ -315,35 +343,43 @@ fn integrate_xyz_impl(
             if let (Some(frame), Some(values)) = (&mut direct_frame, &layer.direct) {
                 accumulate_xyz(frame, values, xyz)?;
             }
-        } else {
-            // Parallelize across wavelength chunks while accumulating XYZ in fixed node order.
-            for chunk in plan.nodes.chunks(8) {
-                let batch: Result<Vec<_>, String> = chunk
-                    .par_iter()
-                    .map(|&(nm, width)| {
-                        let layer = irradiance_layer(
+            Ok::<_, PhotonError>(())
+        };
+        if wavelength_batch >= 2 {
+            let mut slots = (0..wavelength_batch)
+                .map(|_| {
+                    Ok((
+                        IrradianceLayer::new(count, spectral_caustics, spectral_direct)?,
+                        BlockScratch::default(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, PhotonError>>()?;
+            for chunk in plan.nodes.chunks(wavelength_batch) {
+                let slots = &mut slots[..chunk.len()];
+                chunk.par_iter().zip(slots.par_iter_mut()).try_for_each(
+                    |(&(nm, _), (layer, scratch))| {
+                        trace_wavelength(
                             job,
                             settings,
                             &plan,
                             nm,
-                            spectral_caustics,
-                            spectral_direct,
-                            false,
+                            layer,
+                            std::slice::from_mut(scratch),
                         )
-                        .map_err(|e| e.to_string())?;
-                        Ok((nm, width, layer))
-                    })
-                    .collect();
-                for (nm, width, layer) in batch? {
-                    let xyz = cie_xyz(nm).expect("validated wavelength")
-                        * (plan.source_density(nm) * width);
-                    if let Some(values) = &layer.caustics {
-                        accumulate_xyz(&mut caustics, values, xyz)?;
-                    }
-                    if let (Some(frame), Some(values)) = (&mut direct_frame, &layer.direct) {
-                        accumulate_xyz(frame, values, xyz)?;
-                    }
+                    },
+                )?;
+                for (&node, (layer, _)) in chunk.iter().zip(slots) {
+                    accumulate_layer(node, layer)?;
                 }
+            }
+        } else {
+            let block_batch =
+                xyz_block_batch_size(plan.blocks.len(), count, active_layers, threads);
+            let mut scratch = scratch_pool(block_batch);
+            let mut layer = IrradianceLayer::new(count, spectral_caustics, spectral_direct)?;
+            for &node in &plan.nodes {
+                trace_wavelength(job, settings, &plan, node.0, &mut layer, &mut scratch)?;
+                accumulate_layer(node, &layer)?;
             }
         }
     }
@@ -392,32 +428,60 @@ pub fn integrate_spectral(
         .filter(|&n| n <= isize::MAX as usize)
         .ok_or("atlas size overflow")?;
     let plan = PhotonPlan::new(job, settings, Some(target), ground, false)?;
-    let layers: Result<Vec<_>, String> =
+    let count = plan.width * plan.height;
+    let mut layers = Vec::new();
+    layers
+        .try_reserve_exact(plan.nodes.len())
+        .map_err(|_| "cannot allocate photon irradiance buffer")?;
+    if plan.spectral_caustics {
+        // Atlas layers are returned to the caller. Only the scratch pool is temporary.
+        let wavelength_batch = irradiance_batch_size(
+            plan.nodes.len(),
+            count,
+            1,
+            BLOCK_SCRATCH_BUDGET_BYTES,
+            rayon::current_num_threads(),
+        );
+        let trace_layer = |nm, scratch: &mut [BlockScratch]| {
+            let mut layer = IrradianceLayer::new(count, true, false)?;
+            trace_wavelength(job, settings, &plan, nm, &mut layer, scratch)?;
+            let mut values = layer.caustics.expect("caustics requested");
+            scale_irradiance(&mut values, plan.source_density(nm))?;
+            Ok::<_, PhotonError>(values)
+        };
+        if wavelength_batch >= 2 {
+            let mut scratch = scratch_pool(wavelength_batch);
+            for chunk in plan.nodes.chunks(wavelength_batch) {
+                let batch: Result<Vec<_>, PhotonError> = chunk
+                    .par_iter()
+                    .zip(scratch[..chunk.len()].par_iter_mut())
+                    .map(|(&(nm, _), slot)| trace_layer(nm, std::slice::from_mut(slot)))
+                    .collect();
+                layers.extend(batch?);
+            }
+        } else {
+            let mut scratch = scratch_pool(block_batch_size(plan.blocks.len(), count, 1).max(1));
+            for &(nm, _) in &plan.nodes {
+                layers.push(trace_layer(nm, &mut scratch)?);
+            }
+        }
+    } else {
+        layers.resize_with(plan.nodes.len(), Vec::new);
         plan.nodes
             .par_iter()
-            .map(|&(nm, _)| {
-                let mut layer = if !plan.spectral_caustics {
-                    match &plan.fixed_caustics {
-                        Some(g) => g.clone(),
-                        None => alloc_zeroed_irradiance(plan.width * plan.height)
-                            .map_err(String::from)?,
-                    }
+            .zip(layers.par_iter_mut())
+            .try_for_each(|(&(nm, _), layer)| -> Result<(), PhotonError> {
+                if let Some(fixed) = &plan.fixed_caustics {
+                    layer
+                        .try_reserve_exact(fixed.len())
+                        .map_err(|_| "cannot allocate photon irradiance buffer")?;
+                    layer.extend_from_slice(fixed);
                 } else {
-                    irradiance_layer(job, settings, &plan, nm, true, false, false)
-                        .map_err(|e| e.to_string())?
-                        .caustics
-                        .expect("caustics requested")
-                };
-                let density = plan.source_density(nm);
-                for value in &mut layer {
-                    *value *= density;
-                    if !value.is_finite() {
-                        return Err("spectral irradiance overflow".into());
-                    }
+                    *layer = alloc_zeroed_irradiance(count)?;
                 }
-                Ok(layer)
-            })
-            .collect();
+                scale_irradiance(layer, plan.source_density(nm))
+            })?;
+    }
     Ok(Some(SpectralCausticsMap {
         width: plan.width,
         height: plan.height,
@@ -425,6 +489,16 @@ pub fn integrate_spectral(
         ground_id: ground,
         mode: settings.mode,
         samples: plan.nodes,
-        layers: layers?,
+        layers,
     }))
+}
+
+fn scale_irradiance(values: &mut [f64], density: f64) -> Result<(), PhotonError> {
+    for value in values {
+        *value *= density;
+        if !value.is_finite() {
+            return Err("spectral irradiance overflow".into());
+        }
+    }
+    Ok(())
 }

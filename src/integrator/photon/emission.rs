@@ -19,35 +19,41 @@ use rand_chacha::ChaCha12Rng;
 use rayon::prelude::*;
 use std::ops::Range;
 
-/// Soft byte cap for concurrent per-block temporary scalar irradiance buffers.
-const BLOCK_SCRATCH_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+/// Soft byte cap for concurrent temporary scalar irradiance buffers.
+pub(super) const BLOCK_SCRATCH_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) fn block_batch_size(total_blocks: usize, pixels: usize, active_buffers: usize) -> usize {
-    block_batch_size_for_threads(
+    irradiance_batch_size(
         total_blocks,
         pixels,
         active_buffers,
+        BLOCK_SCRATCH_BUDGET_BYTES,
         rayon::current_num_threads(),
     )
 }
 
-pub(super) fn block_batch_size_for_threads(
-    total_blocks: usize,
+pub(super) fn irradiance_buffer_bytes(pixels: usize, buffers: usize) -> usize {
+    pixels
+        .saturating_mul(buffers)
+        .saturating_mul(size_of::<f64>())
+}
+
+pub(super) fn irradiance_batch_size(
+    total_items: usize,
     pixels: usize,
-    active_buffers: usize,
+    buffers_per_item: usize,
+    budget_bytes: usize,
     threads: usize,
 ) -> usize {
-    if total_blocks == 0 {
+    if total_items == 0 {
         return 0;
     }
-    if active_buffers == 0 {
-        return total_blocks;
+    if buffers_per_item == 0 {
+        return total_items;
     }
-    let per_block_bytes = active_buffers
-        .saturating_mul(pixels)
-        .saturating_mul(size_of::<f64>());
-    let memory_cap = (BLOCK_SCRATCH_BUDGET_BYTES / per_block_bytes.max(1)).max(1);
-    threads.clamp(1, memory_cap).min(total_blocks)
+    let per_item_bytes = irradiance_buffer_bytes(pixels, buffers_per_item);
+    let memory_cap = (budget_bytes / per_item_bytes.max(1)).max(1);
+    threads.clamp(1, memory_cap).min(total_items)
 }
 
 pub(super) fn alloc_zeroed_irradiance(pixels: usize) -> Result<Vec<f64>, &'static str> {
