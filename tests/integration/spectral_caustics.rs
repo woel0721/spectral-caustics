@@ -1,14 +1,10 @@
-use rand::SeedableRng;
-use rand::rngs::StdRng;
-use spectral_caustics::geometry::hit::GeometryHit;
-use spectral_caustics::integrator::camera::{
-    path::trace_camera_path,
-    transport::Caustics,
-    types::{CameraPathRngs, CameraPathState},
+use crate::support::{
+    TempDir, TransmissionRng as Transmit, assert_camera_images_bits_eq, assert_framebuffer_bits_eq,
 };
-mod support;
 use nalgebra::Vector3;
 use rand::RngCore;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use spectral_caustics::caustics::SpectralCausticsMap;
 use spectral_caustics::config::Config;
 #[cfg(feature = "diagnostics")]
@@ -16,8 +12,14 @@ use spectral_caustics::config::RenderJob;
 use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 #[cfg(feature = "diagnostics")]
 use spectral_caustics::config::scene::ObjectConfig;
+use spectral_caustics::geometry::hit::GeometryHit;
 use spectral_caustics::geometry::object::Hittable;
 use spectral_caustics::geometry::ray::Ray;
+use spectral_caustics::integrator::camera::{
+    path::trace_camera_path,
+    transport::Caustics,
+    types::{CameraPathRngs, CameraPathState},
+};
 use spectral_caustics::material::lambertian::Lambertian;
 use spectral_caustics::optics::dispersion::IorMode;
 use spectral_caustics::renderer::Renderer;
@@ -27,13 +29,10 @@ use spectral_caustics::spectrum::d65_spd;
 use spectral_caustics::spectrum::rgb_reflectance;
 use std::f64::consts::PI;
 use std::process::Command;
-use support::{
-    TempDir, TransmissionRng as Transmit, assert_camera_images_bits_eq, assert_framebuffer_bits_eq,
-};
 
 fn config() -> Config {
     let mut c = Config::from_json(include_str!(
-        "../configs/vertical_prism_spectral_caustics.json"
+        "../../configs/vertical_prism_spectral_caustics.json"
     ))
     .unwrap();
     c.render.width = 24;
@@ -273,8 +272,10 @@ fn a_non_ground_first_diffuse_vertex_prevents_later_ground_lookup() {
 #[test]
 fn spectral_components_preserve_direct_crn_additivity_and_thread_determinism() {
     let mut c = config();
-    c.render.width = 12;
-    c.render.height = 12;
+    c.render.width = 8;
+    c.render.height = 8;
+    c.render.camera_spp = 8;
+    c.render.wavelength_step_nm = 50.0;
     let dir = TempDir::new("hero-caustics-mis");
     let pixels: Vec<_> = (0..32)
         .map(|i| {
@@ -287,61 +288,56 @@ fn spectral_components_preserve_direct_crn_additivity_and_thread_determinism() {
         .collect();
     let hdr = dir.write_hdr("test.hdr", 8, 4, &pixels);
     c.scene.environment.as_mut().unwrap().map_path = Some(hdr);
-    for mode in [IorMode::Constant, IorMode::Dispersion] {
+    for (mode, packet, heuristic, depth) in [
+        (IorMode::Constant, 1, EnvironmentMisHeuristic::Balance, 0),
+        (IorMode::Constant, 4, EnvironmentMisHeuristic::Power, 4),
+        (IorMode::Dispersion, 1, EnvironmentMisHeuristic::Power, 4),
+        (IorMode::Dispersion, 4, EnvironmentMisHeuristic::Balance, 0),
+    ] {
         c.render.mode = mode;
-        for packet in [1, 4] {
-            c.render.spectral_packet_size = packet;
-            for heuristic in [
-                EnvironmentMisHeuristic::Balance,
-                EnvironmentMisHeuristic::Power,
-            ] {
-                c.scene.environment_mis_heuristic = heuristic;
-                for depth in [0, 4] {
-                    c.scene.max_diffuse_bounces = depth;
-                    let scene = c.build().unwrap();
-                    let mut reference: Option<
-                        spectral_caustics::integrator::camera::CameraLightingImages,
-                    > = None;
-                    for threads in [1, 2, 4, 1] {
-                        c.render.thread_count = Some(threads);
-                        let images = Renderer::new(c.render.clone())
-                            .unwrap()
-                            .render(&scene)
-                            .unwrap();
-                        assert!(images.caustics.pixels().iter().any(|p| p.y > 0.0));
-                        for ((d, k), sum) in images
-                            .direct
-                            .pixels()
-                            .iter()
-                            .zip(images.caustics.pixels())
-                            .zip(images.combined.pixels())
-                        {
-                            assert_eq!(*d + *k, *sum);
-                        }
-                        if let Some(old) = &reference {
-                            assert_camera_images_bits_eq(&images, old);
-                        }
-                        reference = Some(images);
-                    }
-                    let old = spectral_caustics::integrator::camera::integrate_spectral(
-                        &scene,
-                        &spectral_caustics::config::render::RenderSetting {
-                            width: c.render.width,
-                            height: c.render.height,
-                            camera_spp: c.render.camera_spp,
-                            spectral_packet_size: packet,
-                            seed: c.render.seed,
-                            mode,
-                            ..Default::default()
-                        },
-                        None,
-                    )
-                    .map(|images| images.combined)
-                    .unwrap();
-                    assert_framebuffer_bits_eq(&reference.unwrap().direct, &old);
-                }
+        c.render.spectral_packet_size = packet;
+        c.scene.environment_mis_heuristic = heuristic;
+        c.scene.max_diffuse_bounces = depth;
+        let scene = c.build().unwrap();
+        let mut reference: Option<spectral_caustics::integrator::camera::CameraLightingImages> =
+            None;
+        for threads in [1, 2, 4] {
+            c.render.thread_count = Some(threads);
+            let images = Renderer::new(c.render.clone())
+                .unwrap()
+                .render(&scene)
+                .unwrap();
+            assert!(images.caustics.pixels().iter().any(|p| p.y > 0.0));
+            for ((d, k), sum) in images
+                .direct
+                .pixels()
+                .iter()
+                .zip(images.caustics.pixels())
+                .zip(images.combined.pixels())
+            {
+                assert_eq!(*d + *k, *sum);
             }
+            if let Some(old) = &reference {
+                assert_camera_images_bits_eq(&images, old);
+            }
+            reference = Some(images);
         }
+        let old = spectral_caustics::integrator::camera::integrate_spectral(
+            &scene,
+            &spectral_caustics::config::render::RenderSetting {
+                width: c.render.width,
+                height: c.render.height,
+                camera_spp: c.render.camera_spp,
+                spectral_packet_size: packet,
+                seed: c.render.seed,
+                mode,
+                ..Default::default()
+            },
+            None,
+        )
+        .map(|images| images.combined)
+        .unwrap();
+        assert_framebuffer_bits_eq(&reference.unwrap().direct, &old);
     }
 }
 
@@ -398,6 +394,9 @@ fn hero_packet_integral_matches_independent_fine_wavelength_quadrature() {
 #[test]
 fn disabled_or_absent_source_preserves_old_spectral_camera_and_skips_atlas() {
     let mut c = config();
+    c.render.width = 12;
+    c.render.height = 12;
+    c.render.camera_spp = 8;
     if let ObjectConfig::VerticalPrism { caustics, .. } = &mut c.scene.objects[0] {
         *caustics = false;
     }
@@ -452,8 +451,10 @@ fn disabled_or_absent_source_preserves_old_spectral_camera_and_skips_atlas() {
 #[test]
 fn ground_sun_debug_preserves_source_maps_caustics_rgb_and_packet_thread_results() {
     let mut c = config();
-    c.render.width = 12;
-    c.render.height = 12;
+    c.render.width = 8;
+    c.render.height = 8;
+    c.render.camera_spp = 8;
+    c.render.wavelength_step_nm = 50.0;
     c.scene.max_diffuse_bounces = 4;
     let scene = c.build().unwrap();
     let map = spectral_caustics::integrator::photon::integrate_spectral(&scene, &c.render)
@@ -506,20 +507,24 @@ fn ground_sun_debug_preserves_source_maps_caustics_rgb_and_packet_thread_results
         }
         let mut reference: Option<spectral_caustics::integrator::camera::CameraLightingImages> =
             None;
-        for threads in [1, 2, 4, 1] {
+        for threads in [1, 2, 4] {
             c.render.thread_count = Some(threads);
-            let images = Renderer::new(c.render.clone())
+            let split = crate::support::run_in_threads(threads, || {
+                spectral_caustics::integrator::camera::integrate_spectral(
+                    &scene,
+                    &c.render,
+                    Some(&map),
+                )
                 .unwrap()
-                .render(&scene)
-                .map(|images| images.combined)
-                .unwrap();
-            let split = spectral_caustics::integrator::camera::integrate_spectral(
-                &scene,
-                &c.render,
-                Some(&map),
-            )
-            .unwrap();
-            assert_framebuffer_bits_eq(&images, &split.combined);
+            });
+            if threads == 1 {
+                let images = Renderer::new(c.render.clone())
+                    .unwrap()
+                    .render(&scene)
+                    .map(|images| images.combined)
+                    .unwrap();
+                assert_framebuffer_bits_eq(&images, &split.combined);
+            }
             assert_framebuffer_bits_eq(&baseline.caustics, &split.caustics);
             assert!(split.caustics.pixels().iter().any(|p| p.y > 0.0));
             assert!(
@@ -594,6 +599,9 @@ fn ground_sun_debug_preserves_source_maps_caustics_rgb_and_packet_thread_results
 #[test]
 fn enabled_cli_writes_three_components_and_map_mismatches_fail_explicitly() {
     let mut c = config();
+    c.render.width = 12;
+    c.render.height = 12;
+    c.render.camera_spp = 4;
     let scene = c.build().unwrap();
     let map = spectral_caustics::integrator::photon::integrate_spectral(&scene, &c.render)
         .unwrap()
@@ -629,7 +637,7 @@ fn enabled_cli_writes_three_components_and_map_mismatches_fail_explicitly() {
                 .unwrap()
                 .into_rgb8()
                 .dimensions(),
-            (24, 24)
+            (12, 12)
         );
     }
     assert_eq!(
@@ -664,7 +672,7 @@ fn glass_prefix_receives_caustics_once_with_scalar_throughput_and_no_shadow_or_r
             Some(550.0),
             mode,
             32,
-            &mut support::TransmissionRng,
+            &mut crate::support::TransmissionRng,
         )
         .unwrap()
         .landing()

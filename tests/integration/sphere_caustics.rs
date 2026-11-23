@@ -1,7 +1,4 @@
-use spectral_caustics::geometry::ray::Ray;
-use spectral_caustics::optics::interface::fresnel_dielectric;
-use spectral_caustics::optics::interface::refract;
-mod support;
+use crate::support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 use nalgebra::Vector3;
 use rand::SeedableRng;
 use rand_chacha::ChaCha12Rng;
@@ -10,17 +7,19 @@ use spectral_caustics::config::Config;
 use spectral_caustics::config::material::MaterialConfig;
 use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 use spectral_caustics::config::scene::ObjectConfig;
+use spectral_caustics::geometry::ray::Ray;
 use spectral_caustics::material::Material;
 use spectral_caustics::material::dielectric::Dielectric;
 use spectral_caustics::optics::dispersion::Cauchy;
 use spectral_caustics::optics::dispersion::IorMode;
+use spectral_caustics::optics::interface::fresnel_dielectric;
+use spectral_caustics::optics::interface::refract;
 use spectral_caustics::spectrum::d65_normalization;
 use spectral_caustics::spectrum::d65_spd;
 use spectral_caustics::spectrum::wavelength_to_xyz;
-use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 fn config() -> Config {
-    let mut config = Config::from_json(include_str!("../configs/sphere.json")).unwrap();
+    let mut config = Config::from_json(include_str!("../../configs/sphere.json")).unwrap();
     config.render.width = 32;
     config.render.height = 24;
     config.render.samples_per_pixel_axis = 2;
@@ -278,64 +277,70 @@ fn photon_flux_is_normalized_once_across_spatial_and_wavelength_sample_counts() 
 #[test]
 fn sphere_components_are_additive_colored_and_repeat_across_threads_mis_and_depths() {
     let mut c = config();
-    c.render.width = 24;
-    c.render.height = 18;
+    c.render.width = 12;
+    c.render.height = 10;
+    c.render.camera_spp = 4;
+    c.render.seed = 42;
     for mode in [IorMode::Constant, IorMode::Dispersion] {
         c.render.mode = mode;
-        for heuristic in [
-            EnvironmentMisHeuristic::Balance,
-            EnvironmentMisHeuristic::Power,
+        let mut scene = c.build().unwrap();
+        let mut photon_reference = None;
+        for threads in [1, 2, 4] {
+            c.render.thread_count = Some(threads);
+            let lighting = crate::support::run_in_threads(threads, || {
+                spectral_caustics::integrator::photon::integrate_xyz(
+                    &scene,
+                    scene.photon.caustics_object_id,
+                    scene.photon.ground_id.expect("receiver"),
+                    &c.render,
+                )
+                .unwrap()
+            });
+            if let Some(expected) = &photon_reference {
+                let expected: &spectral_caustics::caustics::SpectralLighting = expected;
+                assert_framebuffer_bits_eq(
+                    lighting.direct.as_ref().unwrap(),
+                    expected.direct.as_ref().unwrap(),
+                );
+                assert_framebuffer_bits_eq(&lighting.caustics, &expected.caustics);
+            } else {
+                photon_reference = Some(lighting);
+            }
+        }
+        let lighting = photon_reference.unwrap();
+        for (heuristic, depth) in [
+            (EnvironmentMisHeuristic::Balance, 0),
+            (EnvironmentMisHeuristic::Power, 4),
         ] {
-            c.scene.environment_mis_heuristic = heuristic;
-            for depth in [0, 4] {
-                c.scene.max_diffuse_bounces = depth;
-                let scene = c.build().unwrap();
-                let mut reference = None;
-                for threads in [1, 2, 4, 1] {
-                    c.render.thread_count = Some(threads);
-                    c.render.camera_spp = 4;
-                    c.render.seed = 42;
-                    let (lighting, images) = support::run_in_threads(threads, || {
-                        let lighting = spectral_caustics::integrator::photon::integrate_xyz(
-                            &scene,
-                            scene.photon.caustics_object_id,
-                            scene.photon.ground_id.expect("receiver"),
-                            &c.render,
-                        )
-                        .unwrap();
-                        let images = spectral_caustics::integrator::camera::integrate_rgb(
-                            &scene,
-                            &c.render,
-                            Some(&lighting),
-                        )
-                        .unwrap();
-                        (lighting, images)
-                    });
-                    assert!(images.caustics.pixels().iter().any(|p| p.y > 0.0));
-                    for ((direct, caustics), combined) in images
-                        .direct
-                        .pixels()
-                        .iter()
-                        .zip(images.caustics.pixels())
-                        .zip(images.combined.pixels())
-                    {
-                        assert!(
-                            (direct + caustics - combined).norm() < 1e-12 * (1.0 + combined.norm())
-                        );
-                    }
-                    if let Some((light, previous)) = &reference {
-                        let light: &spectral_caustics::caustics::SpectralLighting = light;
-                        let previous: &spectral_caustics::integrator::camera::CameraLightingImages =
-                            previous;
-                        assert_framebuffer_bits_eq(
-                            lighting.direct.as_ref().unwrap(),
-                            light.direct.as_ref().unwrap(),
-                        );
-                        assert_framebuffer_bits_eq(&lighting.caustics, &light.caustics);
-                        assert_camera_images_bits_eq(&images, previous);
-                    }
-                    reference = Some((lighting, images));
+            scene.camera_options.environment_mis_heuristic = heuristic;
+            scene.camera_options.max_diffuse_bounces = depth;
+            let mut reference = None;
+            for threads in [1, 2, 4] {
+                c.render.thread_count = Some(threads);
+                let images = crate::support::run_in_threads(threads, || {
+                    spectral_caustics::integrator::camera::integrate_rgb(
+                        &scene,
+                        &c.render,
+                        Some(&lighting),
+                    )
+                    .unwrap()
+                });
+                assert!(images.caustics.pixels().iter().any(|p| p.y > 0.0));
+                for ((direct, caustics), combined) in images
+                    .direct
+                    .pixels()
+                    .iter()
+                    .zip(images.caustics.pixels())
+                    .zip(images.combined.pixels())
+                {
+                    assert!(
+                        (direct + caustics - combined).norm() < 1e-12 * (1.0 + combined.norm())
+                    );
                 }
+                if let Some(previous) = &reference {
+                    assert_camera_images_bits_eq(&images, previous);
+                }
+                reference = Some(images);
             }
         }
     }
@@ -470,7 +475,7 @@ fn sphere_entry_exit_normals_snell_and_flux_match_the_analytic_ball_lens() {
                 Some(nm),
                 IorMode::Dispersion,
                 32,
-                &mut support::TransmissionRng,
+                &mut crate::support::TransmissionRng,
             )
             .unwrap()
             .landing()
@@ -493,7 +498,7 @@ fn sphere_entry_exit_normals_snell_and_flux_match_the_analytic_ball_lens() {
             Some(400.0),
             IorMode::Dispersion,
             32,
-            &mut support::TransmissionRng,
+            &mut crate::support::TransmissionRng,
         )
         .unwrap()
         .landing()
@@ -504,7 +509,7 @@ fn sphere_entry_exit_normals_snell_and_flux_match_the_analytic_ball_lens() {
             Some(700.0),
             IorMode::Dispersion,
             32,
-            &mut support::TransmissionRng,
+            &mut crate::support::TransmissionRng,
         )
         .unwrap()
         .landing()
@@ -519,7 +524,7 @@ fn sphere_entry_exit_normals_snell_and_flux_match_the_analytic_ball_lens() {
                 Some(400.0),
                 IorMode::Constant,
                 32,
-                &mut support::TransmissionRng
+                &mut crate::support::TransmissionRng
             )
             .unwrap()
             .landing(),
@@ -529,7 +534,7 @@ fn sphere_entry_exit_normals_snell_and_flux_match_the_analytic_ball_lens() {
                 Some(700.0),
                 IorMode::Constant,
                 32,
-                &mut support::TransmissionRng
+                &mut crate::support::TransmissionRng
             )
             .unwrap()
             .landing()

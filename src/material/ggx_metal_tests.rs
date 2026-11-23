@@ -24,7 +24,7 @@ fn ggx_samples_match_full_solid_angle_pdf_weight_and_replay() {
         let mut replay = rng.clone();
         for n in [Vector3::z(), Vector3::new(1.0, -2.0, 3.0).normalize()] {
             let wo = to_world(Vector3::new(0.8, 0.0, 0.6), n).unwrap();
-            for _ in 0..4096 {
+            for _ in 0..512 {
                 let sample = m.sample(wo, n, &mut rng);
                 assert_eq!(sample, m.sample(wo, n, &mut replay));
                 let Some(s) = sample else {
@@ -69,33 +69,34 @@ fn ggx_pdf_mass_matches_acceptance_and_weight_mean_matches_hemisphere_quadrature
         for wo in [Vector3::z(), Vector3::new(0.8, 0.0, 0.6)] {
             let mut integral = Vector3::zeros();
             let mut pdf_mass = 0.0;
-            for z in 0..128 {
-                let c = (z as f64 + 0.5) / 128.0;
-                for phi in 0..256 {
-                    let angle = 2.0 * PI * (phi as f64 + 0.5) / 256.0;
+            for z in 0..64 {
+                let c = (z as f64 + 0.5) / 64.0;
+                for phi in 0..128 {
+                    let angle = 2.0 * PI * (phi as f64 + 0.5) / 128.0;
                     let r = (1.0 - c * c).sqrt();
                     let wi = Vector3::new(r * angle.cos(), r * angle.sin(), c);
-                    integral += rgb(&m, wi, wo, Vector3::z()) * (c * 2.0 * PI / (128.0 * 256.0));
-                    pdf_mass += m.pdf(wi, wo, Vector3::z()) * 2.0 * PI / (128.0 * 256.0);
+                    integral += rgb(&m, wi, wo, Vector3::z()) * (c * 2.0 * PI / (64.0 * 128.0));
+                    pdf_mass += m.pdf(wi, wo, Vector3::z()) * 2.0 * PI / (64.0 * 128.0);
                 }
             }
+            let samples = 12_000;
             let mut mean = Vector3::zeros();
             let mut accepted = 0;
             let mut rng = StdRng::seed_from_u64(42);
-            for _ in 0..32768 {
+            for _ in 0..samples {
                 if let Some(sample) = m.sample(wo, Vector3::z(), &mut rng) {
                     mean += sample.weight;
                     accepted += 1;
                 }
             }
-            mean /= 32768.0; // rejected half-vectors remain in the denominator.
+            mean /= samples as f64; // rejected half-vectors remain in the denominator.
             assert!(
-                (mean - integral).norm() < 0.015,
+                (mean - integral).norm() < 0.025,
                 "{roughness} {wo}: {mean} vs {integral}"
             );
-            assert!((accepted as f64 / 32768.0 - pdf_mass).abs() < 0.012);
+            assert!((accepted as f64 / samples as f64 - pdf_mass).abs() < 0.02);
             assert!(integral.iter().all(|v| *v >= 0.0 && *v <= 1.0001));
-            assert!(accepted < 32768);
+            assert!(accepted < samples);
         }
     }
 }

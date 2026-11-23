@@ -14,8 +14,6 @@ pub(crate) mod spectral;
 pub mod transport;
 pub mod types;
 
-#[cfg(test)]
-pub(crate) use ground::{lambertian_radiance, sample_ground_irradiance};
 pub use rgb::integrate_rgb;
 pub(crate) use rgb::validate_rgb_render;
 pub use spectral::integrate_spectral;

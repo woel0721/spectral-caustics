@@ -23,33 +23,14 @@ pub struct GroundLighting<'a> {
 
 impl GroundLighting<'_> {
     pub(super) fn sample_irradiance(&self, position: Vector3<f64>) -> Option<Vector3<f64>> {
-        interpolate_ground_irradiance(self.irradiance, self.receiver, position, false)
+        interpolate_ground_irradiance(self.irradiance, self.receiver, position)
     }
-}
-
-/// 按地面世界位置读取焦散图的 XYZ 辐照度，供 RGB 地面反射着色测试核对。
-///
-/// 输入：未曝光的 irradiance 图、生成它的 receiver 和 position（米）；图像尺寸/接收区须匹配。
-///
-/// 输出：E_XYZ=Σw_i E_i，范围 [min,max) 外返回零，非法布局/坐标/像素时 None。
-/// 区域内边缘夹到最近像素中心；图已除像素面积，不再除面积、不施加曝光或 sRGB 编码。
-#[cfg(test)]
-pub(crate) fn sample_ground_irradiance(
-    irradiance: &Framebuffer,
-    receiver: &GroundReceiver,
-    position: Vector3<f64>,
-) -> Option<Vector3<f64>> {
-    if !valid_ground_map_layout(irradiance, receiver) {
-        return None;
-    }
-    interpolate_ground_irradiance(irradiance, receiver, position, true)
 }
 
 fn interpolate_ground_irradiance(
     irradiance: &Framebuffer,
     receiver: &GroundReceiver,
     position: Vector3<f64>,
-    check_pixels: bool,
 ) -> Option<Vector3<f64>> {
     if !position.iter().all(|value| value.is_finite()) {
         return None;
@@ -64,35 +45,9 @@ fn interpolate_ground_irradiance(
             continue;
         }
         let pixel = irradiance.get(px, py)?;
-        if check_pixels && pixel.iter().any(|value| !value.is_finite() || *value < 0.0) {
-            return None;
-        }
         xyz += pixel * weight;
     }
     xyz.iter().all(|value| value.is_finite()).then_some(xyz)
-}
-
-/// 把地面收到的 XYZ 辐照度换算成朝相机反射的辐亮度，供中性漫反射地面测试核对。
-///
-/// 输入：非负有限 irradiance_xyz 和灰色反射率 ρ∈`[0,1]`。
-///
-/// 输出：L_o,XYZ=ρ·E_XYZ/π，非法输入或溢出返回 None，保留 HDR 线性值。
-/// E 已对入射方向积分，不能再乘入射余弦、光源强度或可见性。
-#[cfg(test)]
-pub(crate) fn lambertian_radiance(irradiance_xyz: Vector3<f64>, rho: f64) -> Option<Vector3<f64>> {
-    if irradiance_xyz
-        .iter()
-        .any(|value| !value.is_finite() || *value < 0.0)
-        || !rho.is_finite()
-        || !(0.0..=1.0).contains(&rho)
-    {
-        return None;
-    }
-    let radiance = irradiance_xyz * (rho / PI);
-    radiance
-        .iter()
-        .all(|value| value.is_finite())
-        .then_some(radiance)
 }
 
 /// 检查辐照度图与接收范围的布局，供地面绑定和采样使用。

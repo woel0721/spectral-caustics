@@ -1,4 +1,4 @@
-mod support;
+use crate::support::assert_camera_images_bits_eq;
 use nalgebra::Vector3;
 use serde_json::json;
 use spectral_caustics::{
@@ -7,7 +7,6 @@ use spectral_caustics::{
     medium::MediumConfig,
     renderer::Renderer,
 };
-use support::assert_camera_images_bits_eq;
 
 #[test]
 fn configured_fog_has_local_support_and_an_independent_shape_seed() {
@@ -61,10 +60,14 @@ fn procedural_medium_rejects_conflicting_or_invalid_grid_inputs() {
 #[test]
 fn disk_lights_local_fog_and_parallel_renders_agree() {
     let mut base = Config::load("configs/local_procedural_fog.json").unwrap();
-    base.render.width = 24;
-    base.render.height = 16;
-    base.render.camera_spp = 32;
+    base.render.width = 12;
+    base.render.height = 8;
+    base.render.camera_spp = 16;
     base.scene.light_samples = 1;
+    let Some(MediumConfig::Procedural(base_procedural)) = &mut base.scene.medium else {
+        panic!("expected a procedural grid");
+    };
+    base_procedural.resolution = [16, 12, 12];
     let mut spectral_json = serde_json::to_value(&base).unwrap();
     spectral_json["render"]["camera_mode"] = json!("spectral");
     spectral_json["scene"]["medium"]["sigma_a_base"] = json!({"samples": [[380, 0.1], [780, 0.3]]});
@@ -79,7 +82,9 @@ fn disk_lights_local_fog_and_parallel_renders_agree() {
     let Some(MediumConfig::Procedural(c)) = &spectral.scene.medium else {
         panic!("expected a procedural grid");
     };
-    let fog = spectral.build().unwrap().scene.medium.unwrap();
+    let mut base_built = base.build().unwrap();
+    let mut spectral_built = spectral.build().unwrap();
+    let fog = spectral_built.scene.medium.as_ref().unwrap();
     let dy = (c.max_m[1] - c.min_m[1]) / c.resolution[1] as f64;
     let column_density = (0..c.resolution[1])
         .map(|i| fog.density_at(Vector3::new(0.0, c.min_m[1] + (i as f64 + 0.5) * dy, 0.81)) * dy)
@@ -91,27 +96,50 @@ fn disk_lights_local_fog_and_parallel_renders_agree() {
         assert!((actual - (-sigma_t * column_density).exp()).abs() < 1e-13);
     }
 
-    let render = |c: &Config| {
-        Renderer::new(c.render.clone())
-            .unwrap()
-            .render(&c.build().unwrap())
-            .unwrap()
+    let mut base_dark = base.clone();
+    let spectral_caustics::config::light::LightConfig::DiskArea(light) = &mut base_dark.scene.light
+    else {
+        panic!("expected disk area light");
     };
+    light.total_flux = 0.0;
+    let base_dark_built = base_dark.build().unwrap();
+    let mut spectral_dark = spectral.clone();
+    let spectral_caustics::config::light::LightConfig::DiskArea(light) =
+        &mut spectral_dark.scene.light
+    else {
+        panic!("expected disk area light");
+    };
+    light.total_flux = 0.0;
+    let spectral_dark_built = spectral_dark.build().unwrap();
 
-    for (mut config, mode, packet) in [
-        (base.clone(), CameraMode::Rgb, 1),
-        (base.clone(), CameraMode::Spectral, 1),
-        (base, CameraMode::Spectral, 4),
-        (spectral.clone(), CameraMode::Spectral, 1),
-        (spectral, CameraMode::Spectral, 4),
+    for (use_spectral, mode, packet) in [
+        (false, CameraMode::Rgb, 1),
+        (false, CameraMode::Spectral, 1),
+        (false, CameraMode::Spectral, 4),
+        (true, CameraMode::Spectral, 1),
+        (true, CameraMode::Spectral, 4),
     ] {
-        config.render.camera_mode = mode;
-        config.render.spectral_packet_size = packet;
-        let built = config.build().unwrap();
-        config.render.thread_count = Some(1);
-        let reference = Renderer::new(config.render.clone())
+        let mut render_setting = if use_spectral {
+            spectral.render.clone()
+        } else {
+            base.render.clone()
+        };
+        let built = if use_spectral {
+            &mut spectral_built
+        } else {
+            &mut base_built
+        };
+        let dark_built = if use_spectral {
+            &spectral_dark_built
+        } else {
+            &base_dark_built
+        };
+        render_setting.camera_mode = mode;
+        render_setting.spectral_packet_size = packet;
+        render_setting.thread_count = Some(1);
+        let reference = Renderer::new(render_setting.clone())
             .unwrap()
-            .render(&built)
+            .render(built)
             .unwrap();
         for (d, (c, combined)) in reference.direct.pixels().iter().zip(
             reference
@@ -123,19 +151,27 @@ fn disk_lights_local_fog_and_parallel_renders_agree() {
             assert_eq!((d + c).map(f64::to_bits), combined.map(f64::to_bits));
         }
         for threads in [2, 4] {
-            config.render.thread_count = Some(threads);
-            let parallel = Renderer::new(config.render.clone())
+            render_setting.thread_count = Some(threads);
+            let parallel = Renderer::new(render_setting.clone())
                 .unwrap()
-                .render(&built)
+                .render(built)
                 .unwrap();
             assert_camera_images_bits_eq(&parallel, &reference);
         }
 
-        let mut control = config.clone();
-        control.scene.max_volume_scatters = 0;
-        let extinction = render(&control);
-        control.scene.medium = None;
-        let vacuum = render(&control);
+        let original_scatters = built.camera_options.max_volume_scatters;
+        built.camera_options.max_volume_scatters = 0;
+        let extinction = Renderer::new(render_setting.clone())
+            .unwrap()
+            .render(built)
+            .unwrap();
+        let medium = built.scene.medium.take();
+        let vacuum = Renderer::new(render_setting.clone())
+            .unwrap()
+            .render(built)
+            .unwrap();
+        built.scene.medium = medium;
+        built.camera_options.max_volume_scatters = original_scatters;
         assert!(
             extinction
                 .combined
@@ -153,14 +189,11 @@ fn disk_lights_local_fog_and_parallel_renders_agree() {
                 .any(|(scattering, e)| scattering.y > e.y + 1e-6)
         );
 
-        let mut dark = config.clone();
-        let spectral_caustics::config::light::LightConfig::DiskArea(light) = &mut dark.scene.light
-        else {
-            panic!("expected disk area light");
-        };
-        light.total_flux = 0.0;
         assert!(
-            render(&dark)
+            Renderer::new(render_setting)
+                .unwrap()
+                .render(dark_built)
+                .unwrap()
                 .combined
                 .pixels()
                 .iter()

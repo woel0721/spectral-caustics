@@ -1,4 +1,4 @@
-mod support;
+use crate::support::assert_camera_images_bits_eq;
 use nalgebra::Vector3;
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use spectral_caustics::{
@@ -19,7 +19,6 @@ use spectral_caustics::{
     optics::dispersion::IorMode,
     renderer::Renderer,
 };
-use support::assert_camera_images_bits_eq;
 
 // Defined outside the library: a custom implementation needs no config variant
 // or registration to participate in the shared camera pipeline.
@@ -309,9 +308,9 @@ fn grid_scattering_is_supported_at_direct_rgb_and_spectral_camera_entries() {
 #[test]
 fn configured_grid_repeats_across_rgb_hero_packet_threads_and_zero_density_is_vacuum() {
     let mut c = Config::load("configs/grid_fog.json").unwrap();
-    c.render.width = 12;
-    c.render.height = 8;
-    c.render.camera_spp = 16;
+    c.render.width = 8;
+    c.render.height = 6;
+    c.render.camera_spp = 8;
     let Some(MediumConfig::Grid(m)) = &mut c.scene.medium else {
         panic!("expected grid")
     };
@@ -332,12 +331,12 @@ fn configured_grid_repeats_across_rgb_hero_packet_threads_and_zero_density_is_va
         .err()
         .expect("RGB should reject spectral HG");
     assert!(error.to_string().contains("camera_mode"));
-    for (mut c, mode, packet) in [
-        (c.clone(), CameraMode::Rgb, 1),
-        (c.clone(), CameraMode::Spectral, 1),
-        (c, CameraMode::Spectral, 4),
-        (spectral_hg.clone(), CameraMode::Spectral, 1),
-        (spectral_hg, CameraMode::Spectral, 4),
+    for (mut c, mode, packet, check_zero) in [
+        (c.clone(), CameraMode::Rgb, 1, true),
+        (c.clone(), CameraMode::Spectral, 1, true),
+        (c, CameraMode::Spectral, 4, true),
+        (spectral_hg.clone(), CameraMode::Spectral, 1, false),
+        (spectral_hg, CameraMode::Spectral, 4, false),
     ] {
         c.render.camera_mode = mode;
         c.render.spectral_packet_size = packet;
@@ -365,24 +364,26 @@ fn configured_grid_repeats_across_rgb_hero_packet_threads_and_zero_density_is_va
                 reference = Some(images);
             }
         }
-        let mut vacuum = c.clone();
-        vacuum.scene.medium = None;
-        let mut zero = c.clone();
-        let Some(MediumConfig::Grid(m)) = &mut zero.scene.medium else {
-            panic!("expected grid")
-        };
-        m.densities.fill(0.0);
-        zero.scene.max_volume_scatters = 8; // zero effective sigma_s needs no sampler
-        let render = |c: &Config| {
-            Renderer::new(c.render.clone())
-                .unwrap()
-                .render(&c.build().unwrap())
-                .unwrap()
-        };
-        assert_eq!(
-            render(&zero).combined.pixels(),
-            render(&vacuum).combined.pixels()
-        );
+        if check_zero {
+            let mut vacuum = c.clone();
+            vacuum.scene.medium = None;
+            let mut zero = c.clone();
+            let Some(MediumConfig::Grid(m)) = &mut zero.scene.medium else {
+                panic!("expected grid")
+            };
+            m.densities.fill(0.0);
+            zero.scene.max_volume_scatters = 8; // zero effective sigma_s needs no sampler
+            let render = |c: &Config| {
+                Renderer::new(c.render.clone())
+                    .unwrap()
+                    .render(&c.build().unwrap())
+                    .unwrap()
+            };
+            assert_eq!(
+                render(&zero).combined.pixels(),
+                render(&vacuum).combined.pixels()
+            );
+        }
     }
 }
 

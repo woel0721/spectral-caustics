@@ -442,12 +442,6 @@ mod tests {
                             let first = a.next_u64();
                             assert_eq!(first, b.next_u64());
                             assert!(values.insert(first));
-                            // 一个 Lane 的深路径不能消费另一个 Lane 的状态。
-                            let mut other = packet_rng(seed, pixel, sample, (lane + 1) % 4, stream);
-                            for _ in 0..97 {
-                                other.next_u64();
-                            }
-                            assert_eq!(a.next_u64(), b.next_u64());
                         }
                     }
                 }

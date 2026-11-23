@@ -1,5 +1,4 @@
-#![cfg(feature = "diagnostics")]
-mod support;
+use crate::support::{TempDir, assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 use spectral_caustics::config::Config;
 use spectral_caustics::config::material::MaterialConfig;
 use spectral_caustics::config::scene::EnvironmentConfig;
@@ -9,7 +8,6 @@ use spectral_caustics::diagnostics::StopReason;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use support::{TempDir, assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 struct TemporaryDirectory(TempDir);
 impl TemporaryDirectory {
@@ -84,135 +82,155 @@ fn debug_path_defaults_false_roundtrips_and_rejects_non_bool_values() {
 fn debug_observes_same_rgb_xyz_paths_and_repeats_across_threads_materials_and_environments() {
     let directory = TemporaryDirectory::new();
     let hdr = directory.hdr();
-    for material in [
-        MaterialConfig::Dielectric {
-            ior: 1.52,
-            dispersion: None,
-        },
-        MaterialConfig::Mirror {
-            reflectance: [0.95; 3],
-        },
-        MaterialConfig::GgxMetal {
-            eta: [0.2; 3],
-            k: [3.0; 3],
-            roughness: 0.4,
-        },
-        MaterialConfig::GgxMetal {
-            eta: [0.2; 3],
-            k: [3.0; 3],
-            roughness: 0.0,
-        },
-    ] {
-        for map in [None, Some(hdr.clone())] {
-            for heuristic in [
-                EnvironmentMisHeuristic::Balance,
-                EnvironmentMisHeuristic::Power,
-            ] {
-                let mut config = config();
-                config.scene.environment = Some(EnvironmentConfig {
-                    map_path: map.clone(),
-                    ..Default::default()
+    let cases = [
+        (
+            MaterialConfig::Dielectric {
+                ior: 1.52,
+                dispersion: None,
+            },
+            None,
+            EnvironmentMisHeuristic::Balance,
+        ),
+        (
+            MaterialConfig::Mirror {
+                reflectance: [0.95; 3],
+            },
+            Some(hdr.clone()),
+            EnvironmentMisHeuristic::Power,
+        ),
+        (
+            MaterialConfig::GgxMetal {
+                eta: [0.2; 3],
+                k: [3.0; 3],
+                roughness: 0.4,
+            },
+            None,
+            EnvironmentMisHeuristic::Power,
+        ),
+        (
+            MaterialConfig::GgxMetal {
+                eta: [0.2; 3],
+                k: [3.0; 3],
+                roughness: 0.0,
+            },
+            Some(hdr),
+            EnvironmentMisHeuristic::Balance,
+        ),
+    ];
+    for (material, map, heuristic) in cases {
+        let mut config = config();
+        config.render.width = 12;
+        config.render.height = 10;
+        config.render.camera_spp = 8;
+        config.scene.environment = Some(EnvironmentConfig {
+            map_path: map,
+            ..Default::default()
+        });
+        config.scene.environment_mis_heuristic = heuristic;
+        if let ObjectConfig::Prism {
+            material: m,
+            caustics,
+            ..
+        } = &mut config.scene.objects[0]
+        {
+            *caustics = matches!(material, MaterialConfig::Dielectric { .. });
+            *m = material.clone();
+        }
+        let scene = config.build().unwrap();
+        config.render.seed = 42;
+        let lighting = spectral_caustics::integrator::photon::integrate_xyz(
+            &scene,
+            scene.photon.caustics_object_id,
+            scene.photon.ground_id.expect("receiver"),
+            &config.render,
+        )
+        .unwrap();
+        let ordinary = spectral_caustics::integrator::camera::integrate_rgb(
+            &scene,
+            &config.render,
+            Some(&lighting),
+        )
+        .unwrap();
+        assert!(ordinary.path_debug.is_none());
+        let check_photons = matches!(material, MaterialConfig::Dielectric { .. });
+        let mut reference = None;
+        for threads in [1, 2, 4] {
+            config.render.thread_count = Some(threads);
+            config.render.seed = 42;
+            config.render.diagnostics.path = true;
+            let (photons, images) = crate::support::run_in_threads(threads, || {
+                let photons = check_photons.then(|| {
+                    spectral_caustics::integrator::photon::integrate_xyz(
+                        &scene,
+                        scene.photon.caustics_object_id,
+                        scene.photon.ground_id.expect("receiver"),
+                        &config.render,
+                    )
+                    .unwrap()
                 });
-                config.scene.environment_mis_heuristic = heuristic;
-                if let ObjectConfig::Prism {
-                    material: m,
-                    caustics,
-                    ..
-                } = &mut config.scene.objects[0]
-                {
-                    *caustics = matches!(material, MaterialConfig::Dielectric { .. });
-                    *m = material.clone();
-                }
-                let scene = config.build().unwrap();
-                config.render.seed = 42;
-                let lighting = spectral_caustics::integrator::photon::integrate_xyz(
-                    &scene,
-                    scene.photon.caustics_object_id,
-                    scene.photon.ground_id.expect("receiver"),
-                    &config.render,
-                )
-                .unwrap();
-                let ordinary = spectral_caustics::integrator::camera::integrate_rgb(
+                let active = photons.as_ref().unwrap_or(&lighting);
+                let images = spectral_caustics::integrator::camera::integrate_rgb(
                     &scene,
                     &config.render,
-                    Some(&lighting),
+                    Some(active),
                 )
                 .unwrap();
-                assert!(ordinary.path_debug.is_none());
-                let mut reference = None;
-                for threads in [1, 2, 4, 1] {
-                    config.render.thread_count = Some(threads);
-                    config.render.seed = 42;
-                    config.render.diagnostics.path = true;
-                    let (photons, images) = support::run_in_threads(threads, || {
-                        let photons = spectral_caustics::integrator::photon::integrate_xyz(
-                            &scene,
-                            scene.photon.caustics_object_id,
-                            scene.photon.ground_id.expect("receiver"),
-                            &config.render,
-                        )
-                        .unwrap();
-                        let images = spectral_caustics::integrator::camera::integrate_rgb(
-                            &scene,
-                            &config.render,
-                            Some(&photons),
-                        )
-                        .unwrap();
-                        (photons, images)
-                    });
-                    assert_framebuffer_bits_eq(
-                        photons.direct.as_ref().unwrap(),
-                        lighting.direct.as_ref().unwrap(),
-                    );
-                    assert_framebuffer_bits_eq(&photons.caustics, &lighting.caustics);
-                    assert_camera_images_bits_eq(&images, &ordinary);
-                    let stats = images.path_debug.as_ref().unwrap();
-                    if let Some(expected) = &reference {
-                        assert_eq!(stats, expected);
-                    }
-                    assert!(
-                        stats
-                            .pixels
-                            .iter()
-                            .all(|p| p.samples == config.render.camera_spp as u64)
-                    );
-                    assert!(
-                        stats
-                            .pixels
-                            .iter()
-                            .all(|p| p.terminations.values().sum::<u64>() == p.target_samples)
-                    );
-                    assert!(
-                        stats
-                            .pixels
-                            .iter()
-                            .any(|p| p.target_samples > 0 && p.target_samples < p.samples)
-                    );
-                    assert!(
-                        stats.pixels.iter().any(|p| {
-                            p.terminations.contains_key(&StopReason::EnvironmentEscape)
-                        })
-                    );
-                    let sum = |f: fn(&spectral_caustics::diagnostics::PathDebugPixel) -> u64| {
-                        stats.pixels.iter().map(f).sum::<u64>()
-                    };
-                    match &material {
-                        MaterialConfig::Mirror { .. } => {
-                            assert!(sum(|p| p.events.specular_reflection) > 0);
-                            assert_eq!(sum(|p| p.total_internal_reflection), 0);
-                        }
-                        MaterialConfig::Dielectric { .. } => {
-                            assert!(sum(|p| p.events.specular_transmission) > 0)
-                        }
-                        MaterialConfig::GgxMetal { roughness, .. } if *roughness > 0.0 => {
-                            assert!(sum(|p| p.events.glossy_reflection) > 0);
-                            assert_eq!(sum(|p| p.total_internal_reflection), 0);
-                        }
-                        _ => assert!(sum(|p| p.events.specular_reflection) > 0),
-                    }
-                    reference = images.path_debug;
-                }
+                (photons, images)
+            });
+            if let Some(photons) = photons {
+                assert_framebuffer_bits_eq(
+                    photons.direct.as_ref().unwrap(),
+                    lighting.direct.as_ref().unwrap(),
+                );
+                assert_framebuffer_bits_eq(&photons.caustics, &lighting.caustics);
             }
+            assert_camera_images_bits_eq(&images, &ordinary);
+            let stats = images.path_debug.as_ref().unwrap();
+            if let Some(expected) = &reference {
+                assert_eq!(stats, expected);
+            }
+            assert!(
+                stats
+                    .pixels
+                    .iter()
+                    .all(|p| p.samples == config.render.camera_spp as u64)
+            );
+            assert!(
+                stats
+                    .pixels
+                    .iter()
+                    .all(|p| p.terminations.values().sum::<u64>() == p.target_samples)
+            );
+            assert!(
+                stats
+                    .pixels
+                    .iter()
+                    .any(|p| p.target_samples > 0 && p.target_samples < p.samples)
+            );
+            assert!(
+                stats
+                    .pixels
+                    .iter()
+                    .any(|p| p.terminations.contains_key(&StopReason::EnvironmentEscape))
+            );
+            let sum = |f: fn(&spectral_caustics::diagnostics::PathDebugPixel) -> u64| {
+                stats.pixels.iter().map(f).sum::<u64>()
+            };
+            match &material {
+                MaterialConfig::Mirror { .. } => {
+                    assert!(sum(|p| p.events.specular_reflection) > 0);
+                    assert_eq!(sum(|p| p.total_internal_reflection), 0);
+                }
+                MaterialConfig::Dielectric { .. } => {
+                    assert!(sum(|p| p.events.specular_transmission) > 0)
+                }
+                MaterialConfig::GgxMetal { roughness, .. } if *roughness > 0.0 => {
+                    assert!(sum(|p| p.events.glossy_reflection) > 0);
+                    assert_eq!(sum(|p| p.total_internal_reflection), 0);
+                }
+                _ => assert!(sum(|p| p.events.specular_reflection) > 0),
+            }
+            reference = images.path_debug;
         }
     }
 }

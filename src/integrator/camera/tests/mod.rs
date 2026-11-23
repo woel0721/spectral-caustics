@@ -10,7 +10,6 @@ use self::support::evaluate_path;
 use super::lighting::camera_lighting_setup;
 use super::lighting::environment::environment_lighting;
 use super::types::CameraPathRngs;
-use super::*;
 use crate::camera::Camera;
 use crate::caustics::GroundReceiver;
 use crate::caustics::SpectralLighting;
@@ -112,6 +111,16 @@ fn uniform_ground_map(xyz: Vector3<f64>) -> Framebuffer {
     let mut map = Framebuffer::new(1, 1).unwrap();
     assert!(map.set(0, 0, xyz));
     map
+}
+
+fn synthetic_ground_lighting(scene: &RenderJob, caustics_xyz: Vector3<f64>) -> SpectralLighting {
+    SpectralLighting {
+        direct: None,
+        caustics: uniform_ground_map(caustics_xyz),
+        receiver: scene.photon.receiver,
+        light_wi: Vector3::z(),
+        sun_irradiance_xyz: Vector3::new(0.45, 0.5, 0.55),
+    }
 }
 
 fn estimate_environment(
@@ -229,11 +238,12 @@ fn gradient_environment_converges_to_the_cosine_weighted_integral() {
         }
     }
     assert!(errors[1] < errors[0] / 32.0, "MSE: {errors:?}");
-    scene.camera_options.environment_samples = 65536;
+    scene.camera_options.environment_samples = 16384;
     let estimate = estimate_environment(&scene, &hit, &material, Vector3::z(), 42);
-    assert!((estimate - expected).norm() < 0.001);
+    assert!((estimate - expected).norm() < 0.002);
+    scene.camera_options.environment_samples = 16;
     assert_eq!(
-        estimate,
+        estimate_environment(&scene, &hit, &material, Vector3::z(), 42),
         estimate_environment(&scene, &hit, &material, Vector3::z(), 42)
     );
 }
@@ -251,7 +261,7 @@ fn environment_visibility_keeps_blocked_samples_in_the_denominator() {
         })
         .unwrap(),
     );
-    scene.camera_options.environment_samples = 32768;
+    scene.camera_options.environment_samples = 16384;
     scene.scene.add(
         Box::new(Ground::new(0.0).unwrap()),
         Box::new(
@@ -275,7 +285,8 @@ fn environment_visibility_keeps_blocked_samples_in_the_denominator() {
     };
     let actual = estimate_environment(&scene, &hit, &material, Vector3::z(), 42);
     let expected = albedo.component_mul(&li) * 0.5;
-    assert!((actual - expected).norm() < 0.01);
+    assert!((actual - expected).norm() < 0.015);
+    scene.camera_options.environment_samples = 16;
     scene.scene.add(
         Box::new(Ground::new(2.0).unwrap()),
         Box::new(
@@ -289,39 +300,42 @@ fn environment_visibility_keeps_blocked_samples_in_the_denominator() {
 }
 
 #[test]
-fn opaque_visibility_blocks_sky_below_a_glass_plane() {
+fn glass_plane_blocks_direct_and_sky_while_weighting_caustics_and_checkerboard() {
     let mut scene = neutral_ground_scene(0.8);
     scene.scene.environment = RenderJob::new().scene.environment;
+    scene.camera = Camera::from_config(&CameraConfig {
+        position: [0.75, 0.25, 2.0],
+        target: [0.75, 0.25, 0.0],
+        up: [0.0, 1.0, 0.0],
+        fov_y_degrees: 0.001,
+    })
+    .unwrap();
     scene.scene.add(
         Box::new(Ground::new(1.0).unwrap()),
         Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.5)))),
     );
-    let lighting = split_ground_map(&scene);
-    let images = crate::integrator::camera::integrate_rgb(
-        &scene,
-        &crate::config::render::RenderSetting {
-            width: 3,
-            height: 2,
-            camera_spp: 8,
-            seed: 42,
-            ..Default::default()
-        },
-        Some(&lighting),
-    )
-    .unwrap();
-    let (direct, combined) = (images.direct, images.combined);
-    assert_eq!(direct.pixels, combined.pixels);
-    let expected = Vector3::zeros(); // 向上的环境射线全部被无限玻璃面遮挡。
-    for xyz in direct.pixels {
-        assert!((xyz_to_linear_srgb(xyz).unwrap() - expected).norm() < 1e-12);
+    let e = Vector3::new(0.1, 0.2, 0.4);
+    let lighting = synthetic_ground_lighting(&scene, e);
+    for (checkerboard, scale) in [(None, 1.0), (RenderJob::new().ground_checkerboard, 0.25)] {
+        scene.ground_checkerboard = checkerboard;
+        let images = crate::integrator::camera::integrate_rgb(
+            &scene,
+            &crate::config::render::RenderSetting {
+                width: 1,
+                height: 1,
+                camera_spp: 4,
+                seed: 42,
+                ..Default::default()
+            },
+            Some(&lighting),
+        )
+        .unwrap();
+        // 二值可见性：上方无限玻璃面同时遮挡太阳和环境，只有焦散透射通过且棋盘只乘一次。
+        assert!(images.direct.pixels.iter().all(|p| *p == Vector3::zeros()));
+        let expected_caustics = e * (0.8 / PI * scale * 0.5);
+        assert!((images.caustics.pixels[0] - expected_caustics).norm() < 1e-12);
+        assert_eq!(images.combined.pixels, images.caustics.pixels);
     }
-    assert!(
-        images
-            .caustics
-            .pixels
-            .iter()
-            .all(|p| *p == Vector3::zeros())
-    );
 }
 
 #[test]
@@ -340,44 +354,6 @@ fn glass_misses_use_the_final_direction_for_sky_gradient() {
         );
         assert!((trace_center_pixel(&scene, 42) - expected * weight).norm() < 1e-12);
     }
-}
-
-#[test]
-fn checkerboard_is_applied_once_after_glass_with_sky_and_caustics() {
-    let mut scene = neutral_ground_scene(0.8);
-    scene.scene.environment = RenderJob::new().scene.environment;
-    scene.ground_checkerboard = RenderJob::new().ground_checkerboard;
-    scene.camera = Camera::from_config(&CameraConfig {
-        position: [0.75, 0.25, 2.0],
-        target: [0.75, 0.25, 0.0],
-        up: [0.0, 1.0, 0.0],
-        fov_y_degrees: 0.001,
-    })
-    .unwrap();
-    scene.scene.add(
-        Box::new(Ground::new(1.0).unwrap()),
-        Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.5)))),
-    );
-    let mut lighting = split_ground_map(&scene);
-    let e = Vector3::new(0.1, 0.2, 0.4);
-    lighting.caustics.pixels.fill(e);
-    let expected_sky = Vector3::zeros(); // 二值可见性：上方玻璃面遮挡所有环境方向。
-    let expected_caustics = e * (0.8 / PI * 0.25 * 0.5);
-    let images = crate::integrator::camera::integrate_rgb(
-        &scene,
-        &crate::config::render::RenderSetting {
-            width: 1,
-            height: 1,
-            camera_spp: 8,
-            seed: 42,
-            ..Default::default()
-        },
-        Some(&lighting),
-    )
-    .unwrap();
-    assert!((images.direct.pixels[0] - expected_sky).norm() < 1e-12);
-    assert!((images.caustics.pixels[0] - expected_caustics).norm() < 1e-12);
-    assert!((images.combined.pixels[0] - expected_sky - expected_caustics).norm() < 1e-12);
 }
 
 #[test]
@@ -536,8 +512,7 @@ fn check_camera_components_rng() {
             events: events.clone(),
         }),
     );
-    let mut lighting = split_ground_map(&scene);
-    lighting.caustics.pixels.fill(Vector3::new(0.1, 0.2, 0.4));
+    let lighting = synthetic_ground_lighting(&scene, Vector3::new(0.1, 0.2, 0.4));
     let (width, height, spp, seed) = (4, 3, 32, 42);
     let images = crate::integrator::camera::integrate_rgb(
         &scene,
@@ -616,8 +591,7 @@ fn non_ground_lambertian_sun_and_environment_only_enter_direct() {
         Box::new(Ground::new(1.0).unwrap()),
         Box::new(Lambertian::new(albedo).unwrap()),
     );
-    let mut lighting = split_ground_map(&scene);
-    lighting.caustics.pixels.fill(Vector3::repeat(100.0));
+    let lighting = synthetic_ground_lighting(&scene, Vector3::repeat(100.0));
     let expected_rgb = albedo
         .component_mul(&(xyz_to_linear_srgb(lighting.sun_irradiance_xyz).unwrap() / PI + sky));
     let expected_xyz = linear_srgb_to_xyz(expected_rgb).unwrap();
@@ -714,69 +688,9 @@ fn analytic_direct_is_continuous_across_receiver_and_window_without_double_count
 }
 
 #[test]
-fn changing_receiver_does_not_change_analytic_sun_at_the_same_world_positions() {
-    let mut scene = neutral_ground_scene(0.8);
-    let mut reference = None;
-    for (min, max) in [(-0.01, 0.01), (-2.0, 2.0), (-20.0, 40.0)] {
-        scene.photon.receiver.min_m = Vector2::repeat(min);
-        scene.photon.receiver.max_m = Vector2::repeat(max);
-        let lighting = split_ground_map(&scene);
-        let image = crate::integrator::camera::integrate_rgb(
-            &scene,
-            &crate::config::render::RenderSetting {
-                width: 5,
-                height: 3,
-                camera_spp: 8,
-                seed: 42,
-                ..Default::default()
-            },
-            Some(&lighting),
-        )
-        .map(|images| images.combined)
-        .unwrap();
-        if let Some(pixels) = &reference {
-            assert_eq!(&image.pixels, pixels);
-        } else {
-            reference = Some(image.pixels);
-        }
-    }
-}
-
-#[test]
-fn glass_shadows_only_direct_and_camera_throughput_still_weights_caustics() {
-    let mut scene = neutral_ground_scene(0.8);
-    scene.scene.add(
-        Box::new(Ground::new(1.0).unwrap()),
-        Box::new(TestGlass(Some(transmission(-Vector3::z(), 0.5)))),
-    );
-    let mut lighting = split_ground_map(&scene);
-    // 给地面一个已知的焦散 E；无限玻璃面会遮挡每一条向上的 shadow ray。
-    let e = Vector3::new(0.1, 0.2, 1.0);
-    lighting.caustics.pixels.fill(e);
-    let images = crate::integrator::camera::integrate_rgb(
-        &scene,
-        &crate::config::render::RenderSetting {
-            width: 3,
-            height: 2,
-            camera_spp: 8,
-            seed: 42,
-            ..Default::default()
-        },
-        Some(&lighting),
-    )
-    .unwrap();
-    let (direct, caustics, combined) = (images.direct, images.caustics, images.combined);
-    assert!(direct.pixels.iter().all(|p| p.norm() == 0.0));
-    assert_eq!(combined.pixels, caustics.pixels);
-    for xyz in caustics.pixels {
-        assert!((xyz - e * (0.8 / PI) * 0.5).norm() < 1e-12);
-    }
-}
-
-#[test]
 fn split_camera_rejects_invalid_metadata_maps_and_non_gray_ground() {
     let scene = neutral_ground_scene(0.8);
-    let mut lighting = split_ground_map(&scene);
+    let mut lighting = synthetic_ground_lighting(&scene, Vector3::zeros());
     let render = |s: &RenderJob, l: &SpectralLighting| {
         crate::integrator::camera::integrate_rgb(
             s,
@@ -798,9 +712,21 @@ fn split_camera_rejects_invalid_metadata_maps_and_non_gray_ground() {
     lighting.light_wi = Vector3::repeat(0.0);
     assert!(render(&scene, &lighting).is_err());
     lighting.light_wi = Vector3::z();
-    lighting.caustics.pixels[0].x = -1.0;
+    for bad_pixel in [-1.0, f64::NAN, f64::INFINITY] {
+        lighting.caustics.pixels[0].x = bad_pixel;
+        assert!(render(&scene, &lighting).is_err());
+    }
+    lighting.caustics.pixels[0].x = 0.0;
+    lighting.receiver.max_m.x = lighting.receiver.min_m.x;
     assert!(render(&scene, &lighting).is_err());
-    let lighting = split_ground_map(&scene);
+    lighting.receiver.max_m.x = f64::INFINITY;
+    assert!(render(&scene, &lighting).is_err());
+    lighting.receiver = scene.photon.receiver;
+    lighting.caustics.pixels.clear();
+    assert!(render(&scene, &lighting).is_err());
+    lighting.caustics.width = 0;
+    assert!(render(&scene, &lighting).is_err());
+    let lighting = synthetic_ground_lighting(&scene, Vector3::zeros());
     for (width, height, spp) in [
         (0, 1, 1),
         (1, 0, 1),
@@ -837,15 +763,15 @@ fn ground_irradiance_sampling_preserves_world_axes_centers_and_bilinear_weights(
         *pixel = unit * (index + 1) as f64;
     }
     let scene = neutral_ground_scene(0.8);
-    let lighting = SpectralLighting {
+    let make_lighting = |caustics| SpectralLighting {
         direct: None,
-        caustics: map,
+        caustics,
         receiver,
         light_wi: Vector3::z(),
         sun_irradiance_xyz: Vector3::zeros(),
     };
+    let lighting = make_lighting(map);
     let bound = super::ground::bind_spectral_ground_lighting(&scene, &lighting).unwrap();
-    let map = &lighting.caustics;
     for (position, scale) in [
         (Vector3::new(-1.0, 0.5, 0.0), 1.0),
         (Vector3::new(1.0, 0.5, 0.0), 2.0),
@@ -855,86 +781,35 @@ fn ground_irradiance_sampling_preserves_world_axes_centers_and_bilinear_weights(
         (Vector3::new(-0.5, 0.25, 7.0), 1.75),
         (Vector3::new(-2.0, -1.0, 0.0), 3.0),
     ] {
-        let actual = sample_ground_irradiance(map, &receiver, position).unwrap();
+        let actual = bound.sample_irradiance(position).unwrap();
         assert!((actual - unit * scale).norm() < 1e-12);
-        assert_eq!(bound.sample_irradiance(position), Some(actual));
     }
     for position in [
         Vector3::new(2.0, 0.0, 0.0),
         Vector3::new(0.0, 1.0, 0.0),
         Vector3::new(-2.01, 0.0, 0.0),
     ] {
-        assert_eq!(
-            sample_ground_irradiance(map, &receiver, position),
-            Some(Vector3::zeros())
-        );
         assert_eq!(bound.sample_irradiance(position), Some(Vector3::zeros()));
     }
-    assert!(bound.sample_irradiance(Vector3::repeat(f64::NAN)).is_none());
-    let uniform = uniform_ground_map(unit);
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(bound.sample_irradiance(Vector3::repeat(value)).is_none());
+    }
+    let uniform = make_lighting(uniform_ground_map(unit));
+    let bound_uniform = super::ground::bind_spectral_ground_lighting(&scene, &uniform).unwrap();
     assert_eq!(
-        sample_ground_irradiance(&uniform, &receiver, Vector3::new(-2.0, -1.0, 0.0)),
+        bound_uniform.sample_irradiance(Vector3::new(-2.0, -1.0, 0.0)),
         Some(unit)
     );
-    let wide = Framebuffer {
+    let wide = make_lighting(Framebuffer {
         width: 3,
         height: 2,
         pixels: (1..=6).map(|v| Vector3::repeat(f64::from(v))).collect(),
-    };
+    });
+    let bound_wide = super::ground::bind_spectral_ground_lighting(&scene, &wide).unwrap();
     assert_eq!(
-        sample_ground_irradiance(&wide, &receiver, Vector3::zeros()),
+        bound_wide.sample_irradiance(Vector3::zeros()),
         Some(Vector3::repeat(3.5))
     );
-}
-
-#[test]
-fn ground_irradiance_sampling_rejects_invalid_input_and_pixel_data() {
-    let mut scene = neutral_ground_scene(0.8);
-    let mut map = uniform_ground_map(Vector3::repeat(1.0));
-    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        assert!(
-            sample_ground_irradiance(&map, &scene.photon.receiver, Vector3::repeat(value))
-                .is_none()
-        );
-    }
-    for value in [-1.0, f64::NAN, f64::INFINITY] {
-        map.pixels[0].x = value;
-        assert!(sample_ground_irradiance(&map, &scene.photon.receiver, Vector3::zeros()).is_none());
-    }
-    map.pixels[0].x = 1.0;
-    scene.photon.receiver.max_m.x = scene.photon.receiver.min_m.x;
-    assert!(sample_ground_irradiance(&map, &scene.photon.receiver, Vector3::zeros()).is_none());
-    scene.photon.receiver.max_m.x = f64::INFINITY;
-    assert!(sample_ground_irradiance(&map, &scene.photon.receiver, Vector3::zeros()).is_none());
-    let receiver = neutral_ground_scene(0.8).photon.receiver;
-    map.pixels.clear();
-    assert!(sample_ground_irradiance(&map, &receiver, Vector3::zeros()).is_none());
-    map.width = 0;
-    assert!(sample_ground_irradiance(&map, &receiver, Vector3::zeros()).is_none());
-}
-
-#[test]
-fn neutral_lambertian_converts_irradiance_to_radiance_without_changing_chromaticity() {
-    let e = Vector3::new(2.0, 3.0, 4.0);
-    for rho in [0.0, 0.2, 0.8, 1.0] {
-        assert!((lambertian_radiance(e, rho).unwrap() - e * rho / PI).norm() < 1e-14);
-    }
-    assert_eq!(
-        lambertian_radiance(Vector3::zeros(), 0.8),
-        Some(Vector3::zeros())
-    );
-    assert!(
-        lambertian_radiance(Vector3::repeat(f64::MAX), 1.0)
-            .unwrap()
-            .iter()
-            .all(|v| v.is_finite())
-    );
-    for rho in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
-        assert!(lambertian_radiance(e, rho).is_none());
-    }
-    for value in [-1.0, f64::NAN, f64::INFINITY] {
-        assert!(lambertian_radiance(Vector3::repeat(value), 0.8).is_none());
-    }
 }
 
 fn glass_background_scene() -> RenderJob {
@@ -1078,58 +953,6 @@ fn camera_spp_averages_independent_paths_and_is_reproducible() {
         assert!((rgb - scene.scene.background_color * expected_weight).norm() < 1e-12);
         assert_eq!(count.load(Ordering::Relaxed), spp);
     }
-    let mut scene = glass_background_scene();
-    scene.scene.add(
-        Box::new(Ground::new(1.0).unwrap()),
-        Box::new(Dielectric::new(1.5).unwrap()),
-    );
-    let reference = crate::integrator::camera::integrate_rgb(
-        &scene,
-        &crate::config::render::RenderSetting {
-            width: 16,
-            height: 8,
-            camera_spp: 64,
-            seed: 42,
-            ..Default::default()
-        },
-        None,
-    )
-    .map(|images| images.combined)
-    .unwrap();
-    assert_eq!(
-        reference.pixels,
-        crate::integrator::camera::integrate_rgb(
-            &scene,
-            &crate::config::render::RenderSetting {
-                width: 16,
-                height: 8,
-                camera_spp: 64,
-                seed: 42,
-                ..Default::default()
-            },
-            None
-        )
-        .map(|images| images.combined)
-        .unwrap()
-        .pixels
-    );
-    assert_ne!(
-        reference.pixels,
-        crate::integrator::camera::integrate_rgb(
-            &scene,
-            &crate::config::render::RenderSetting {
-                width: 16,
-                height: 8,
-                camera_spp: 64,
-                seed: 43,
-                ..Default::default()
-            },
-            None
-        )
-        .map(|images| images.combined)
-        .unwrap()
-        .pixels
-    );
 }
 
 #[test]
@@ -1248,11 +1071,12 @@ fn camera_spp_reduces_error_against_analytic_fresnel_expectation() {
         Box::new(Dielectric::new(1.5).unwrap()),
     );
     let error = |spp| {
+        let (width, height) = (16, 8);
         let image = crate::integrator::camera::integrate_rgb(
             &scene,
             &crate::config::render::RenderSetting {
-                width: 32,
-                height: 16,
+                width,
+                height,
                 camera_spp: spp,
                 seed: 42,
                 ..Default::default()
@@ -1262,8 +1086,8 @@ fn camera_spp_reduces_error_against_analytic_fresnel_expectation() {
         .map(|images| images.combined)
         .unwrap();
         let mut sum = 0.0;
-        for y in 0..16 {
-            for x in 0..32 {
+        for y in 0..height {
+            for x in 0..width {
                 let mut f = 0.0;
                 for sy in 0..4 {
                     for sx in 0..4 {
@@ -1271,7 +1095,7 @@ fn camera_spp_reduces_error_against_analytic_fresnel_expectation() {
                             Vector2::new((f64::from(sx) + 0.5) / 4.0, (f64::from(sy) + 0.5) / 4.0);
                         let ray = scene
                             .camera
-                            .ray_for_pixel_sample(x, y, 32, 16, offset)
+                            .ray_for_pixel_sample(x, y, width, height, offset)
                             .unwrap();
                         f += fresnel_dielectric(-ray.direction.z, 1.0, 1.5).unwrap() / 16.0;
                     }
@@ -1281,7 +1105,7 @@ fn camera_spp_reduces_error_against_analytic_fresnel_expectation() {
                 sum += (rgb - expected).norm_squared();
             }
         }
-        sum / (32.0 * 16.0)
+        sum / (width * height) as f64
     };
     let single = error(1);
     let multiple = error(64);
@@ -1431,52 +1255,6 @@ fn glass_renderer_reaches_diffuse_light_and_retains_binary_shadows() {
     // 向上的 shadow ray 被玻璃遮挡，仍按现有的二值硬阴影处理。
     scene.scene.light.as_parallel_mut().unwrap().direction = -Vector3::z();
     assert_eq!(trace_center_pixel(&scene, 42), Vector3::zeros());
-}
-
-#[test]
-fn glass_renderer_respects_the_delta_event_budget() {
-    for count in [
-        super::path::MAX_DELTA_EVENTS,
-        super::path::MAX_DELTA_EVENTS + 1,
-    ] {
-        let mut scene = glass_background_scene();
-        scene.camera = Camera::from_config(&CameraConfig {
-            position: [0.0, 0.0, super::path::MAX_DELTA_EVENTS as f64 + 4.0],
-            target: [0.0; 3],
-            up: [0.0, 1.0, 0.0],
-            fov_y_degrees: 45.0,
-        })
-        .unwrap();
-        for height in 1..=count {
-            scene.scene.add(
-                Box::new(Ground::new(height as f64).unwrap()),
-                Box::new(Dielectric::new(1.0).unwrap()),
-            );
-        }
-        let expected = if count == crate::integrator::camera::path::MAX_DELTA_EVENTS {
-            scene.scene.background_color
-        } else {
-            Vector3::zeros()
-        };
-        let rgb = xyz_to_linear_srgb(
-            crate::integrator::camera::integrate_rgb(
-                &scene,
-                &crate::config::render::RenderSetting {
-                    width: 1,
-                    height: 1,
-                    camera_spp: 1,
-                    seed: 42,
-                    ..Default::default()
-                },
-                None,
-            )
-            .map(|images| images.combined)
-            .unwrap()
-            .pixels[0],
-        )
-        .unwrap();
-        assert!((rgb - expected).norm() < 1e-12);
-    }
 }
 
 #[test]

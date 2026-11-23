@@ -301,6 +301,7 @@ mod tests {
                 .max_diffuse_bounces,
             0
         );
+        json["scene"]["environment"]["map_path"] = json!(null);
         for count in [0, 1, 2, 3, 5, scene::MAX_DIFFUSE_BOUNCES] {
             json["scene"]["max_diffuse_bounces"] = json!(count);
             let config = Config::from_json(&json.to_string()).unwrap();

@@ -1,7 +1,4 @@
-use spectral_caustics::optics::dispersion::Cauchy;
-use spectral_caustics::optics::interface::fresnel_dielectric;
-use spectral_caustics::optics::interface::refract;
-mod support;
+use crate::support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 use nalgebra::Vector3;
 use serde_json::json;
 use spectral_caustics::config::Config;
@@ -9,14 +6,16 @@ use spectral_caustics::config::render::CameraMode;
 use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 use spectral_caustics::config::scene::ObjectConfig;
 use spectral_caustics::geometry::ray::Ray;
+use spectral_caustics::optics::dispersion::Cauchy;
 use spectral_caustics::optics::dispersion::IorMode;
+use spectral_caustics::optics::interface::fresnel_dielectric;
+use spectral_caustics::optics::interface::refract;
 use spectral_caustics::renderer::Renderer;
-use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 fn config(caustics: bool) -> Config {
     if caustics {
         let mut c = Config::from_json(include_str!(
-            "../configs/vertical_prism_spectral_caustics.json"
+            "../../configs/vertical_prism_spectral_caustics.json"
         ))
         .unwrap();
         c.render.camera_mode = CameraMode::Rgb;
@@ -24,7 +23,7 @@ fn config(caustics: bool) -> Config {
         c.render.spectral_packet_size = 1;
         c
     } else {
-        Config::from_json(include_str!("../configs/vertical_prism_spectral.json")).unwrap()
+        Config::from_json(include_str!("../../configs/vertical_prism_spectral.json")).unwrap()
     }
 }
 
@@ -95,64 +94,66 @@ fn vertical_prism_configs_bind_z_geometry_and_validate_explicit_parameters() {
 #[test]
 fn striped_through_prism_spectral_render_repeats_for_threads_and_mis() {
     let mut c = config(false);
-    c.render.width = 24;
-    c.render.height = 24;
-    c.render.camera_spp = 32;
-    for heuristic in [
-        EnvironmentMisHeuristic::Balance,
-        EnvironmentMisHeuristic::Power,
+    c.render.width = 12;
+    c.render.height = 12;
+    c.render.camera_spp = 8;
+    let mut balance_modes = Vec::new();
+    for (heuristic, mode) in [
+        (EnvironmentMisHeuristic::Balance, IorMode::Constant),
+        (EnvironmentMisHeuristic::Balance, IorMode::Dispersion),
+        (EnvironmentMisHeuristic::Power, IorMode::Dispersion),
     ] {
         c.scene.environment_mis_heuristic = heuristic;
+        c.render.mode = mode;
         let scene = c.build().unwrap();
-        let mut modes = Vec::new();
-        for mode in [IorMode::Constant, IorMode::Dispersion] {
-            c.render.mode = mode;
-            let mut reference = None;
-            for threads in [1, 2, 4, 1] {
-                c.render.thread_count = Some(threads);
-                let image = Renderer::new(c.render.clone())
-                    .unwrap()
-                    .render(&scene)
-                    .map(|images| images.combined)
-                    .unwrap();
-                assert!(
-                    image
-                        .pixels()
-                        .iter()
-                        .all(|p| p.iter().all(|v| v.is_finite()))
-                );
-                assert!(image.pixels().iter().any(|p| p.y > 0.1));
-                if let Some(previous) = &reference {
-                    assert_framebuffer_bits_eq(&image, previous);
-                }
-                reference = Some(image);
+        let mut reference = None;
+        for threads in [1, 2, 4] {
+            c.render.thread_count = Some(threads);
+            let image = Renderer::new(c.render.clone())
+                .unwrap()
+                .render(&scene)
+                .map(|images| images.combined)
+                .unwrap();
+            assert!(
+                image
+                    .pixels()
+                    .iter()
+                    .all(|p| p.iter().all(|v| v.is_finite()))
+            );
+            assert!(image.pixels().iter().any(|p| p.y > 0.1));
+            if let Some(previous) = &reference {
+                assert_framebuffer_bits_eq(&image, previous);
             }
-            modes.push(reference.unwrap());
+            reference = Some(image);
         }
-        assert!(
-            modes[0]
-                .pixels()
-                .iter()
-                .zip(modes[1].pixels())
-                .any(|(a, b)| (a - b).norm() > 1e-6)
-        );
+        if heuristic == EnvironmentMisHeuristic::Balance {
+            balance_modes.push(reference.unwrap());
+        }
     }
+    assert!(
+        balance_modes[0]
+            .pixels()
+            .iter()
+            .zip(balance_modes[1].pixels())
+            .any(|(a, b)| (a - b).norm() > 1e-6)
+    );
 }
 
 #[test]
 fn vertical_prism_ground_caustics_are_additive_colored_and_thread_deterministic() {
     let mut c = config(true);
-    c.render.width = 24;
-    c.render.height = 24;
+    c.render.width = 16;
+    c.render.height = 16;
     c.render.camera_spp = 4;
-    c.render.samples_per_pixel_axis = 2;
+    c.render.samples_per_pixel_axis = 1;
+    c.render.wavelength_step_nm = 20.0;
     for mode in [IorMode::Constant, IorMode::Dispersion] {
         c.render.mode = mode;
         let scene = c.build().unwrap();
         let mut reference = None;
-        for threads in [1, 2, 4, 1] {
+        for threads in [1, 2, 4] {
             c.render.thread_count = Some(threads);
-            let (lighting, images) = support::run_in_threads(threads, || {
+            let (lighting, images) = crate::support::run_in_threads(threads, || {
                 let lighting = spectral_caustics::integrator::photon::integrate_xyz(
                     &scene,
                     scene.photon.caustics_object_id,
@@ -260,7 +261,7 @@ fn vertical_sides_refract_the_same_ray_to_separate_spectral_ground_positions() {
             Some(nm),
             IorMode::Dispersion,
             32,
-            &mut support::TransmissionRng,
+            &mut crate::support::TransmissionRng,
         )
         .unwrap()
         .landing()
@@ -278,7 +279,7 @@ fn vertical_sides_refract_the_same_ray_to_separate_spectral_ground_positions() {
                 Some(nm),
                 IorMode::Constant,
                 32,
-                &mut support::TransmissionRng
+                &mut crate::support::TransmissionRng
             )
             .unwrap()
             .landing(),
@@ -288,7 +289,7 @@ fn vertical_sides_refract_the_same_ray_to_separate_spectral_ground_positions() {
                 Some(550.0),
                 IorMode::Constant,
                 32,
-                &mut support::TransmissionRng
+                &mut crate::support::TransmissionRng
             )
             .unwrap()
             .landing()

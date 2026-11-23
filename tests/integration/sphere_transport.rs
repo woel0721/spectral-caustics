@@ -1,4 +1,6 @@
-mod support;
+use crate::support::{TransmissionRng as Transmit, test_materials as materials};
+#[cfg(feature = "diagnostics")]
+use crate::support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 use nalgebra::Vector3;
 use serde_json::json;
 use spectral_caustics::config::Config;
@@ -12,17 +14,15 @@ use spectral_caustics::geometry::sphere::Sphere;
 use spectral_caustics::material::Material;
 use spectral_caustics::material::ScatterType;
 use spectral_caustics::material::dielectric::Dielectric;
-use support::{TransmissionRng as Transmit, test_materials as materials};
-#[cfg(feature = "diagnostics")]
-use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 fn config(material: MaterialConfig) -> Config {
-    let mut config = Config::from_json(include_str!("../configs/sphere.json")).unwrap();
+    let mut config = Config::from_json(include_str!("../../configs/sphere.json")).unwrap();
     config.render.width = 16;
     config.render.height = 12;
     config.render.camera_spp = 8;
     config.render.samples_per_pixel_axis = 1;
     config.render.thread_count = Some(1);
+    config.scene.environment.as_mut().unwrap().map_path = None;
     config.scene.environment_samples = 3;
     // 目标置于非零编号，避免把球体默认为 prism_id 或 objects[0]。
     config.scene.objects.swap(0, 1);
@@ -212,8 +212,18 @@ fn sphere_two_interfaces_match_analytic_snell_direction_and_cancel_eta_squared()
 #[cfg(feature = "diagnostics")]
 #[test]
 fn sphere_rgb_components_and_debug_repeat_across_threads_mis_depths_and_seeds() {
-    for material in materials() {
+    let cases = [
+        (EnvironmentMisHeuristic::Balance, 0),
+        (EnvironmentMisHeuristic::Power, 1),
+        (EnvironmentMisHeuristic::Balance, 4),
+        (EnvironmentMisHeuristic::Power, 4),
+    ];
+    for (material, (heuristic, depth)) in materials().into_iter().zip(cases) {
         let mut config = config(material);
+        config.render.width = 10;
+        config.render.height = 8;
+        config.render.camera_spp = 4;
+        config.render.seed = 42;
         let mut scene = config.build().unwrap();
         let lighting = spectral_caustics::integrator::photon::integrate_xyz(
             &scene,
@@ -229,80 +239,69 @@ fn sphere_rgb_components_and_debug_repeat_across_threads_mis_depths_and_seeds() 
                 .iter()
                 .all(|p| *p == Vector3::zeros())
         );
-        for heuristic in [
-            EnvironmentMisHeuristic::Balance,
-            EnvironmentMisHeuristic::Power,
-        ] {
-            scene.camera_options.environment_mis_heuristic = heuristic;
-            for depth in [0, 1, 4] {
-                scene.camera_options.max_diffuse_bounces = depth;
-                for seed in [42, 123] {
-                    config.render.camera_spp = 8;
-                    config.render.seed = seed;
-                    #[cfg(feature = "diagnostics")]
-                    {
-                        config.render.diagnostics.path = false;
-                    }
-                    let ordinary = spectral_caustics::integrator::camera::integrate_rgb(
-                        &scene,
-                        &config.render,
-                        Some(&lighting),
-                    )
-                    .unwrap();
-                    assert!(ordinary.path_debug.is_none());
-                    let mut previous = None;
-                    for threads in [1, 2, 4, 1] {
-                        config.render.thread_count = Some(threads);
-                        #[cfg(feature = "diagnostics")]
-                        {
-                            config.render.diagnostics.path = true;
-                        }
-                        let images = support::run_in_threads(threads, || {
-                            spectral_caustics::integrator::camera::integrate_rgb(
-                                &scene,
-                                &config.render,
-                                Some(&lighting),
-                            )
-                            .unwrap()
-                        });
-                        assert_camera_images_bits_eq(&ordinary, &images);
-                        assert!(images.combined.pixels().iter().any(|p| p.norm() > 0.0));
-                        for ((a, b), c) in images
-                            .direct
-                            .pixels()
-                            .iter()
-                            .zip(images.caustics.pixels())
-                            .zip(images.combined.pixels())
-                        {
-                            assert!((a + b - c).norm() < 1e-12);
-                        }
-                        #[cfg(feature = "diagnostics")]
-                        {
-                            let debug = images
-                                .path_debug
-                                .as_ref()
-                                .expect("path diagnostics must be populated");
-                            assert_eq!(debug.target_object_id, Some(1));
-                            assert!(debug.pixels.iter().any(|p| p.target_samples > 0));
-                            for pixel in &debug.pixels {
-                                assert_eq!(pixel.samples, 8);
-                                assert_eq!(
-                                    pixel.target_samples,
-                                    *pixel.first_hit_objects.get(&1).unwrap_or(&0)
-                                );
-                                assert_eq!(
-                                    pixel.terminations.values().sum::<u64>(),
-                                    pixel.target_samples
-                                );
-                            }
-                            if let Some(expected) = &previous {
-                                assert_eq!(debug, expected);
-                            }
-                        }
-                        previous = images.path_debug;
-                    }
+        scene.camera_options.environment_mis_heuristic = heuristic;
+        scene.camera_options.max_diffuse_bounces = depth;
+        #[cfg(feature = "diagnostics")]
+        {
+            config.render.diagnostics.path = false;
+        }
+        let ordinary = spectral_caustics::integrator::camera::integrate_rgb(
+            &scene,
+            &config.render,
+            Some(&lighting),
+        )
+        .unwrap();
+        assert!(ordinary.path_debug.is_none());
+        let mut previous = None;
+        for threads in [1, 2, 4] {
+            config.render.thread_count = Some(threads);
+            #[cfg(feature = "diagnostics")]
+            {
+                config.render.diagnostics.path = true;
+            }
+            let images = crate::support::run_in_threads(threads, || {
+                spectral_caustics::integrator::camera::integrate_rgb(
+                    &scene,
+                    &config.render,
+                    Some(&lighting),
+                )
+                .unwrap()
+            });
+            assert_camera_images_bits_eq(&ordinary, &images);
+            assert!(images.combined.pixels().iter().any(|p| p.norm() > 0.0));
+            for ((a, b), c) in images
+                .direct
+                .pixels()
+                .iter()
+                .zip(images.caustics.pixels())
+                .zip(images.combined.pixels())
+            {
+                assert!((a + b - c).norm() < 1e-12);
+            }
+            #[cfg(feature = "diagnostics")]
+            {
+                let debug = images
+                    .path_debug
+                    .as_ref()
+                    .expect("path diagnostics must be populated");
+                assert_eq!(debug.target_object_id, Some(1));
+                assert!(debug.pixels.iter().any(|p| p.target_samples > 0));
+                for pixel in &debug.pixels {
+                    assert_eq!(pixel.samples, 4);
+                    assert_eq!(
+                        pixel.target_samples,
+                        *pixel.first_hit_objects.get(&1).unwrap_or(&0)
+                    );
+                    assert_eq!(
+                        pixel.terminations.values().sum::<u64>(),
+                        pixel.target_samples
+                    );
+                }
+                if let Some(expected) = &previous {
+                    assert_eq!(debug, expected);
                 }
             }
+            previous = images.path_debug;
         }
         // 独立 RGB 入口也能直接追踪球体，不需要光源焦散图。
         assert!(

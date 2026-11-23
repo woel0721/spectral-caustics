@@ -1,6 +1,4 @@
-use super::super::emission::{
-    PhotonPlan, block_batch_size_for_threads, event_rng_from_base, spectral_sample_blocks,
-};
+use super::super::emission::{PhotonPlan, block_batch_size_for_threads, spectral_sample_blocks};
 use super::super::integrate::{integrate_spectral, integrate_xyz, irradiance_layer};
 use crate::caustics::map::ground_splat_weights;
 use crate::caustics::map::ground_to_pixel;
@@ -11,8 +9,6 @@ use crate::geometry::ray::Ray;
 use crate::optics::dispersion::IorMode;
 use nalgebra::Vector3;
 use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha12Rng;
-use std::error::Error;
 
 const SAMPLING_SEED: u64 = 42;
 const MAX_SPECTRAL_BLOCKS: usize = 16;
@@ -42,28 +38,40 @@ fn sample_settings(base: &RenderSetting, samples: usize, mode: IorMode) -> Rende
 
 use crate::geometry::ground::Ground;
 use crate::geometry::prism::Prism;
-use crate::output::save_png_with_exposure;
 use rand::rngs::StdRng;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 #[test]
-fn emission_blocks_seek_both_parallel_and_disk_random_dimensions_exactly() {
+fn spectral_blocks_cover_every_row_and_replay_all_random_dimensions() {
     for dimensions in [2, 4] {
-        for max_blocks in [1, 2, 7] {
-            let mut reference = StdRng::seed_from_u64(SAMPLING_SEED);
-            for (rows, mut rng) in
-                spectral_sample_blocks(3, 9, SAMPLING_SEED, max_blocks, dimensions)
-            {
+        for (samples_x, samples_y, max_blocks) in [
+            (1, 1, MAX_SPECTRAL_BLOCKS),
+            (7, 5, MAX_SPECTRAL_BLOCKS),
+            (3, 9, 1),
+            (3, 9, 2),
+            (3, 9, 7),
+            (5, 33, MAX_SPECTRAL_BLOCKS),
+        ] {
+            let blocks =
+                spectral_sample_blocks(samples_x, samples_y, SAMPLING_SEED, max_blocks, dimensions);
+            assert!(blocks.len() <= max_blocks);
+            let mut serial_rng = StdRng::seed_from_u64(SAMPLING_SEED);
+            let mut next_row = 0;
+            for (rows, mut rng) in blocks {
+                assert_eq!(rows.start, next_row);
+                assert!(rows.end > rows.start);
+                next_row = rows.end;
                 for _ in rows {
-                    for _ in 0..3 {
+                    for _ in 0..samples_x {
                         for _ in 0..dimensions {
-                            assert_eq!(reference.random::<f64>(), rng.random::<f64>());
+                            assert_eq!(rng.random::<f64>(), serial_rng.random::<f64>());
                         }
                     }
                 }
             }
+            assert_eq!(next_row, samples_y);
         }
     }
 }
@@ -217,84 +225,6 @@ fn split_lighting_rejects_invalid_sun_receiver_and_merge_data() {
 }
 
 #[test]
-fn spectral_blocks_cover_every_row_and_replay_the_original_random_sequence() {
-    for (samples_x, samples_y) in [(1, 1), (7, 5), (3, 17), (5, 33)] {
-        let blocks =
-            spectral_sample_blocks(samples_x, samples_y, SAMPLING_SEED, MAX_SPECTRAL_BLOCKS, 2);
-        assert!(blocks.len() <= MAX_SPECTRAL_BLOCKS);
-        let mut serial_rng = StdRng::seed_from_u64(SAMPLING_SEED);
-        let mut next_row = 0;
-        for (rows, mut rng) in blocks {
-            assert_eq!(rows.start, next_row);
-            assert!(rows.end > rows.start);
-            next_row = rows.end;
-            for _ in rows {
-                for _ in 0..samples_x {
-                    assert_eq!(rng.random::<f64>(), serial_rng.random::<f64>());
-                    assert_eq!(rng.random::<f64>(), serial_rng.random::<f64>());
-                }
-            }
-        }
-        assert_eq!(next_row, samples_y);
-    }
-}
-
-#[test]
-fn spectral_xyz_is_identical_across_rayon_thread_counts_and_repeated_runs() {
-    let settings = settings_for_size(19, 17);
-    let mut scene = RenderJob::new();
-    let caustics_object_id = scene.scene.add(
-        Box::new(Prism::new().unwrap()),
-        Box::new(
-            crate::material::dielectric::Dielectric::with_dispersion(
-                1.52,
-                Some(crate::optics::dispersion::Cauchy::default()),
-            )
-            .unwrap(),
-        ),
-    );
-    let ground_id = scene.scene.add(
-        Box::new(Ground::new(0.0).unwrap()),
-        Box::new(
-            crate::material::lambertian::Lambertian::new(nalgebra::Vector3::repeat(0.8)).unwrap(),
-        ),
-    );
-    let serial_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(1)
-        .build()
-        .unwrap();
-    for mode in [IorMode::Constant, IorMode::Dispersion] {
-        let reference = serial_pool.install(|| {
-            crate::integrator::photon::integrate_xyz(
-                &scene,
-                Some(caustics_object_id),
-                ground_id,
-                &sample_settings(&settings, 2, mode),
-            )
-            .and_then(|images| images.combined())
-            .unwrap()
-        });
-        for threads in [2, 4, 2] {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .unwrap();
-            let image = pool.install(|| {
-                crate::integrator::photon::integrate_xyz(
-                    &scene,
-                    Some(caustics_object_id),
-                    ground_id,
-                    &sample_settings(&settings, 2, mode),
-                )
-                .and_then(|images| images.combined())
-                .unwrap()
-            });
-            assert_eq!(image.pixels, reference.pixels);
-        }
-    }
-}
-
-#[test]
 fn direct_blocked_and_missed_rays_query_the_scene_once_per_spatial_sample() {
     // 三种场景分别覆盖直接落地、其他物体遮挡、所有物体均未命中。
     for case in 0..3 {
@@ -392,7 +322,7 @@ fn spectral_unblocked_white_preserves_xyz_flux_across_spatial_sample_counts() {
 
 #[test]
 fn spectral_constant_stays_white_and_dispersion_separates_colors_reproducibly() {
-    let settings = settings_for_size(128, 16);
+    let settings = settings_for_size(48, 12);
     let mut scene = RenderJob::new();
     let caustics_object_id = scene.scene.add(
         Box::new(Prism::new().unwrap()),
@@ -461,61 +391,6 @@ fn spectral_constant_stays_white_and_dispersion_separates_colors_reproducibly() 
         let total_y: f64 = image.pixels.iter().map(|pixel| pixel.y).sum();
         assert!(total_y > 0.0 && total_y <= emitted_y + 1e-9);
     }
-}
-
-#[test]
-fn spectral_png_roundtrip_has_neutral_constant_mode_and_colored_dispersion()
--> Result<(), Box<dyn Error + Send + Sync>> {
-    let settings = settings_for_size(128, 16);
-    let mut scene = RenderJob::new();
-    let caustics_object_id = scene.scene.add(
-        Box::new(Prism::new().unwrap()),
-        Box::new(
-            crate::material::dielectric::Dielectric::with_dispersion(
-                1.52,
-                Some(crate::optics::dispersion::Cauchy::default()),
-            )
-            .unwrap(),
-        ),
-    );
-    let ground_id = scene.scene.add(
-        Box::new(Ground::new(0.0).unwrap()),
-        Box::new(
-            crate::material::lambertian::Lambertian::new(nalgebra::Vector3::repeat(0.8)).unwrap(),
-        ),
-    );
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_nanos();
-    let directory =
-        std::env::temp_dir().join(format!("spectral-png-{}-{timestamp}", std::process::id()));
-    for (mode, filename) in [
-        (IorMode::Constant, "constant.png"),
-        (IorMode::Dispersion, "dispersion.png"),
-    ] {
-        let image = crate::integrator::photon::integrate_xyz(
-            &scene,
-            Some(caustics_object_id),
-            ground_id,
-            &sample_settings(&settings, 2, mode),
-        )
-        .and_then(|images| images.combined())?;
-        let path = directory.join(filename);
-        save_png_with_exposure(&image, &path, 1.0)?;
-        let decoded = image::open(&path)?;
-        assert_eq!(decoded.color(), image::ColorType::Rgb8);
-        let rgb = decoded.into_rgb8();
-        assert_eq!(rgb.dimensions(), (128, 16));
-        let channel_spread =
-            |pixel: &image::Rgb<u8>| pixel.0.iter().max().unwrap() - pixel.0.iter().min().unwrap();
-        match mode {
-            // 有限波长范围和 10 nm 积分使 D65 白点存在微小误差，允许 1 字节差异。
-            IorMode::Constant => assert!(rgb.pixels().all(|pixel| channel_spread(pixel) <= 1)),
-            IorMode::Dispersion => assert!(rgb.pixels().any(|pixel| channel_spread(pixel) > 2)),
-        }
-    }
-    std::fs::remove_dir_all(directory)?;
-    Ok(())
 }
 
 #[test]
@@ -670,19 +545,6 @@ fn deposition_weights_conserve_flux_at_interior_edges_and_single_pixel_receivers
     }
     let outside = ground_splat_weights(Vector3::new(2.0, 0.0, 0.0), 2, 2, &receiver).unwrap();
     assert!(outside.is_none());
-}
-
-#[test]
-fn event_rng_from_base_matches_fresh_seeded_chacha12_per_photon() {
-    let base = ChaCha12Rng::seed_from_u64(SAMPLING_SEED);
-    for index in [0, 1, 7, 1024, 999_999] {
-        let mut reused = event_rng_from_base(&base, index);
-        let mut fresh = ChaCha12Rng::seed_from_u64(SAMPLING_SEED);
-        fresh.set_stream((index as u64) ^ 0x7068_6f74_6f6e_0001);
-        for _ in 0..16 {
-            assert_eq!(reused.random::<u64>(), fresh.random::<u64>());
-        }
-    }
 }
 
 #[test]

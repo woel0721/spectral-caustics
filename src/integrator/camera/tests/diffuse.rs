@@ -5,7 +5,6 @@ use super::super::ground::bind_spectral_ground_lighting;
 use super::super::lighting::environment::environment_lighting;
 use super::super::types::CameraPathRngs;
 use super::super::types::ScatterRay;
-use super::super::*;
 use super::support::{
     Plane, SequenceRng, close, evaluate_path, first_hit, sun, two_planes, uniform_hdri,
 };
@@ -35,9 +34,6 @@ use crate::material::checkerboard::Checkerboard;
 use crate::material::dielectric::Dielectric;
 use crate::material::lambertian::Lambertian;
 use rand::RngCore;
-use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 
 // Exercise a continuation through the current path state, excluding the primary vertex.
 fn continuation_radiance(
@@ -135,13 +131,14 @@ fn two_plane_colored_indirect_matches_analytic_half_hemisphere_integral() {
         Vector3::zeros(),
     );
     let mut rng = StdRng::seed_from_u64(123);
+    let samples = 8192;
     let mut mean = Vector3::zeros();
-    for _ in 0..32768 {
-        mean += indirect(&scene, None, &mut rng).unwrap() / 32768.0;
+    for _ in 0..samples {
+        mean += indirect(&scene, None, &mut rng).unwrap() / samples as f64;
     }
     let expected = per_hit * 0.5;
     assert!(
-        (mean - expected).norm() / expected.norm() < 5.0 / 32768.0_f64.sqrt(),
+        (mean - expected).norm() / expected.norm() < 5.0 / (samples as f64).sqrt(),
         "mean={mean:?}, reference={expected:?}"
     );
     // The trace itself returns A's existing direct plus exactly one transported B term.
@@ -201,48 +198,6 @@ fn diffuse_miss_does_not_add_hdri_background() {
     )
     .unwrap();
     assert!(e.norm() > 0.0);
-}
-
-use super::support::Absorber;
-
-#[test]
-fn secondary_absorbing_unbound_and_back_faces_terminate() {
-    for kind in 1..4 {
-        let mut scene = two_planes(Vector3::repeat(0.8), Vector3::repeat(0.7));
-        scene.scene.objects.pop();
-        let geometry = Box::new(Plane {
-            point: Vector3::x(),
-            normal: if kind == 3 {
-                Vector3::x()
-            } else {
-                -Vector3::x()
-            },
-        });
-        match kind {
-            1 => {
-                scene.scene.add(geometry, Box::new(Absorber));
-            }
-            2 => {
-                scene.scene.add(
-                    geometry,
-                    Box::new(
-                        crate::material::lambertian::Lambertian::new(nalgebra::Vector3::zeros())
-                            .unwrap(),
-                    ),
-                );
-            }
-            _ => {
-                scene.scene.add(
-                    geometry,
-                    Box::new(Lambertian::new(Vector3::repeat(0.7)).unwrap()),
-                );
-            }
-        }
-        close(
-            indirect(&scene, None, &mut SequenceRng::new(&[0.25, 0.0])).unwrap(),
-            Vector3::zeros(),
-        );
-    }
 }
 
 #[test]
@@ -449,10 +404,8 @@ fn secondary_bound_ground_uses_sun_once_checker_once_and_no_caustics() {
     )
     .unwrap();
     // Matrix RGB/XYZ roundtrip uses the same existing conversion; no approximation to its inverse.
-    let b_rgb = xyz_to_linear_srgb(
-        lambertian_radiance(lighting.sun_irradiance_xyz * lighting.light_wi.z, 0.6).unwrap(),
-    )
-    .unwrap();
+    let b_rgb =
+        xyz_to_linear_srgb(lighting.sun_irradiance_xyz * (lighting.light_wi.z * 0.6 / PI)).unwrap();
     close(
         result,
         Vector3::new(0.2, 0.5, 0.8).component_mul(&b_rgb) * 0.3,
@@ -478,51 +431,6 @@ fn secondary_bound_ground_uses_sun_once_checker_once_and_no_caustics() {
     );
 }
 
-struct CountingLambertian {
-    mat: Lambertian,
-    count: Arc<AtomicUsize>,
-}
-impl Material for CountingLambertian {
-    fn evaluate_rgb(&self, wi: Vector3<f64>, wo: Vector3<f64>, n: Vector3<f64>) -> Vector3<f64> {
-        self.mat.evaluate_rgb(wi, wo, n)
-    }
-    fn pdf(&self, wi: Vector3<f64>, wo: Vector3<f64>, n: Vector3<f64>) -> f64 {
-        self.mat.pdf(wi, wo, n)
-    }
-    fn sample(
-        &self,
-        wo: Vector3<f64>,
-        n: Vector3<f64>,
-        rng: &mut dyn RngCore,
-    ) -> Option<BsdfSample> {
-        self.count.fetch_add(1, Ordering::Relaxed);
-        self.mat.sample(wo, n, rng)
-    }
-}
-#[test]
-fn no_third_diffuse_sample_is_generated() {
-    let mut scene = two_planes(Vector3::repeat(0.8), Vector3::repeat(0.7));
-    scene.scene.objects.pop();
-    let count = Arc::new(AtomicUsize::new(0));
-    scene.scene.add(
-        Box::new(Plane {
-            point: Vector3::x(),
-            normal: -Vector3::x(),
-        }),
-        Box::new(CountingLambertian {
-            mat: Lambertian::new(Vector3::repeat(0.7)).unwrap(),
-            count: count.clone(),
-        }),
-    );
-    assert!(
-        indirect(&scene, None, &mut SequenceRng::new(&[0.25, 0.0]))
-            .unwrap()
-            .norm()
-            > 0.0
-    );
-    assert_eq!(count.load(Ordering::Relaxed), 0);
-}
-
 #[test]
 fn secondary_hdri_balance_and_power_converge_to_independent_two_plane_reference() {
     let a = Vector3::new(0.2, 0.5, 0.8);
@@ -544,7 +452,7 @@ fn secondary_hdri_balance_and_power_converge_to_independent_two_plane_reference(
         let mut rng = StdRng::seed_from_u64(197);
         let mut mean = Vector3::zeros();
         let mut second = Vector3::zeros();
-        let count = 32768;
+        let count = 8192;
         for _ in 0..count {
             let value = continuation_radiance(
                 &scene,

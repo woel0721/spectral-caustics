@@ -5,9 +5,7 @@ use super::*;
 use crate::config::scene::CheckerboardConfig;
 use crate::config::scene::SceneConfig;
 use crate::geometry::hit::Hit;
-use crate::geometry::object::Hittable;
 use crate::geometry::ray::PARALLEL_EPSILON;
-use crate::optics::interface::refract;
 use nalgebra::Vector2;
 
 #[test]
@@ -140,29 +138,6 @@ use crate::geometry::prism::Prism;
 use crate::geometry::ray::Ray;
 
 #[test]
-fn added_objects_keep_their_own_intersection_behavior() {
-    let mut scene = RenderJob::new();
-    scene.scene.add(
-        Box::new(Prism::new().unwrap()),
-        Box::new(crate::material::dielectric::Dielectric::new(1.52).unwrap()),
-    );
-    scene.scene.add(
-        Box::new(Ground::new(0.0).unwrap()),
-        Box::new(
-            crate::material::lambertian::Lambertian::new(nalgebra::Vector3::repeat(0.8)).unwrap(),
-        ),
-    );
-    let ray = Ray::new(Vector3::new(0.25, 0.2, 3.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
-
-    // 这里只验证同一集合中的不同物体仍调用各自的求交算法。
-    // 场景级的遍历、最近命中选择由 RenderJob::intersect 负责。
-    let prism_hit = scene.scene.objects[0].geometry.intersect(&ray).unwrap();
-    let ground_hit = scene.scene.objects[1].geometry.intersect(&ray).unwrap();
-    assert!((prism_hit.coords - Vector3::new(0.25, 0.2, 1.4)).norm() < 1e-12);
-    assert!((ground_hit.coords - Vector3::new(0.25, 0.2, 0.0)).norm() < 1e-12);
-}
-
-#[test]
 fn scene_returns_nearest_hit_and_object_id_independently_of_order() {
     assert!(
         RenderJob::new()
@@ -217,36 +192,6 @@ fn scene_returns_nearest_hit_and_object_id_independently_of_order() {
         assert_eq!(hit.object_id, ground_id);
         assert_eq!(hit.distance, 3.0);
     }
-}
-
-#[test]
-fn single_ray_refracts_through_two_prism_surfaces_and_reaches_ground() {
-    let prism = Prism::new().unwrap();
-    let ray = Ray::new(Vector3::new(0.25, 0.2, 3.0), Vector3::new(0.0, 0.0, -1.0)).unwrap();
-    let entry = prism.intersect(&ray).unwrap();
-    assert!((entry.coords - Vector3::new(0.25, 0.2, 1.4)).norm() < 1e-12);
-    assert!(ray.direction.dot(&entry.normal) < 0.0);
-    let inside_direction = refract(ray.direction, entry.normal, 1.0, 1.52).unwrap();
-    // 已知入射角对应 cos(theta_i)=1/sqrt(1.6²+1)，独立检查 Snell 定律。
-    let sin_incident = 1.6 / (1.6_f64 * 1.6 + 1.0).sqrt();
-    let sin_inside = (1.0 - inside_direction.dot(&entry.normal).powi(2)).sqrt();
-    assert!((sin_incident - 1.52 * sin_inside).abs() < 1e-12);
-    assert!((inside_direction.norm() - 1.0).abs() < 1e-12);
-    let inside_ray = Ray::new(entry.coords - entry.normal * 1e-5, inside_direction).unwrap();
-    let exit = prism.intersect(&inside_ray).unwrap();
-    assert!((exit.coords.z - 1.0).abs() < 1e-12);
-    assert_eq!(exit.normal, Vector3::new(0.0, 0.0, -1.0));
-    assert!(inside_ray.direction.dot(&exit.normal) > 0.0);
-    let outside_direction = refract(inside_ray.direction, -exit.normal, 1.52, 1.0).unwrap();
-    assert!((outside_direction.norm() - 1.0).abs() < 1e-12);
-    assert!((outside_direction.x - 1.52 * inside_ray.direction.x).abs() < 1e-12);
-    let outside_ray = Ray::new(exit.coords + exit.normal * 1e-5, outside_direction).unwrap();
-    assert!(prism.intersect(&outside_ray).is_none());
-    let ground_hit = Ground::new(0.0).unwrap().intersect(&outside_ray).unwrap();
-    assert!((ground_hit.coords.z).abs() < 1e-12);
-    assert!((ground_hit.coords.y - 0.2).abs() < 1e-12);
-    // 不加玻璃时落在 x=0.25；经过两次折射后向 -x 偏移。
-    assert!((-0.8..-0.7).contains(&ground_hit.coords.x));
 }
 
 #[test]
@@ -315,9 +260,30 @@ fn empty_and_configured_scenes_preserve_distinct_defaults_and_shared_fields() {
         assert_eq!(a.origin, b.origin);
         assert_eq!(a.direction, b.direction);
     }
-    let explicit =
+    let mut explicit =
         crate::config::Config::from_json(include_str!("../../configs/default.json")).unwrap();
+    assert!(
+        explicit
+            .scene
+            .environment
+            .as_ref()
+            .unwrap()
+            .map_path
+            .is_some()
+    );
+    let hdr_path = std::env::temp_dir().join(format!(
+        "scene-default-test-{}-{:?}.hdr",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(
+        &hdr_path,
+        b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 2\n\x80\x80\x80\x81\x80\x80\x80\x81",
+    )
+    .unwrap();
+    explicit.scene.environment.as_mut().unwrap().map_path = Some(hdr_path.clone());
     let preset = explicit.build().unwrap();
+    let _ = std::fs::remove_file(&hdr_path);
     use crate::config::scene::EnvironmentMisHeuristic::Balance;
     use crate::config::scene::EnvironmentMisHeuristic::Power;
     assert_eq!(

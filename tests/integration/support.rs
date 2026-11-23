@@ -25,8 +25,6 @@ pub fn assert_framebuffer_bits_eq(actual: &Framebuffer, expected: &Framebuffer) 
     }
 }
 
-// Each integration test builds its own copy of this module.
-#[allow(dead_code)]
 pub fn assert_camera_images_bits_eq(
     actual: &CameraLightingImages,
     expected: &CameraLightingImages,
@@ -36,7 +34,6 @@ pub fn assert_camera_images_bits_eq(
     assert_framebuffer_bits_eq(&actual.combined, &expected.combined);
 }
 
-#[allow(dead_code)]
 pub fn run_in_threads<T: Send>(threads: usize, work: impl FnOnce() -> T + Send) -> T {
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
@@ -45,10 +42,8 @@ pub fn run_in_threads<T: Send>(threads: usize, work: impl FnOnce() -> T + Send) 
         .install(work)
 }
 
-#[allow(dead_code)]
 pub struct TempDir(pub PathBuf);
 
-#[allow(dead_code)]
 impl TempDir {
     pub fn new(prefix: &str) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -118,7 +113,6 @@ impl Drop for TempDir {
     }
 }
 
-#[allow(dead_code)]
 pub fn test_materials() -> [MaterialConfig; 4] {
     [
         MaterialConfig::Dielectric {
@@ -141,7 +135,6 @@ pub fn test_materials() -> [MaterialConfig; 4] {
     ]
 }
 
-#[allow(dead_code)]
 pub struct TransmissionRng;
 impl rand::RngCore for TransmissionRng {
     fn next_u64(&mut self) -> u64 {

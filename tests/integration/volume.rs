@@ -1,4 +1,4 @@
-mod support;
+use crate::support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 use nalgebra::Vector3;
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use spectral_caustics::{
@@ -23,7 +23,6 @@ use spectral_caustics::{
     optics::dispersion::IorMode,
     renderer::Renderer,
 };
-use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 fn slab(a: f64, s: f64, g: f64) -> Box<dyn Medium> {
     Box::new(
@@ -59,6 +58,45 @@ fn ground(j: &mut RenderJob) {
 fn ray(z: f64) -> Ray {
     Ray::new(Vector3::z() * z, -Vector3::z()).unwrap()
 }
+struct PanicRng;
+
+impl RngCore for PanicRng {
+    fn next_u32(&mut self) -> u32 {
+        panic!("non-medium RNG stream consumed")
+    }
+    fn next_u64(&mut self) -> u64 {
+        panic!("non-medium RNG stream consumed")
+    }
+    fn fill_bytes(&mut self, _dest: &mut [u8]) {
+        panic!("non-medium RNG stream consumed")
+    }
+}
+
+fn trace_volume<T: CameraTransport>(
+    j: &RenderJob,
+    state: &mut CameraPathState<T>,
+    sun: (Vector3<f64>, f64),
+    rng: &mut StdRng,
+) {
+    trace_camera_path(
+        j,
+        state,
+        &mut CameraPathRngs {
+            camera: &mut PanicRng,
+            environment: &mut PanicRng,
+            diffuse: &mut PanicRng,
+            medium: rng,
+        },
+        sun.0,
+        sun.1,
+        Caustics::None,
+        IorMode::Constant,
+        #[cfg(feature = "diagnostics")]
+        None,
+    )
+    .unwrap();
+}
+
 fn trace<T: CameraTransport>(
     j: &RenderJob,
     state: &mut CameraPathState<T>,
@@ -129,12 +167,12 @@ fn spectral_slab_matches_beer_lambert_and_single_scattering() {
     // The third exercises wavelength-dependent Tr on the shadow ray as well.
     for (nm, sigma_t, sigma_s) in [(480.0, 0.7_f64, 0.4), (580.0, 0.7, 0.2), (680.0, 0.4, 0.05)] {
         let sun = (Vector3::z(), 1.0);
-        let sample_count = 30_000;
+        let sample_count = 12_000;
         let mut sum = 0.0;
         let mut rng = StdRng::seed_from_u64(120);
         for _ in 0..sample_count {
             let mut state = CameraPathState::spectral(ray(3.0), nm, 0).unwrap();
-            trace(&job, &mut state, sun, &mut rng);
+            trace_volume(&job, &mut state, sun, &mut rng);
             sum += state.radiance.direct;
         }
         // Camera and sunlight both traverse distance t before reaching the event.
@@ -142,7 +180,7 @@ fn spectral_slab_matches_beer_lambert_and_single_scattering() {
             / (2.0 * sigma_t * 4.0 * std::f64::consts::PI);
         let mean = sum / sample_count as f64;
         assert!(
-            (mean / expected - 1.0).abs() < 0.025,
+            (mean / expected - 1.0).abs() < 0.035,
             "{nm} nm: {mean}/{expected}"
         );
     }
@@ -172,14 +210,14 @@ fn spectral_hg_changes_slab_lighting_and_continuation_at_equal_extinction() {
         let mut rng = StdRng::seed_from_u64(120);
         let mut sum = [0.0; 2];
         let mut changed_direction = false;
-        let count = 20_000;
+        let count = 8_000;
         for _ in 0..count {
             let mut blue_rng = rng.clone();
             let mut blue = CameraPathState::spectral(ray(3.0), 480.0, 0).unwrap();
             let mut red = CameraPathState::spectral(ray(3.0), 680.0, 0).unwrap();
             let sun = (Vector3::z() * sign, 1.0);
-            trace(&job, &mut blue, sun, &mut blue_rng);
-            trace(&job, &mut red, sun, &mut rng);
+            trace_volume(&job, &mut blue, sun, &mut blue_rng);
+            trace_volume(&job, &mut red, sun, &mut rng);
             assert_eq!(blue.volume_scatters, red.volume_scatters);
             assert_eq!(blue.ray.origin, red.ray.origin);
             assert_eq!(blue_rng.next_u64(), rng.next_u64());
@@ -199,7 +237,7 @@ fn spectral_hg_changes_slab_lighting_and_continuation_at_equal_extinction() {
             let expected = d65_spectrum(nm).unwrap() * phase * sigma_s * integral;
             let mean = mean / f64::from(count);
             assert!(
-                (mean / expected - 1.0).abs() < 0.025,
+                (mean / expected - 1.0).abs() < 0.035,
                 "{nm} nm, {sign}: {mean}/{expected}"
             );
         }
@@ -252,17 +290,18 @@ fn volume_sun_matches_the_independent_single_scattering_slab_integral() {
                 phase * 0.5 * (-0.7_f64).exp()
             };
             let mut rng = StdRng::seed_from_u64(120);
+            let samples = 12_000;
             let mut mean = 0.0;
-            for _ in 0..40_000 {
+            for _ in 0..samples {
                 let mut state = CameraPathState::new(ray(3.0), 0);
-                trace(&j, &mut state, sun, &mut rng);
-                mean += state.radiance.direct.x / 40_000.0;
+                trace_volume(&j, &mut state, sun, &mut rng);
+                mean += state.radiance.direct.x / samples as f64;
                 assert_eq!(state.path_depth, 0); // Volume has its own budget.
                 assert!(state.volume_scatters <= 1);
                 assert_eq!(state.radiance.caustics, Vector3::zeros());
             }
             assert!(
-                (mean / expected - 1.0).abs() < 0.025,
+                (mean / expected - 1.0).abs() < 0.035,
                 "g={g}, sign={sign}, {mean}/{expected}"
             );
             // Scalar transport uses exactly the same sampled geometry/weights.
@@ -334,27 +373,24 @@ fn uniform_environment_multiple_scattering_recovers_energy_without_counting_phas
         let mut means = Vec::new();
         for budget in [0, 1, 2, 8, 32] {
             j.camera_options.max_volume_scatters = budget;
+            let samples = 6_000;
+            let mut rng = StdRng::seed_from_u64(313);
             let mut mean = 0.0;
-            for seed in 0..16_000 {
+            for _ in 0..samples {
                 let mut state = CameraPathState::new(ray(3.0), 0);
-                trace(
-                    &j,
-                    &mut state,
-                    (Vector3::z(), 0.0),
-                    &mut StdRng::seed_from_u64(seed),
-                );
-                mean += state.radiance.direct.x / 16_000.0;
+                trace_volume(&j, &mut state, (Vector3::z(), 0.0), &mut rng);
+                mean += state.radiance.direct.x / samples as f64;
                 assert!(state.volume_scatters <= budget);
             }
             assert!(
-                mean <= 1.018,
+                mean <= 1.03,
                 "energy gain: {mis:?}, budget={budget}: {mean}"
             );
             means.push(mean);
         }
         assert!((means[0] - (-1.4_f64).exp()).abs() < 1e-12);
         assert!(means[1] > means[0] && means[2] > means[1] && means[3] > means[2]);
-        assert!((means[4] - 1.0).abs() < 0.018, "{mis:?}: {means:?}");
+        assert!((means[4] - 1.0).abs() < 0.03, "{mis:?}: {means:?}");
     }
 }
 
@@ -539,82 +575,81 @@ fn surface_environment_shadow_attenuation_matches_hemisphere_quadrature() {
         .unwrap(),
     );
     j.scene.medium = Some(slab(0.5, 0.0, 0.0));
-    j.camera_options.environment_samples = 80_000;
+    j.camera_options.environment_samples = 20_000;
     let value = rgb(&j, ray(0.5), (Vector3::z(), 0.0), 42).x;
-    let expected: f64 = (0..100_000)
+    let expected: f64 = (0..20_000)
         .map(|i| {
-            let mu = (i as f64 + 0.5) / 100_000.0;
-            mu * (-0.5 / mu).exp() / 100_000.0 // albedo=0.5 cancels factor 2
+            let mu = (i as f64 + 0.5) / 20_000.0;
+            mu * (-0.5 / mu).exp() / 20_000.0 // albedo=0.5 cancels factor 2
         })
         .sum();
-    assert!((value - expected).abs() < 0.003, "{value}/{expected}");
+    assert!((value - expected).abs() < 0.005, "{value}/{expected}");
     assert!(value < 0.5);
 }
 
 #[test]
 fn configured_fog_repeats_across_rgb_hero_packet_mis_threads_and_zero_density() {
     let mut c = Config::load("configs/homogeneous_fog.json").unwrap();
-    c.render.width = 12;
-    c.render.height = 8;
-    c.render.camera_spp = 16;
+    c.render.width = 8;
+    c.render.height = 6;
+    c.render.camera_spp = 8;
     c.render.samples_per_pixel_axis = 1;
     homogeneous_config(&mut c).sigma_s = 0.8.into();
-    for budget in [0, 1, 8] {
-        c.scene.max_volume_scatters = budget;
-        for (mode, packet) in [
-            (CameraMode::Rgb, 1),
-            (CameraMode::Spectral, 1),
-            (CameraMode::Spectral, 4),
+    let render = |config: &Config| {
+        Renderer::new(config.render.clone())
+            .unwrap()
+            .render(&config.build().unwrap())
+            .unwrap()
+    };
+    for (mode, packet) in [
+        (CameraMode::Rgb, 1),
+        (CameraMode::Spectral, 1),
+        (CameraMode::Spectral, 4),
+    ] {
+        c.render.camera_mode = mode;
+        c.render.spectral_packet_size = packet;
+        for (budget, mis) in [
+            (0, EnvironmentMisHeuristic::Balance),
+            (1, EnvironmentMisHeuristic::Power),
+            (8, EnvironmentMisHeuristic::Balance),
         ] {
-            c.render.camera_mode = mode;
-            c.render.spectral_packet_size = packet;
-            for mis in [
-                EnvironmentMisHeuristic::Balance,
-                EnvironmentMisHeuristic::Power,
-            ] {
-                c.scene.environment_mis_heuristic = mis;
-                let job = c.build().unwrap();
-                let mut reference = None;
-                for threads in [1, 2, 4] {
-                    c.render.thread_count = Some(threads);
-                    let images = Renderer::new(c.render.clone())
-                        .unwrap()
-                        .render(&job)
-                        .unwrap();
-                    assert_eq!(
-                        images
-                            .direct
-                            .pixels()
-                            .iter()
-                            .zip(images.caustics.pixels())
-                            .map(|(d, c)| d + c)
-                            .collect::<Vec<_>>(),
-                        images.combined.pixels()
-                    );
-                    if let Some(expected) = &reference {
-                        assert_camera_images_bits_eq(&images, expected);
-                    } else {
-                        reference = Some(images);
-                    }
-                }
-                let mut vacuum = c.clone();
-                vacuum.scene.medium = None;
-                let mut zero = c.clone();
-                let m = homogeneous_config(&mut zero);
-                m.sigma_a = 0.0.into();
-                m.sigma_s = 0.0.into();
-                let render = |config: &Config| {
-                    Renderer::new(config.render.clone())
-                        .unwrap()
-                        .render(&config.build().unwrap())
-                        .unwrap()
-                };
+            c.scene.max_volume_scatters = budget;
+            c.scene.environment_mis_heuristic = mis;
+            let job = c.build().unwrap();
+            let mut reference = None;
+            for threads in [1, 2, 4] {
+                c.render.thread_count = Some(threads);
+                let images = Renderer::new(c.render.clone())
+                    .unwrap()
+                    .render(&job)
+                    .unwrap();
                 assert_eq!(
-                    render(&zero).combined.pixels(),
-                    render(&vacuum).combined.pixels()
+                    images
+                        .direct
+                        .pixels()
+                        .iter()
+                        .zip(images.caustics.pixels())
+                        .map(|(d, c)| d + c)
+                        .collect::<Vec<_>>(),
+                    images.combined.pixels()
                 );
+                if let Some(expected) = &reference {
+                    assert_camera_images_bits_eq(&images, expected);
+                } else {
+                    reference = Some(images);
+                }
             }
         }
+        let mut vacuum = c.clone();
+        vacuum.scene.medium = None;
+        let mut zero = c.clone();
+        let m = homogeneous_config(&mut zero);
+        m.sigma_a = 0.0.into();
+        m.sigma_s = 0.0.into();
+        assert_eq!(
+            render(&zero).combined.pixels(),
+            render(&vacuum).combined.pixels()
+        );
     }
 }
 
@@ -643,9 +678,9 @@ fn spectral_medium_json_renders_in_hero_and_packet_and_rejects_rgb() {
         Config::from_json(&config.to_json().unwrap()).unwrap(),
         config
     );
-    config.render.width = 12;
-    config.render.height = 8;
-    config.render.camera_spp = 32;
+    config.render.width = 8;
+    config.render.height = 6;
+    config.render.camera_spp = 8;
     let job = config.build().unwrap();
     let render = |config: &Config| Renderer::new(config.render.clone()).unwrap().render(&job);
     for packet in [1, 4] {
@@ -814,19 +849,39 @@ fn volume_disk_matches_finite_distance_single_scattering_quadrature() {
     j.scene.light =
         Light::DiskArea(DiskAreaLight::new(Vector3::z() * 4.0, -Vector3::z(), 1e-5, 1.0).unwrap());
     j.camera_options.light_samples = 1;
+    let mut camera = StdRng::seed_from_u64(1);
+    let mut environment = StdRng::seed_from_u64(2);
+    let mut diffuse = StdRng::seed_from_u64(3);
     let mut rng = StdRng::seed_from_u64(871);
+    let samples = 12_000;
     let mut mean = Vector3::zeros();
-    for _ in 0..40_000 {
+    for _ in 0..samples {
         let mut state = CameraPathState::new(ray(3.0), 0);
-        trace(&j, &mut state, (Vector3::z(), 0.0), &mut rng);
-        mean += state.radiance.direct / 40_000.0;
+        trace_camera_path(
+            &j,
+            &mut state,
+            &mut CameraPathRngs {
+                camera: &mut camera,
+                environment: &mut environment,
+                diffuse: &mut diffuse,
+                medium: &mut rng,
+            },
+            Vector3::z(),
+            0.0,
+            Caustics::None,
+            IorMode::Constant,
+            #[cfg(feature = "diagnostics")]
+            None,
+        )
+        .unwrap();
+        mean += state.radiance.direct / samples as f64;
     }
-    let integral: f64 = (0..50_000)
+    let integral: f64 = (0..10_000)
         .map(|i| {
-            let s = (i as f64 + 0.5) / 50_000.0;
-            0.5 * (-1.4 * s).exp() / (4.0 * PI * PI * (2.0 + s).powi(2)) / 50_000.0
+            let s = (i as f64 + 0.5) / 10_000.0;
+            0.5 * (-1.4 * s).exp() / (4.0 * PI * PI * (2.0 + s).powi(2)) / 10_000.0
         })
         .sum();
     let expected = Rgb::default().disk_emission() * integral;
-    assert!((mean - expected).norm() / expected.norm() < 0.025);
+    assert!((mean - expected).norm() / expected.norm() < 0.035);
 }

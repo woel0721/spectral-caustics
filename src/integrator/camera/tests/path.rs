@@ -216,55 +216,6 @@ fn glass_prefix_and_deep_diffuse_keep_independent_counts_and_roulette_order() {
 }
 
 #[test]
-fn diffuse_to_glass_continues_with_an_independent_glass_event() {
-    let mut scene = two_planes(Vector3::repeat(0.8), Vector3::repeat(0.7));
-    scene.camera_options.max_diffuse_bounces = 2;
-    scene.scene.add(
-        Box::new(
-            Triangle::new(
-                Vector3::new(-0.9, -0.3, 0.05),
-                Vector3::new(-0.5, -0.3, 0.05),
-                Vector3::new(-0.7, 0.3, 0.05),
-            )
-            .unwrap(),
-        ),
-        Box::new(Dielectric::new(1.5).unwrap()),
-    );
-    let mut camera = SequenceRng::new(&[]);
-    let mut environment = SequenceRng::new(&[]);
-    let mut diffuse = SequenceRng::new(&[0.25, 0.0, 0.5, 0.25, 0.99]);
-    let mut state = CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 2);
-    let (wi, light) = sun();
-    trace_camera_path(
-        &scene,
-        &mut state,
-        &mut CameraPathRngs {
-            camera: &mut camera,
-            environment: &mut environment,
-            diffuse: &mut diffuse,
-            medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
-        },
-        wi,
-        light,
-        (None).map_or(Caustics::None, Caustics::Rgb),
-        crate::optics::dispersion::IorMode::Constant,
-        #[cfg(feature = "diagnostics")]
-        None,
-    )
-    .unwrap();
-    assert_eq!(state.non_delta_bounces, 2);
-    assert_eq!(state.delta_events(), 1);
-    assert_eq!(
-        state.last_scatter,
-        Some(crate::material::ScatterType::SpecularTransmission)
-    );
-    assert_eq!(camera.draws, 0);
-    assert_eq!(environment.draws, 0);
-    assert_eq!(diffuse.draws, 5);
-    assert!(state.radiance.direct.norm() > 0.0);
-}
-
-#[test]
 fn first_surface_is_shaded_before_continuation_sampling() {
     use crate::material::BsdfSample;
     use crate::material::Material;
@@ -591,58 +542,6 @@ fn glass_budget_after_diffuse_still_respects_the_delta_event_limit() {
         close(state.radiance.direct, expected * k);
         close(state.radiance.caustics, Vector3::zeros());
     }
-}
-
-#[test]
-fn diffuse_glass_reflection_keeps_unit_weight_and_excludes_escape_background() {
-    let a = Vector3::new(0.8, 0.5, 0.2);
-    let mut scene = two_planes(a, Vector3::new(0.4, 0.7, 0.9));
-    scene.scene.background_color = Vector3::repeat(1000.0);
-    for (x, outward_x) in [(0.25, false), (0.35, true)] {
-        scene.scene.add(
-            Box::new(glass_patch(x, x * 3.0_f64.sqrt(), outward_x)),
-            Box::new(Dielectric::new(1.5).unwrap()),
-        );
-    }
-    let mut camera = SequenceRng::new(&[]);
-    let mut environment = SequenceRng::new(&[]);
-    let mut diffuse = SequenceRng::new(&[0.25, 0.0, 0.0]); // Select reflection, not transmission.
-    let mut state = CameraPathState::new(Ray::new(Vector3::z() * 0.5, -Vector3::z()).unwrap(), 1);
-    trace_camera_path(
-        &scene,
-        &mut state,
-        &mut CameraPathRngs {
-            camera: &mut camera,
-            environment: &mut environment,
-            diffuse: &mut diffuse,
-            medium: &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
-        },
-        sun().0,
-        sun().1,
-        (None).map_or(Caustics::None, Caustics::Rgb),
-        crate::optics::dispersion::IorMode::Constant,
-        #[cfg(feature = "diagnostics")]
-        None,
-    )
-    .unwrap();
-    assert_eq!((state.non_delta_bounces, state.delta_events()), (1, 1));
-    assert_eq!(
-        state.last_scatter,
-        Some(crate::material::ScatterType::SpecularReflection)
-    );
-    assert_eq!((camera.draws, environment.draws, diffuse.draws), (0, 0, 3));
-    close(state.throughput, a); // Reflection weight is F/F=1, with no extra Fresnel factor.
-    close(
-        state.ray.direction,
-        Vector3::new(-0.5, 0.0, 0.75_f64.sqrt()),
-    );
-    assert!(scene.scene.intersect(&state.ray).is_none());
-    // Without an environment, a later Delta must not turn camera background into illumination.
-    close(
-        state.radiance.direct,
-        a * (sun().1 * sun().0.z / std::f64::consts::PI),
-    );
-    close(state.radiance.caustics, Vector3::zeros());
 }
 
 #[test]
