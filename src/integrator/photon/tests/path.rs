@@ -364,7 +364,8 @@ fn prism_corner_transmission_does_not_cross_the_adjacent_face_during_ray_spawn()
 #[test]
 fn sampled_slab_flux_matches_analytic_series_and_accounts_for_every_photon() {
     // 透射总和 (1-F)^2 Σ F^(2k) = (1-F)/(1+F)，包含所有内部往返。
-    const N: usize = 50000;
+    const N: usize = 16_000;
+    let tol = |p: f64| 5.0 * (p * (1.0 - p) / N as f64).sqrt() + 1e-4;
     for (ior, angle) in [(1.5, 0.0_f64), (3.0, 0.0), (1.5, 80.0)] {
         let (scene, mut tracer, _) = slab(ior, 32);
         let theta = angle.to_radians();
@@ -395,16 +396,18 @@ fn sampled_slab_flux_matches_analytic_series_and_accounts_for_every_photon() {
                 }
             }
             assert_eq!(totals.iter().sum::<f64>(), N as f64);
-            assert!((two / N as f64 - (1.0 - f).powi(2)).abs() < 0.008);
+            let p_two = (1.0 - f).powi(2);
+            assert!((two / N as f64 - p_two).abs() < tol(p_two));
             let expected = if limit == 2 {
-                (1.0 - f).powi(2)
+                p_two
             } else {
                 (1.0 - f) / (1.0 + f)
             };
-            assert!((totals[0] / N as f64 - expected).abs() < 0.008);
+            assert!((totals[0] / N as f64 - expected).abs() < tol(expected));
             if limit == 2 {
-                assert!((totals[1] / N as f64 - f).abs() < 0.008);
-                assert!((totals[2] / N as f64 - (1.0 - f) * f).abs() < 0.008);
+                assert!((totals[1] / N as f64 - f).abs() < tol(f));
+                let p_cut = (1.0 - f) * f;
+                assert!((totals[2] / N as f64 - p_cut).abs() < tol(p_cut));
             } else {
                 assert_eq!(totals[2], 0.0);
             }

@@ -924,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn two_level_row_cdf_lookup_matches_flat_cdf_including_zero_rows() {
+    fn sparse_map_sampling_skips_zero_rows_and_matches_pdf_and_radiance_integral() {
         let mut pixels = vec![[0.0; 3]; 5 * 6];
         // Rows 0, 2, 5 completely black; rows 1, 3, 4 sparse bright pixels.
         pixels[5 + 2] = [3.0, 2.0, 1.0];
@@ -932,28 +932,39 @@ mod tests {
         pixels[3 * 5 + 4] = [0.0, 5.0, 0.0];
         pixels[4 * 5 + 1] = [1.0, 1.0, 8.0];
         let map = EnvironmentMap::from_pixels(5, 6, pixels).unwrap();
-        let mut candidates = vec![0.0, 1.0_f64.next_down()];
-        for &c in &map.importance_cdf {
-            if c < 1.0 {
-                candidates.push(c);
-                candidates.push(c.next_down().max(0.0));
-                if c.next_up() < 1.0 {
-                    candidates.push(c.next_up());
-                }
+        let mut rng = StdRng::seed_from_u64(99);
+        let count = 8192;
+        let mut bright_hits = 0usize;
+        let mut weighted = Vector3::zeros();
+        for _ in 0..count {
+            let sample = map.sample_direction(&mut rng).unwrap();
+            let pdf = map.pdf_direction(sample.direction).unwrap();
+            assert!((sample.pdf - pdf).abs() < 1e-12 * pdf.max(1.0));
+            let rad = map.radiance(sample.direction).unwrap();
+            if rad.norm() > 0.0 {
+                bright_hits += 1;
+            }
+            weighted += rad / sample.pdf;
+        }
+        // 95% importance mass concentrates on the 4 non-zero pixels (rows 1, 3, 4).
+        assert!(bright_hits as f64 / count as f64 > 0.90);
+        // Independent sphere integral of bilinear map matches importance-weighted MC estimate.
+        let mut reference = Vector3::zeros();
+        let (nt, np) = (64, 128);
+        let d_omega = 4.0 * PI / (nt * np) as f64;
+        for it in 0..nt {
+            let cos_t = 1.0 - 2.0 * (it as f64 + 0.5) / nt as f64;
+            let sin_t = (1.0 - cos_t * cos_t).sqrt();
+            for ip in 0..np {
+                let phi = TAU * (ip as f64 + 0.5) / np as f64 - PI;
+                let dir = Vector3::new(sin_t * phi.cos(), sin_t * phi.sin(), cos_t);
+                reference += map.radiance(dir).unwrap() * d_omega;
             }
         }
-        let mut rng = StdRng::seed_from_u64(99);
-        for _ in 0..256 {
-            candidates.push(rng.random::<f64>());
-        }
-        for u in candidates {
-            let flat = map.importance_cdf.partition_point(|&p| p <= u) - 1;
-            let y = map.row_cdf.partition_point(|&p| p <= u) - 1;
-            let row_start = y * map.width;
-            let x = map.importance_cdf[row_start..=row_start + map.width]
-                .partition_point(|&p| p <= u)
-                - 1;
-            assert_eq!(y * map.width + x, flat, "u={u}");
-        }
+        let estimate = weighted / count as f64;
+        assert!(
+            (estimate - reference).norm() < reference.norm() * 0.06,
+            "estimate={estimate:?}, reference={reference:?}"
+        );
     }
 }

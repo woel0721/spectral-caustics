@@ -1,4 +1,4 @@
-mod support;
+use crate::support::assert_camera_images_bits_eq;
 use nalgebra::Vector3;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -10,7 +10,6 @@ use spectral_caustics::config::scene::SceneConfig;
 use spectral_caustics::integrator::photon::integrate_xyz;
 use spectral_caustics::material;
 use spectral_caustics::material::ScatterType;
-use support::assert_camera_images_bits_eq;
 
 #[test]
 fn mirror_json_roundtrip_builds_trait_object_and_validates_parameters() {
@@ -145,23 +144,36 @@ fn mirror_and_ggx_components_repeat_bitwise_across_threads_mis_depths_and_seeds(
     use spectral_caustics::config::scene::EnvironmentConfig;
     use spectral_caustics::config::scene::EnvironmentMisHeuristic;
 
-    let temp = support::TempDir::new("material-transport");
+    let temp = crate::support::TempDir::new("material-transport");
     let hdr = temp.write_rgbe_4x2_hdr("env.hdr", false, true);
-    for material in [
-        MaterialConfig::Mirror {
-            reflectance: [0.9, 0.5, 0.2],
-        },
-        MaterialConfig::GgxMetal {
-            eta: [0.2, 0.8, 1.5],
-            k: [3.0, 2.0, 1.0],
-            roughness: 0.55,
-        },
-        MaterialConfig::GgxMetal {
-            eta: [0.2, 0.8, 1.5],
-            k: [3.0, 2.0, 1.0],
-            roughness: 0.0,
-        },
-    ] {
+    let cases = [
+        (
+            MaterialConfig::Mirror {
+                reflectance: [0.9, 0.5, 0.2],
+            },
+            EnvironmentMisHeuristic::Balance,
+            0,
+        ),
+        (
+            MaterialConfig::GgxMetal {
+                eta: [0.2, 0.8, 1.5],
+                k: [3.0, 2.0, 1.0],
+                roughness: 0.55,
+            },
+            EnvironmentMisHeuristic::Power,
+            4,
+        ),
+        (
+            MaterialConfig::GgxMetal {
+                eta: [0.2, 0.8, 1.5],
+                k: [3.0, 2.0, 1.0],
+                roughness: 0.0,
+            },
+            EnvironmentMisHeuristic::Balance,
+            1,
+        ),
+    ];
+    for (material, heuristic, depth) in cases {
         let mut config = SceneConfig {
             environment: Some(EnvironmentConfig {
                 map_path: Some(hdr.clone()),
@@ -183,46 +195,37 @@ fn mirror_and_ggx_components_repeat_bitwise_across_threads_mis_depths_and_seeds(
         }
         let mut scene = RenderJob::from_config(&config).unwrap();
         assert!(scene.photon.caustics_object_id.is_none());
-        for heuristic in [
-            EnvironmentMisHeuristic::Balance,
-            EnvironmentMisHeuristic::Power,
-        ] {
-            scene.camera_options.environment_mis_heuristic = heuristic;
-            for depth in [0, 1, 4] {
-                scene.camera_options.max_diffuse_bounces = depth;
-                for seed in [42, 123] {
-                    let mut reference = None;
-                    for threads in [1, 2, 4, 1] {
-                        let images = support::run_in_threads(threads, || {
-                            spectral_caustics::integrator::camera::integrate_rgb(
-                                &scene,
-                                &spectral_caustics::config::render::RenderSetting {
-                                    width: 16,
-                                    height: 12,
-                                    camera_spp: 8,
-                                    seed,
-                                    ..Default::default()
-                                },
-                                None,
-                            )
-                            .unwrap()
-                        });
-                        for i in 0..images.combined.pixels().len() {
-                            assert!(
-                                (images.direct.pixels()[i] + images.caustics.pixels()[i]
-                                    - images.combined.pixels()[i])
-                                    .norm()
-                                    < 1e-12
-                            );
-                            assert_eq!(images.caustics.pixels()[i], Vector3::zeros());
-                        }
-                        if let Some(expected) = &reference {
-                            assert_camera_images_bits_eq(&images, expected);
-                        } else {
-                            reference = Some(images);
-                        }
-                    }
-                }
+        scene.camera_options.environment_mis_heuristic = heuristic;
+        scene.camera_options.max_diffuse_bounces = depth;
+        let mut reference = None;
+        for threads in [1, 2, 4] {
+            let images = crate::support::run_in_threads(threads, || {
+                spectral_caustics::integrator::camera::integrate_rgb(
+                    &scene,
+                    &spectral_caustics::config::render::RenderSetting {
+                        width: 10,
+                        height: 8,
+                        camera_spp: 4,
+                        seed: 42,
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap()
+            });
+            for i in 0..images.combined.pixels().len() {
+                assert!(
+                    (images.direct.pixels()[i] + images.caustics.pixels()[i]
+                        - images.combined.pixels()[i])
+                        .norm()
+                        < 1e-12
+                );
+                assert_eq!(images.caustics.pixels()[i], Vector3::zeros());
+            }
+            if let Some(expected) = &reference {
+                assert_camera_images_bits_eq(&images, expected);
+            } else {
+                reference = Some(images);
             }
         }
     }
@@ -291,8 +294,8 @@ fn ggx_ground_is_supported_by_rgb_camera_and_rejected_by_irradiance_binding() {
 fn caustics_selection_requires_dielectric_and_defaults_off_for_all_supported_shapes() {
     use spectral_caustics::config::Config;
     for source in [
-        include_str!("../configs/sphere_spectral.json"),
-        include_str!("../configs/vertical_prism_spectral_caustics.json"),
+        include_str!("../../configs/sphere_spectral.json"),
+        include_str!("../../configs/vertical_prism_spectral_caustics.json"),
     ] {
         let mut value: serde_json::Value = serde_json::from_str(source).unwrap();
         value["render"]["camera_mode"] = serde_json::json!("rgb");

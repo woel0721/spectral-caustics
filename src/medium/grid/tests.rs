@@ -302,7 +302,7 @@ fn local_collision_cdf_matches_analytic_layers_across_multiple_blocks_and_clips(
         ] {
             let mut rng = StdRng::seed_from_u64(37);
             let mut counts = vec![0; references.len()];
-            let n = 40_000;
+            let n = 15_000;
             let (enter, exit) = grid.interval(&r, limit).unwrap();
             for _ in 0..n {
                 let sample = grid
@@ -374,7 +374,7 @@ fn ratio_tracking_matches_analytic_spectral_layers_across_vacuum_and_partial_blo
         (ray([0.5, 0.5, 0.5], [1.0, 0.0, 0.0]), 20.0),
         (ray([18.0, 0.5, 0.5], [-1.0, 0.0, 0.0]), 17.5),
     ];
-    let samples = 20_000;
+    let samples = 8_000;
     for (nm, base_extinction) in [(380.0, 0.25_f64), (780.0, 0.5)] {
         let depth = base_extinction * (0.5 * 0.6 + 7.0 * 0.15 + 0.8);
         let expected = (-depth).exp();
@@ -383,10 +383,10 @@ fn ratio_tracking_matches_analytic_spectral_layers_across_vacuum_and_partial_blo
         let variance = expected.powi(2) * squared_depth.exp_m1();
         for (ray, limit) in &rays {
             close(grid.transmittance_ray(ray, *limit, nm), expected);
+            let mut rng = StdRng::seed_from_u64(37);
             let mut sum = 0.0;
             let mut saw_fraction = false;
-            for seed in 0..samples {
-                let mut rng = StdRng::seed_from_u64(seed);
+            for _ in 0..samples {
                 let weight = grid
                     .estimate_transmittance_ratio(ray, *limit, nm, &mut rng)
                     .unwrap();

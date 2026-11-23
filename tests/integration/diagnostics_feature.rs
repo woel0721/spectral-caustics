@@ -1,8 +1,6 @@
 #[cfg(feature = "diagnostics")]
-mod support;
+use crate::support::assert_camera_images_bits_eq;
 use spectral_caustics::config::Config;
-#[cfg(feature = "diagnostics")]
-use support::assert_camera_images_bits_eq;
 
 #[cfg(not(feature = "diagnostics"))]
 #[test]

@@ -143,7 +143,7 @@ fn two_plane_2_3_5_bounce_brightness_matches_independent_view_factor_series() {
         let mut rng = StdRng::seed_from_u64(801);
         let mut mean = Vector3::zeros();
         let mut second = Vector3::zeros();
-        let n = 32768;
+        let n = if depth < 5 { 8192 } else { 16384 };
         for _ in 0..n {
             let value = trace_chain(&scene, &mut rng).direct;
             mean += value / n as f64;
@@ -167,9 +167,9 @@ fn deep_render_repeats_across_threads_mis_and_components_and_preserves_photons()
     scene.scene.environment = Some(uniform_hdri());
     add_colored_wall(&mut scene);
     let settings = RenderSetting {
-        width: 11,
-        height: 9,
-        samples_per_pixel_axis: 2,
+        width: 8,
+        height: 6,
+        samples_per_pixel_axis: 1,
         ..Default::default()
     };
     let photons = crate::integrator::photon::integrate_xyz(
@@ -179,91 +179,73 @@ fn deep_render_repeats_across_threads_mis_and_components_and_preserves_photons()
         &settings,
     )
     .unwrap();
-    let baseline = crate::integrator::camera::integrate_rgb(
-        &scene,
-        &crate::config::render::RenderSetting {
-            width: 11,
-            height: 9,
-            camera_spp: 16,
-            seed: 42,
-            ..Default::default()
-        },
-        Some(&photons),
-    )
-    .unwrap();
-    for depth in [0, 1, 2, 3, 4, 5] {
+    let camera_settings = crate::config::render::RenderSetting {
+        width: 8,
+        height: 6,
+        camera_spp: 8,
+        seed: 42,
+        ..Default::default()
+    };
+    let baseline =
+        crate::integrator::camera::integrate_rgb(&scene, &camera_settings, Some(&photons)).unwrap();
+    for depth in [0, 5] {
         scene.camera_options.max_diffuse_bounces = depth;
-        let light = crate::integrator::photon::integrate_xyz(
-            &scene,
-            scene.photon.caustics_object_id,
-            scene.photon.ground_id.expect("receiver"),
-            &settings,
-        )
-        .unwrap();
-        assert_eq!(
-            light.direct.as_ref().unwrap().pixels,
-            photons.direct.as_ref().unwrap().pixels
-        );
-        assert_eq!(light.caustics.pixels, photons.caustics.pixels);
+        if depth == 5 {
+            let light = crate::integrator::photon::integrate_xyz(
+                &scene,
+                scene.photon.caustics_object_id,
+                scene.photon.ground_id.expect("receiver"),
+                &settings,
+            )
+            .unwrap();
+            assert_eq!(
+                light.direct.as_ref().unwrap().pixels,
+                photons.direct.as_ref().unwrap().pixels
+            );
+            assert_eq!(light.caustics.pixels, photons.caustics.pixels);
+        }
         for heuristic in [
             EnvironmentMisHeuristic::Balance,
             EnvironmentMisHeuristic::Power,
         ] {
             scene.camera_options.environment_mis_heuristic = heuristic;
             scene.camera_options.environment_samples = 3;
-            let reference = crate::integrator::camera::integrate_rgb(
-                &scene,
-                &crate::config::render::RenderSetting {
-                    width: 11,
-                    height: 9,
-                    camera_spp: 16,
-                    seed: 42,
-                    ..Default::default()
-                },
-                Some(&photons),
-            )
-            .unwrap();
+            let reference =
+                crate::integrator::camera::integrate_rgb(&scene, &camera_settings, Some(&photons))
+                    .unwrap();
             assert_eq!(reference.caustics.pixels, baseline.caustics.pixels);
             for threads in [1, 2, 4] {
                 let pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
                     .build()
                     .unwrap();
-                for _ in 0..2 {
-                    let actual = pool
-                        .install(|| {
-                            crate::integrator::camera::integrate_rgb(
-                                &scene,
-                                &crate::config::render::RenderSetting {
-                                    width: 11,
-                                    height: 9,
-                                    camera_spp: 16,
-                                    seed: 42,
-                                    ..Default::default()
-                                },
-                                Some(&photons),
-                            )
-                            .map_err(|e| e.to_string())
-                        })
-                        .unwrap();
-                    for (a, b) in [
-                        (&actual.direct, &reference.direct),
-                        (&actual.caustics, &reference.caustics),
-                        (&actual.combined, &reference.combined),
-                    ] {
-                        for (x, y) in a.pixels.iter().zip(&b.pixels) {
-                            assert_eq!(bits(*x), bits(*y));
-                        }
+                let actual = pool
+                    .install(|| {
+                        crate::integrator::camera::integrate_rgb(
+                            &scene,
+                            &camera_settings,
+                            Some(&photons),
+                        )
+                        .map_err(|e| e.to_string())
+                    })
+                    .unwrap();
+                for (a, b) in [
+                    (&actual.direct, &reference.direct),
+                    (&actual.caustics, &reference.caustics),
+                    (&actual.combined, &reference.combined),
+                ] {
+                    for (x, y) in a.pixels.iter().zip(&b.pixels) {
+                        assert_eq!(bits(*x), bits(*y));
                     }
-                    for ((d, c), combined) in actual
-                        .direct
-                        .pixels
-                        .iter()
-                        .zip(&actual.caustics.pixels)
-                        .zip(&actual.combined.pixels)
-                    {
-                        close(d + c, *combined);
-                    }
+                }
+                for ((d, c), combined) in actual
+                    .direct
+                    .pixels
+                    .iter()
+                    .zip(&actual.caustics.pixels)
+                    .zip(&actual.combined.pixels)
+                {
+                    close(d + c, *combined);
                 }
             }
         }

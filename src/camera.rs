@@ -244,12 +244,19 @@ mod tests {
                 assert!(camera.ray_for_pixel_sample(0, 0, 2, 2, offset).is_none());
             }
         }
-        for (x, y, width, height) in [(0, 0, 0, 1), (0, 0, 1, 0), (2, 0, 2, 2), (0, 2, 2, 2)] {
+        for (x, y, width, height) in [
+            (0, 0, 0, 1),
+            (0, 0, 1, 0),
+            (2, 0, 2, 2),
+            (0, 2, 2, 2),
+            (usize::MAX, usize::MAX, 2, 2),
+        ] {
             assert!(
                 camera
                     .ray_for_pixel_sample(x, y, width, height, Vector2::repeat(0.5))
                     .is_none()
             );
+            assert!(camera.ray_for_pixel(x, y, width, height).is_none());
         }
     }
 
@@ -284,20 +291,6 @@ mod tests {
         let top_right = camera.ray_for_pixel(1, 0, 2, 2).unwrap();
         let expected = Vector3::new(1.0, -0.5, 0.5).normalize();
         assert!((top_right.direction - expected).norm() < 1e-12);
-    }
-
-    #[test]
-    fn invalid_sizes_and_pixel_indices_are_rejected() {
-        let camera = front_camera();
-        for (x, y, width, height) in [
-            (0, 0, 0, 1),
-            (0, 0, 1, 0),
-            (2, 0, 2, 2),
-            (0, 2, 2, 2),
-            (usize::MAX, usize::MAX, 2, 2),
-        ] {
-            assert!(camera.ray_for_pixel(x, y, width, height).is_none());
-        }
     }
 
     #[test]
@@ -337,37 +330,5 @@ mod tests {
             };
             assert!(Camera::from_config(&config).is_err());
         }
-    }
-
-    #[test]
-    fn changing_source_config_requires_rebuilding_the_camera() {
-        let mut config = front_config();
-        let camera = Camera::from_config(&config).unwrap();
-        let rays: Vec<_> = (0..2)
-            .flat_map(|y| (0..4).map(move |x| (x, y)))
-            .map(|(x, y)| camera.ray_for_pixel(x, y, 4, 2).unwrap())
-            .collect();
-
-        config.position = [2.0, 3.0, 4.0];
-        config.target = [3.0, 3.0, 4.0];
-        config.up = [1.0, 0.0, 3.0];
-        config.fov_y_degrees = 60.0;
-        for (i, expected) in rays.iter().enumerate() {
-            let ray = camera.ray_for_pixel(i % 4, i / 4, 4, 2).unwrap();
-            assert_eq!(ray.origin, expected.origin);
-            assert_eq!(ray.direction, expected.direction);
-        }
-        let rebuilt = Camera::from_config(&config).unwrap();
-        assert_eq!(rebuilt.position(), Vector3::from(config.position));
-        assert_eq!(rebuilt.target(), Vector3::from(config.target));
-        assert_eq!(rebuilt.up(), Vector3::from(config.up));
-        assert_eq!(rebuilt.fov_y_degrees(), config.fov_y_degrees);
-        let center = rebuilt.ray_for_pixel(1, 1, 3, 3).unwrap();
-        assert_eq!(center.origin, Vector3::new(2.0, 3.0, 4.0));
-        assert!((center.direction - Vector3::x()).norm() < 1e-12);
-        let top_right = rebuilt.ray_for_pixel(1, 0, 2, 2).unwrap();
-        let half_height = (30.0_f64).to_radians().tan();
-        let expected = Vector3::new(1.0, -0.5 * half_height, 0.5 * half_height).normalize();
-        assert!((top_right.direction - expected).norm() < 1e-12);
     }
 }

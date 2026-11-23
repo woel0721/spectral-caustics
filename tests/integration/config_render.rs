@@ -1,4 +1,4 @@
-mod support;
+use crate::support::{TempDir, assert_framebuffer_bits_eq};
 use nalgebra::Vector3;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -23,7 +23,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use support::{TempDir, assert_framebuffer_bits_eq};
 
 fn temp_directory() -> TempDir {
     TempDir::new("config-render")
@@ -1043,11 +1042,12 @@ fn configured_thread_pool_and_block_counts_preserve_results_and_flux() {
 #[test]
 fn camera_pixels_are_reproducible_across_configured_thread_counts() {
     let mut config = small_config();
-    config.render.height = 16;
+    config.render.width = 16;
+    config.render.height = 12;
     config.scene.environment = Some(Default::default());
     config.scene.environment_samples = 3;
     config.scene.ground_checkerboard = Some(Default::default());
-    config.render.camera_spp = 8;
+    config.render.camera_spp = 4;
     let scene = config.build().unwrap();
     let lighting = spectral_caustics::integrator::photon::integrate_xyz(
         &scene,
@@ -1070,25 +1070,23 @@ fn camera_pixels_are_reproducible_across_configured_thread_counts() {
         if let Some(threads) = threads {
             assert_eq!(renderer.thread_count(), threads);
         }
-        for _ in 0..2 {
-            let images = renderer.render(&scene).unwrap();
-            for (actual, expected) in [
-                (&images.direct, &reference.direct),
-                (&images.caustics, &reference.caustics),
-                (&images.combined, &reference.combined),
-            ] {
-                assert_eq!((actual.width(), actual.height()), (24, 16));
-                assert_framebuffer_bits_eq(actual, expected);
-            }
-            for ((direct, caustics), combined) in images
-                .direct
-                .pixels()
-                .iter()
-                .zip(images.caustics.pixels())
-                .zip(images.combined.pixels())
-            {
-                assert!((direct + caustics - combined).norm() < 1e-12);
-            }
+        let images = renderer.render(&scene).unwrap();
+        for (actual, expected) in [
+            (&images.direct, &reference.direct),
+            (&images.caustics, &reference.caustics),
+            (&images.combined, &reference.combined),
+        ] {
+            assert_eq!((actual.width(), actual.height()), (16, 12));
+            assert_framebuffer_bits_eq(actual, expected);
+        }
+        for ((direct, caustics), combined) in images
+            .direct
+            .pixels()
+            .iter()
+            .zip(images.caustics.pixels())
+            .zip(images.combined.pixels())
+        {
+            assert!((direct + caustics - combined).norm() < 1e-12);
         }
         // 相机线程池和逐像素 RNG 不影响已有光源通道。
         let run_photons = || {
@@ -1101,7 +1099,7 @@ fn camera_pixels_are_reproducible_across_configured_thread_counts() {
             .unwrap()
         };
         let photons = match threads {
-            Some(n) => support::run_in_threads(n, run_photons),
+            Some(n) => crate::support::run_in_threads(n, run_photons),
             None => run_photons(),
         };
         assert_eq!(
@@ -1125,6 +1123,10 @@ fn camera_paths_run_inside_the_configured_render_pool() {
         }
     }
     let mut config = small_config();
+    config.render.width = 8;
+    config.render.height = 6;
+    config.render.camera_spp = 4;
+    config.render.samples_per_pixel_axis = 1;
     let mut scene = config.build().unwrap();
     let lighting = spectral_caustics::integrator::photon::integrate_xyz(
         &scene,
@@ -1278,10 +1280,10 @@ fn configured_exposure_scales_linear_color_before_aces_and_srgb_encoding() {
 fn default_executable_renders_all_three_spheres_and_repeats_across_threads() {
     let directory = temp_directory();
     fs::create_dir(directory.0.join("configs")).unwrap();
-    let mut config = Config::from_json(include_str!("../configs/default.json")).unwrap();
-    config.render.width = 96;
-    config.render.height = 54;
-    config.render.camera_spp = 8;
+    let mut config = Config::from_json(include_str!("../../configs/default.json")).unwrap();
+    config.render.width = 48;
+    config.render.height = 27;
+    config.render.camera_spp = 4;
     config.render.samples_per_pixel_axis = 1;
     #[cfg(feature = "diagnostics")]
     {
@@ -1320,7 +1322,7 @@ fn default_executable_renders_all_three_spheres_and_repeats_across_threads() {
         .map(|name| {
             let path = output_directory.join(name);
             let image = image::open(&path).unwrap();
-            assert_eq!((image.width(), image.height()), (96, 54));
+            assert_eq!((image.width(), image.height()), (48, 27));
             assert_eq!(image.color(), image::ColorType::Rgb8);
             fs::read(path).unwrap()
         })

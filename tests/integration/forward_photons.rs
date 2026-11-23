@@ -1,3 +1,4 @@
+use crate::support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 use nalgebra::{Vector2, Vector3};
 use spectral_caustics::caustics::SpectralCausticsMap;
 use spectral_caustics::config::Config;
@@ -19,8 +20,6 @@ use spectral_caustics::spectrum::cie_xyz;
 use spectral_caustics::spectrum::d65_normalization;
 use spectral_caustics::spectrum::d65_spd;
 use spectral_caustics::spectrum::emission::d65_normalization_continuous;
-mod support;
-use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 fn config(source: &str) -> Config {
     let mut c = Config::from_json(source).unwrap();
@@ -65,7 +64,7 @@ fn map(scene: &RenderJob, settings: &RenderSetting, threads: usize) -> SpectralC
 
 #[test]
 fn json_vacuum_interface_matches_manual_binding_in_camera_and_photon_outputs() {
-    let c = config(include_str!("../configs/sphere_medium_interface.json"));
+    let c = config(include_str!("../../configs/sphere_medium_interface.json"));
     let bound = c.build().unwrap();
     let mut unbound_config = c.clone();
     let ObjectConfig::Sphere {
@@ -143,7 +142,7 @@ fn json_vacuum_interface_matches_manual_binding_in_camera_and_photon_outputs() {
 }
 
 fn two_layer_photon_scene() -> (Config, GridMediumConfig, f64) {
-    let c = config(include_str!("../configs/sphere.json"));
+    let c = config(include_str!("../../configs/sphere.json"));
     // Both layers are below the emitter and above the sphere and camera. Every
     // landing crosses them once along the incident beam [0.45, 0, -1].
     let grid = GridMediumConfig {
@@ -238,7 +237,7 @@ fn photon_xyz_atlas_and_direct_preview_apply_the_same_analytic_extinction() {
                 None,
                 IorMode::Constant,
                 4,
-                &mut support::TransmissionRng,
+                &mut crate::support::TransmissionRng,
             )
             .unwrap()
             .landing()
@@ -493,7 +492,7 @@ fn constant_ior_spectral_absorption_preserves_landings_and_filters_xyz_and_atlas
                 Some(nm),
                 IorMode::Constant,
                 2,
-                &mut support::TransmissionRng,
+                &mut crate::support::TransmissionRng,
             )
             .unwrap()
             .landing()
@@ -512,7 +511,7 @@ fn constant_ior_spectral_absorption_preserves_landings_and_filters_xyz_and_atlas
                 wavelength,
                 IorMode::Constant,
                 2,
-                &mut support::TransmissionRng,
+                &mut crate::support::TransmissionRng,
             )
             .is_err()
         );
@@ -677,7 +676,7 @@ fn forward_event_budget_rejects_invalid_configuration() {
 #[test]
 fn photon_volume_budget_defaults_to_zero_and_roundtrips_in_json() {
     let mut value: serde_json::Value =
-        serde_json::from_str(include_str!("../configs/sphere_medium_interface.json")).unwrap();
+        serde_json::from_str(include_str!("../../configs/sphere_medium_interface.json")).unwrap();
     let parse = |value: &serde_json::Value| Config::from_json(&value.to_string()).unwrap();
     let default = parse(&value);
     assert_eq!(default.render.photon_max_volume_scatters, 0);
@@ -706,10 +705,10 @@ fn photon_volume_budget_defaults_to_zero_and_roundtrips_in_json() {
 
 #[test]
 fn photon_volume_landing_maps_reintegrate_and_repeat_across_threads() {
-    let mut c = config(include_str!("../configs/sphere_medium_interface.json"));
-    c.render.width = 24;
-    c.render.height = 18;
-    c.render.samples_per_pixel_axis = 3;
+    let mut c = config(include_str!("../../configs/sphere_medium_interface.json"));
+    c.render.width = 16;
+    c.render.height = 12;
+    c.render.samples_per_pixel_axis = 2;
     let min_m = [-3.0, -3.0, 0.0];
     let max_m = [3.0, 3.0, 0.49];
     let homogeneous = |g| {
@@ -861,7 +860,7 @@ fn photon_volume_landing_maps_reintegrate_and_repeat_across_threads() {
 
 #[test]
 fn photon_volume_caustics_stay_zero_when_all_emission_misses_the_glass() {
-    let mut c = config(include_str!("../configs/sphere_medium_interface.json"));
+    let mut c = config(include_str!("../../configs/sphere_medium_interface.json"));
     c.render.mode = IorMode::Constant;
     c.render.photon_max_volume_scatters = 4;
     let light = c.scene.light.as_parallel_mut().unwrap();
@@ -890,9 +889,9 @@ fn photon_volume_caustics_stay_zero_when_all_emission_misses_the_glass() {
 #[test]
 fn forward_xyz_and_scalar_maps_share_paths_conserve_flux_and_repeat_across_threads() {
     for source in [
-        include_str!("../configs/sphere.json"),
-        include_str!("../configs/vertical_prism_spectral_caustics.json"),
-        include_str!("../configs/vertical_prism_area_light.json"),
+        include_str!("../../configs/sphere.json"),
+        include_str!("../../configs/vertical_prism_spectral_caustics.json"),
+        include_str!("../../configs/vertical_prism_area_light.json"),
     ] {
         for mode in [IorMode::Constant, IorMode::Dispersion] {
             let mut c = config(source);
@@ -938,7 +937,7 @@ fn forward_xyz_and_scalar_maps_share_paths_conserve_flux_and_repeat_across_threa
             assert!(lighting.caustics.pixels().iter().any(|p| p.y > 0.0));
             for threads in [1, 2, 4] {
                 c.render.thread_count = Some(threads);
-                let actual = support::run_in_threads(threads, || {
+                let actual = crate::support::run_in_threads(threads, || {
                     spectral_caustics::integrator::photon::integrate_xyz(
                         &scene,
                         scene.photon.caustics_object_id,
@@ -988,76 +987,93 @@ fn forward_xyz_and_scalar_maps_share_paths_conserve_flux_and_repeat_across_threa
 
 #[test]
 fn camera_components_packet_and_rng_are_deterministic_with_forward_photons() {
-    for source in [
-        include_str!("../configs/vertical_prism_spectral_caustics.json"),
-        include_str!("../configs/vertical_prism_area_light.json"),
-    ] {
-        for mode in [IorMode::Constant, IorMode::Dispersion] {
-            let mut c = config(source);
-            c.render.mode = mode;
-            c.render.samples_per_pixel_axis = 1;
-            for (depth, mis) in [
-                (0, EnvironmentMisHeuristic::Balance),
-                (4, EnvironmentMisHeuristic::Power),
-            ] {
-                c.scene.max_diffuse_bounces = depth;
-                c.scene.environment_mis_heuristic = mis;
-                let scene = c.build().unwrap();
-                for packet in [1, 4] {
-                    c.render.spectral_packet_size = packet;
-                    c.render.thread_count = Some(1);
-                    let renderer = Renderer::new(c.render.clone()).unwrap();
-                    let reference = renderer.render(&scene).unwrap();
-                    let rgb = support::run_in_threads(1, || {
-                        let light = spectral_caustics::integrator::photon::integrate_xyz(
-                            &scene,
-                            scene.photon.caustics_object_id,
-                            scene.photon.ground_id.expect("receiver"),
-                            &c.render,
-                        )
-                        .unwrap();
-                        spectral_caustics::integrator::camera::integrate_rgb(
-                            &scene,
-                            &c.render,
-                            Some(&light),
-                        )
-                        .unwrap()
-                    });
-                    for images in [&reference, &rgb] {
-                        for ((d, a), combined) in images
-                            .direct
-                            .pixels()
-                            .iter()
-                            .zip(images.caustics.pixels())
-                            .zip(images.combined.pixels())
-                        {
-                            // RGB 相机在线性 RGB 中相加再转 XYZ，允许转换的舍入差。
-                            assert!((*d + *a - *combined).norm() < 2e-12 * (1.0 + combined.norm()));
-                        }
-                    }
-                    for threads in [2, 4] {
-                        c.render.thread_count = Some(threads);
-                        let renderer = Renderer::new(c.render.clone()).unwrap();
-                        let actual = renderer.render(&scene).unwrap();
-                        assert_camera_images_bits_eq(&actual, &reference);
-                        let actual = support::run_in_threads(threads, || {
-                            let lighting = spectral_caustics::integrator::photon::integrate_xyz(
-                                &scene,
-                                scene.photon.caustics_object_id,
-                                scene.photon.ground_id.expect("receiver"),
-                                &c.render,
-                            )
-                            .unwrap();
-                            spectral_caustics::integrator::camera::integrate_rgb(
-                                &scene,
-                                &c.render,
-                                Some(&lighting),
-                            )
-                            .unwrap()
-                        });
-                        assert_camera_images_bits_eq(&rgb, &actual);
-                    }
-                }
+    let cases = [
+        (
+            include_str!("../../configs/vertical_prism_spectral_caustics.json"),
+            IorMode::Constant,
+            0,
+            EnvironmentMisHeuristic::Balance,
+        ),
+        (
+            include_str!("../../configs/vertical_prism_spectral_caustics.json"),
+            IorMode::Dispersion,
+            4,
+            EnvironmentMisHeuristic::Power,
+        ),
+        (
+            include_str!("../../configs/vertical_prism_area_light.json"),
+            IorMode::Constant,
+            4,
+            EnvironmentMisHeuristic::Power,
+        ),
+        (
+            include_str!("../../configs/vertical_prism_area_light.json"),
+            IorMode::Dispersion,
+            0,
+            EnvironmentMisHeuristic::Balance,
+        ),
+    ];
+    for (source, mode, depth, mis) in cases {
+        let mut c = config(source);
+        c.render.width = 10;
+        c.render.height = 8;
+        c.render.camera_spp = 4;
+        c.render.mode = mode;
+        c.render.samples_per_pixel_axis = 1;
+        c.scene.max_diffuse_bounces = depth;
+        c.scene.environment_mis_heuristic = mis;
+        let scene = c.build().unwrap();
+        let assert_sum = |images: &spectral_caustics::integrator::camera::CameraLightingImages| {
+            for ((d, a), combined) in images
+                .direct
+                .pixels()
+                .iter()
+                .zip(images.caustics.pixels())
+                .zip(images.combined.pixels())
+            {
+                // RGB 相机在线性 RGB 中相加再转 XYZ，允许转换的舍入差。
+                assert!((*d + *a - *combined).norm() < 2e-12 * (1.0 + combined.norm()));
+            }
+        };
+        let render_rgb = |threads| {
+            let mut settings = c.render.clone();
+            settings.thread_count = Some(threads);
+            crate::support::run_in_threads(threads, || {
+                let lighting = spectral_caustics::integrator::photon::integrate_xyz(
+                    &scene,
+                    scene.photon.caustics_object_id,
+                    scene.photon.ground_id.expect("receiver"),
+                    &settings,
+                )
+                .unwrap();
+                spectral_caustics::integrator::camera::integrate_rgb(
+                    &scene,
+                    &settings,
+                    Some(&lighting),
+                )
+                .unwrap()
+            })
+        };
+        let rgb = render_rgb(1);
+        assert_sum(&rgb);
+        for threads in [2, 4] {
+            assert_camera_images_bits_eq(&rgb, &render_rgb(threads));
+        }
+        for packet in [1, 4] {
+            c.render.spectral_packet_size = packet;
+            c.render.thread_count = Some(1);
+            let reference = Renderer::new(c.render.clone())
+                .unwrap()
+                .render(&scene)
+                .unwrap();
+            assert_sum(&reference);
+            for threads in [2, 4] {
+                c.render.thread_count = Some(threads);
+                let actual = Renderer::new(c.render.clone())
+                    .unwrap()
+                    .render(&scene)
+                    .unwrap();
+                assert_camera_images_bits_eq(&actual, &reference);
             }
         }
     }

@@ -1,9 +1,5 @@
-use spectral_caustics::integrator::camera::{
-    path::trace_camera_path,
-    transport::Caustics,
-    types::{CameraPathRngs, CameraPathState},
-};
-mod support;
+#[cfg(feature = "diagnostics")]
+use crate::support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 use nalgebra::Vector3;
 use rand::Rng;
 use rand::RngCore;
@@ -20,6 +16,11 @@ use spectral_caustics::config::scene::SceneConfig;
 use spectral_caustics::geometry::ground::Ground;
 use spectral_caustics::geometry::ray::Ray;
 use spectral_caustics::geometry::sphere::Sphere;
+use spectral_caustics::integrator::camera::{
+    path::trace_camera_path,
+    transport::Caustics,
+    types::{CameraPathRngs, CameraPathState},
+};
 use spectral_caustics::light::DiskAreaLight;
 use spectral_caustics::light::Light;
 use spectral_caustics::material::lambertian::Lambertian;
@@ -29,12 +30,10 @@ use spectral_caustics::spectrum::cie_xyz;
 use spectral_caustics::spectrum::emission::d65_spectrum;
 use spectral_caustics::spectrum::rgb_reflectance;
 use std::f64::consts::PI;
-#[cfg(feature = "diagnostics")]
-use support::{assert_camera_images_bits_eq, assert_framebuffer_bits_eq};
 
 fn config() -> Config {
     let mut c =
-        Config::from_json(include_str!("../configs/vertical_prism_area_light.json")).unwrap();
+        Config::from_json(include_str!("../../configs/vertical_prism_area_light.json")).unwrap();
     c.render.width = 12;
     c.render.height = 12;
     c.render.camera_spp = 16;
@@ -167,7 +166,7 @@ fn disk_and_parallel_tagged_config_roundtrip_and_reject_invalid_inputs() {
     assert!(matches!(c.build().unwrap().scene.light, Light::DiskArea(_)));
     assert_eq!(Config::from_json(&c.to_json().unwrap()).unwrap(), c);
     let parallel = Config::from_json(include_str!(
-        "../configs/vertical_prism_spectral_caustics.json"
+        "../../configs/vertical_prism_spectral_caustics.json"
     ))
     .unwrap();
     let mut tagged = serde_json::to_value(&parallel).unwrap();
@@ -523,6 +522,8 @@ fn disk_packet_components_and_rgb_repeat_across_threads_with_crn_preserved() {
     let mut c = config();
     c.render.width = 8;
     c.render.height = 8;
+    c.render.samples_per_pixel_axis = 2;
+    c.render.camera_spp = 8;
     for mode in [IorMode::Constant, IorMode::Dispersion] {
         c.render.mode = mode;
         let scene = c.build().unwrap();
@@ -530,7 +531,7 @@ fn disk_packet_components_and_rgb_repeat_across_threads_with_crn_preserved() {
             c.render.spectral_packet_size = packet;
             let mut reference: Option<spectral_caustics::integrator::camera::CameraLightingImages> =
                 None;
-            for threads in [1, 2, 4, 1] {
+            for threads in [1, 2, 4] {
                 c.render.thread_count = Some(threads);
                 let image = Renderer::new(c.render.clone())
                     .unwrap()
@@ -572,7 +573,7 @@ fn disk_packet_components_and_rgb_repeat_across_threads_with_crn_preserved() {
             None;
         for threads in [1, 2, 4] {
             c.render.thread_count = Some(threads);
-            let image = support::run_in_threads(threads, || {
+            let image = crate::support::run_in_threads(threads, || {
                 let light = spectral_caustics::integrator::photon::integrate_xyz(
                     &scene,
                     scene.photon.caustics_object_id,
@@ -699,7 +700,7 @@ fn disk_prism_center_ray_dispersion_and_source_extent_blur_are_physical() {
         Some(450.0),
         IorMode::Dispersion,
         32,
-        &mut support::TransmissionRng,
+        &mut crate::support::TransmissionRng,
     )
     .unwrap()
     .landing()
@@ -710,7 +711,7 @@ fn disk_prism_center_ray_dispersion_and_source_extent_blur_are_physical() {
         Some(650.0),
         IorMode::Dispersion,
         32,
-        &mut support::TransmissionRng,
+        &mut crate::support::TransmissionRng,
     )
     .unwrap()
     .landing()
@@ -723,7 +724,7 @@ fn disk_prism_center_ray_dispersion_and_source_extent_blur_are_physical() {
             Some(450.0),
             IorMode::Constant,
             32,
-            &mut support::TransmissionRng
+            &mut crate::support::TransmissionRng
         )
         .unwrap()
         .landing(),
@@ -733,7 +734,7 @@ fn disk_prism_center_ray_dispersion_and_source_extent_blur_are_physical() {
             Some(650.0),
             IorMode::Constant,
             32,
-            &mut support::TransmissionRng
+            &mut crate::support::TransmissionRng
         )
         .unwrap()
         .landing()
@@ -755,7 +756,7 @@ fn disk_prism_center_ray_dispersion_and_source_extent_blur_are_physical() {
                     Some(550.0),
                     IorMode::Dispersion,
                     32,
-                    &mut support::TransmissionRng,
+                    &mut crate::support::TransmissionRng,
                 )
                 .unwrap()
                 .landing()

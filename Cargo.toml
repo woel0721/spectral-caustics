@@ -23,3 +23,6 @@ required-features = ["diagnostics"]
 [[example]]
 name = "spectral_fog_compare"
 required-features = ["diagnostics"]
+
+[profile.dev.package."*"]
+opt-level = 2

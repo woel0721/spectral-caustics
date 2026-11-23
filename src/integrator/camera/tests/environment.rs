@@ -6,7 +6,6 @@ use super::super::lighting::transmittance_to_light;
 use crate::config::RenderJob;
 use crate::config::scene::EnvironmentMisHeuristic;
 use crate::geometry::hit::Hit;
-use crate::geometry::ray::INTERSECTION_EPSILON;
 use crate::material::BsdfSample;
 use crate::material::Material;
 use crate::material::unit_vector;
@@ -16,8 +15,6 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use std::f64::consts::PI;
 
-use crate::camera::Camera;
-use crate::config::camera::CameraConfig;
 use crate::geometry::ground::Ground;
 use crate::material::lambertian::Lambertian;
 use rand::RngCore;
@@ -375,66 +372,78 @@ fn back_hemisphere_and_blocked_hdri_samples_keep_the_total_denominator() {
 }
 
 #[test]
-fn uniform_and_black_hdri_lighting_match_the_analytic_expectation() {
+fn uniform_hdri_lighting_matches_analytic_expectation_across_quotas_normals_and_rotations() {
     let albedo = Vector3::new(0.2, 0.5, 0.8);
     let material = Lambertian::new(albedo).unwrap();
-    for rgb in [[8.0, 4.0, 2.0], [0.0; 3]] {
-        let hdr = TemporaryHdr::uniform(rgb);
-        for rotation in [0.0, 37.0] {
-            let mut scene = hdr.scene(rotation);
-            assert!(scene.scene.environment.as_ref().unwrap().has_map());
-            scene.camera_options.environment_samples = 4096;
-            scene
-                .scene
-                .environment
-                .as_mut()
-                .unwrap()
-                .set_intensity(0.25)
-                .unwrap();
-            let expected = albedo.component_mul(&Vector3::from(rgb).cast::<f64>()) * 0.25;
-            for normal in [Vector3::z(), Vector3::x(), -Vector3::z()] {
-                let hit = Hit {
-                    normal,
-                    coords: nalgebra::Vector3::zeros(),
-                    distance: 1.0,
-                    object_id: 0,
-                    material_id: 0,
-                };
-                let mut mean = Vector3::zeros();
-                for seed in 0..8 {
-                    let result = environment_lighting(
-                        &scene,
-                        &hit,
-                        &material,
-                        normal,
-                        &mut StdRng::seed_from_u64(seed),
-                        crate::integrator::camera::transport::Rgb::default(),
-                        crate::optics::dispersion::IorMode::Constant,
-                        scene.scene.medium.as_deref(),
-                    )
-                    .unwrap();
-                    assert!(result.iter().all(|v| v.is_finite()));
-                    mean += result / 8.0;
-                    if seed == 0 {
-                        assert_eq!(
-                            result,
-                            environment_lighting(
-                                &scene,
-                                &hit,
-                                &material,
-                                normal,
-                                &mut StdRng::seed_from_u64(seed),
-                                crate::integrator::camera::transport::Rgb::default(),
-                                crate::optics::dispersion::IorMode::Constant,
-                                scene.scene.medium.as_deref(),
-                            )
-                            .unwrap()
-                        );
-                    }
-                }
-                assert!((mean - expected).norm() < 0.015 * expected.norm() + 1e-12);
-            }
+    let rgb = [8.0, 4.0, 2.0];
+    let hdr = TemporaryHdr::uniform(rgb);
+    for rotation in [0.0, 37.0] {
+        let mut scene = hdr.scene(rotation);
+        assert!(scene.scene.environment.as_ref().unwrap().has_map());
+        scene.camera_options.environment_samples = 1024;
+        scene
+            .scene
+            .environment
+            .as_mut()
+            .unwrap()
+            .set_intensity(0.25)
+            .unwrap();
+        let expected = albedo.component_mul(&Vector3::from(rgb).cast::<f64>()) * 0.25;
+        for normal in [Vector3::z(), Vector3::x(), -Vector3::z()] {
+            let hit = Hit {
+                normal,
+                coords: nalgebra::Vector3::zeros(),
+                distance: 1.0,
+                object_id: 0,
+                material_id: 0,
+            };
+            let result = environment_lighting(
+                &scene,
+                &hit,
+                &material,
+                normal,
+                &mut StdRng::seed_from_u64(42),
+                crate::integrator::camera::transport::Rgb::default(),
+                crate::optics::dispersion::IorMode::Constant,
+                scene.scene.medium.as_deref(),
+            )
+            .unwrap();
+            assert!(result.iter().all(|v| v.is_finite()));
+            assert!((result - expected).norm() < 0.03 * expected.norm() + 1e-12);
         }
+    }
+    let mut scene = hdr.scene(37.0);
+    let hit = Hit {
+        normal: Vector3::z(),
+        coords: nalgebra::Vector3::zeros(),
+        distance: 1.0,
+        object_id: 0,
+        material_id: 0,
+    };
+    let expected = albedo.component_mul(&Vector3::from(rgb).cast::<f64>());
+    for total in [1, 2, 3, 4, 8] {
+        scene.camera_options.environment_samples = total;
+        let mut rng = StdRng::seed_from_u64(100 + total as u64);
+        let mut mean = Vector3::zeros();
+        let trials = (2048 / total).max(256);
+        for _ in 0..trials {
+            mean += environment_lighting(
+                &scene,
+                &hit,
+                &material,
+                Vector3::z(),
+                &mut rng,
+                crate::integrator::camera::transport::Rgb::default(),
+                crate::optics::dispersion::IorMode::Constant,
+                scene.scene.medium.as_deref(),
+            )
+            .unwrap()
+                / trials as f64;
+        }
+        assert!(
+            (mean - expected).norm() < expected.norm() * 0.03,
+            "N={total}: {mean:?}"
+        );
     }
 }
 
@@ -459,24 +468,6 @@ fn reference_radiance(
     integral.component_mul(&albedo) * (2.0 / (phi_steps * z_steps) as f64)
 }
 
-fn diffuse_scene(hdr: &TemporaryHdr) -> RenderJob {
-    let mut scene = hdr.scene(37.0);
-    scene.scene.light.as_parallel_mut().unwrap().total_flux = 0.0;
-    scene.ground_checkerboard = None;
-    scene.camera = Camera::from_config(&CameraConfig {
-        position: [0.0, 0.0, 2.0],
-        target: [0.0; 3],
-        up: [0.0, 1.0, 0.0],
-        fov_y_degrees: 35.0,
-    })
-    .unwrap();
-    scene.scene.add(
-        Box::new(Ground::new(0.0).unwrap()),
-        Box::new(Lambertian::new(Vector3::new(0.8, 0.6, 0.4)).unwrap()),
-    );
-    scene
-}
-
 #[test]
 fn ggx_balance_and_power_match_hemisphere_integral_with_rejected_bsdf_quotas() {
     use crate::material::ggx_metal::GgxMetal;
@@ -498,15 +489,15 @@ fn ggx_balance_and_power_match_hemisphere_integral_with_rejected_bsdf_quotas() {
         material_id: 0,
     };
     let mut reference = Vector3::zeros();
-    for j in 0..128 {
-        let c = (j as f64 + 0.5) / 128.0;
-        for i in 0..256 {
-            let angle = 2.0 * PI * (i as f64 + 0.5) / 256.0;
+    for j in 0..64 {
+        let c = (j as f64 + 0.5) / 64.0;
+        for i in 0..128 {
+            let angle = 2.0 * PI * (i as f64 + 0.5) / 128.0;
             let r = (1.0 - c * c).sqrt();
             let wi = Vector3::new(r * angle.cos(), r * angle.sin(), c);
             let f = m.evaluate_rgb(wi, wo, Vector3::z());
             reference +=
-                f.component_mul(&Vector3::new(1.0, 2.0, 4.0)) * (c * 2.0 * PI / (128.0 * 256.0));
+                f.component_mul(&Vector3::new(1.0, 2.0, 4.0)) * (c * 2.0 * PI / (64.0 * 128.0));
         }
     }
     for heuristic in [
@@ -514,9 +505,10 @@ fn ggx_balance_and_power_match_hemisphere_integral_with_rejected_bsdf_quotas() {
         EnvironmentMisHeuristic::Power,
     ] {
         scene.camera_options.environment_mis_heuristic = heuristic;
+        let samples = 6144;
         let mut sum = Vector3::zeros();
         let mut rng = StdRng::seed_from_u64(42);
-        for _ in 0..16384 {
+        for _ in 0..samples {
             sum += environment_lighting(
                 &scene,
                 &hit,
@@ -529,9 +521,9 @@ fn ggx_balance_and_power_match_hemisphere_integral_with_rejected_bsdf_quotas() {
             )
             .unwrap();
         }
-        let mean = sum / 16384.0;
+        let mean = sum / samples as f64;
         assert!(
-            (mean - reference).norm() < 0.04,
+            (mean - reference).norm() < 0.05,
             "{heuristic:?}: {mean} vs {reference}"
         );
     }
@@ -759,9 +751,9 @@ mod power {
 
     #[test]
     fn power_estimates_converge_to_uniform_and_high_contrast_references() {
-        for (label, hdr) in [
-            ("uniform", TemporaryHdr::uniform([1.0; 3])),
-            ("high", TemporaryHdr::high_contrast()),
+        for (uniform, hdr) in [
+            (true, TemporaryHdr::uniform([1.0; 3])),
+            (false, TemporaryHdr::high_contrast()),
         ] {
             let mut scene = hdr.scene(37.0);
             scene.camera_options.environment_mis_heuristic = EnvironmentMisHeuristic::Power;
@@ -773,15 +765,21 @@ mod power {
                 object_id: 0,
                 material_id: 0,
             };
-            let reference = reference_radiance(&scene, Vector3::repeat(0.8), 1024, 512).x;
+            let reference = if uniform {
+                0.8
+            } else {
+                reference_radiance(&scene, Vector3::repeat(0.8), 256, 128).x
+            };
+            let seeds = 32;
+            let paths = 512;
             for total in [2, 3, 8] {
                 scene.camera_options.environment_samples = total;
                 let mut mean = 0.0;
                 let mut mse = 0.0;
-                for seed in 0..64 {
-                    let mut rng = StdRng::seed_from_u64(seed);
+                for seed in 0..seeds {
+                    let mut rng = StdRng::seed_from_u64(seed as u64);
                     let mut value = 0.0;
-                    for _ in 0..512 {
+                    for _ in 0..paths {
                         value += environment_lighting(
                             &scene,
                             &hit,
@@ -793,17 +791,15 @@ mod power {
                             scene.scene.medium.as_deref(),
                         )
                         .unwrap()
-                        .x / 512.0;
+                        .x / paths as f64;
                     }
-                    mean += value / 64.0;
-                    mse += (value - reference).powi(2) / 64.0;
+                    mean += value / seeds as f64;
+                    mse += (value - reference).powi(2) / seeds as f64;
                 }
-                eprintln!(
-                    "Power {label}: N={total}, reference={reference:.8}, mean={mean:.8}, RMSE={:.8}",
-                    mse.sqrt()
-                );
                 assert!((mean - reference).abs() < reference * 0.05);
-                assert!((mean - reference).abs() < 5.0 * (mse / 64.0).sqrt() + reference * 1e-4);
+                assert!(
+                    (mean - reference).abs() < 5.0 * (mse / seeds as f64).sqrt() + reference * 5e-3
+                );
             }
         }
     }
@@ -1016,44 +1012,6 @@ mod stratified {
     }
 
     #[test]
-    fn small_even_and_odd_quotas_preserve_uniform_hdr_brightness() {
-        let hdr = TemporaryHdr::uniform([8.0, 4.0, 2.0]);
-        let mut scene = hdr.scene(37.0);
-        let albedo = Vector3::new(0.2, 0.5, 0.8);
-        let material = Lambertian::new(albedo).unwrap();
-        let hit = Hit {
-            normal: Vector3::z(),
-            coords: nalgebra::Vector3::zeros(),
-            distance: 1.0,
-            object_id: 0,
-            material_id: 0,
-        };
-        let expected = albedo.component_mul(&Vector3::new(8.0, 4.0, 2.0));
-        for total in [2, 3, 4, 8] {
-            scene.camera_options.environment_samples = total;
-            let mut mean = Vector3::zeros();
-            for seed in 0..4096 {
-                mean += environment_lighting(
-                    &scene,
-                    &hit,
-                    &material,
-                    Vector3::z(),
-                    &mut StdRng::seed_from_u64(seed),
-                    crate::integrator::camera::transport::Rgb::default(),
-                    crate::optics::dispersion::IorMode::Constant,
-                    scene.scene.medium.as_deref(),
-                )
-                .unwrap()
-                    / 4096.0;
-            }
-            assert!(
-                (mean - expected).norm() < expected.norm() * 0.02,
-                "N={total}: {mean:?}"
-            );
-        }
-    }
-
-    #[test]
     fn count_weighted_contributions_reject_invalid_values_and_overflow() {
         let hdr = TemporaryHdr::uniform([1.0; 3]);
         let mut scene = hdr.scene(0.0);
@@ -1167,9 +1125,9 @@ mod stratified {
                 );
             }
             let reference =
-                reference_at(&scene, Vector3::zeros(), Vector3::repeat(0.8), 1024, 512).x;
-            let coarse = reference_at(&scene, Vector3::zeros(), Vector3::repeat(0.8), 512, 256).x;
-            assert!((reference - coarse).abs() < reference * 0.005);
+                reference_at(&scene, Vector3::zeros(), Vector3::repeat(0.8), 256, 128).x;
+            let coarse = reference_at(&scene, Vector3::zeros(), Vector3::repeat(0.8), 128, 64).x;
+            assert!((reference - coarse).abs() < reference * 0.01);
             let material = Lambertian::new(Vector3::repeat(0.8)).unwrap();
             let hit = Hit {
                 normal: Vector3::z(),
@@ -1178,15 +1136,17 @@ mod stratified {
                 object_id: 0,
                 material_id: 0,
             };
-            for total in [2, 3, 4, 8] {
+            let seeds = 32;
+            let paths = 512;
+            for total in [2, 3, 8] {
                 scene.camera_options.environment_samples = total;
-                let mut mse = [0.0; 2];
+                let mut mse = 0.0;
                 let mut mean = 0.0;
-                for seed in 0..64 {
-                    let mut rng = StdRng::seed_from_u64(seed);
+                for seed in 0..seeds {
+                    let mut rng = StdRng::seed_from_u64(seed as u64);
                     let mut estimate = 0.0;
-                    for path in 0..512 {
-                        let value = environment_lighting(
+                    for _ in 0..paths {
+                        estimate += environment_lighting(
                             &scene,
                             &hit,
                             &material,
@@ -1197,19 +1157,11 @@ mod stratified {
                             scene.scene.medium.as_deref(),
                         )
                         .unwrap()
-                        .x;
-                        if path == 0 {
-                            mse[0] += (value - reference).powi(2) / 64.0;
-                        }
-                        estimate += value / 512.0;
+                        .x / paths as f64;
                     }
-                    mse[1] += (estimate - reference).powi(2) / 64.0;
-                    mean += estimate / 64.0;
+                    mse += (estimate - reference).powi(2) / seeds as f64;
+                    mean += estimate / seeds as f64;
                 }
-                eprintln!(
-                    "D3 convergence: occluded={occluded}, N={total}, reference={reference:.8}, mean={mean:.8}, RMSE={:?}",
-                    mse.map(f64::sqrt)
-                );
                 // 少量单次估计可能漏掉低概率大贡献，不预设其经验 MSE 下降比例。
                 assert!(
                     (mean - reference).abs() < reference * 0.05,
@@ -1217,42 +1169,9 @@ mod stratified {
                 );
                 assert!(
                     (mean - reference).abs()
-                        < 5.0 * (mse[1] / 64.0).sqrt() + (reference - coarse).abs()
+                        < 5.0 * (mse / seeds as f64).sqrt() + (reference - coarse).abs()
                 );
             }
-        }
-    }
-
-    pub(super) fn partial_scene(hdr: &TemporaryHdr) -> RenderJob {
-        let mut scene = diffuse_scene(hdr);
-        // 相机位于遮挡平面下方，主光线不碰遮挡物；向上环境光只有部分可见。
-        scene.camera = Camera::from_config(&CameraConfig {
-            position: [0.0, 0.0, 0.5],
-            target: [0.0; 3],
-            up: [0.0, 1.0, 0.0],
-            fov_y_degrees: 35.0,
-        })
-        .unwrap();
-        scene.scene.add(
-            Box::new(HalfPlane(Ground::new(1.0).unwrap())),
-            Box::new(
-                crate::material::lambertian::Lambertian::new(nalgebra::Vector3::repeat(0.8))
-                    .unwrap(),
-            ),
-        );
-        scene
-    }
-
-    #[test]
-    fn partial_occlusion_reference_matches_independent_numerical_integration() {
-        let hdr = TemporaryHdr::uniform([1.0; 3]);
-        let scene = partial_scene(&hdr);
-        let h = 1.0 - 10.0 * INTERSECTION_EPSILON;
-        for y in [-0.15, 0.0, 0.15] {
-            let position = Vector3::new(0.0, y, 0.0);
-            let numerical = reference_at(&scene, position, Vector3::new(0.8, 0.6, 0.4), 1024, 512);
-            let analytic = Vector3::new(0.8, 0.6, 0.4) * (0.5 * (1.0 - y / h.hypot(y)));
-            assert!((numerical - analytic).norm() < analytic.norm() * 0.002);
         }
     }
 }

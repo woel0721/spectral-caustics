@@ -1,4 +1,4 @@
-mod support;
+use crate::support::assert_camera_images_bits_eq;
 use nalgebra::{Vector2, Vector3};
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
@@ -33,10 +33,9 @@ use spectral_caustics::{
         MediumRegion::{Exterior, Interior},
     },
 };
-use support::assert_camera_images_bits_eq;
 
 fn interface_example_json() -> Value {
-    serde_json::from_str(include_str!("../configs/sphere_medium_interface.json")).unwrap()
+    serde_json::from_str(include_str!("../../configs/sphere_medium_interface.json")).unwrap()
 }
 
 #[test]
@@ -172,7 +171,7 @@ fn json_medium_interface_rejects_invalid_bindings_in_validate_and_build() {
     open["scene"]["objects"][1]["medium_interface"] = json!({"interior": null});
     assert!(Config::from_json(&open.to_string()).is_err());
     let mut beveled: Value =
-        serde_json::from_str(include_str!("../configs/beveled_prism.json")).unwrap();
+        serde_json::from_str(include_str!("../../configs/beveled_prism.json")).unwrap();
     beveled["scene"]["objects"][0]["medium_interface"] = json!({"interior": null});
     assert!(Config::from_json(&beveled.to_string()).is_err());
 }

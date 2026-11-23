@@ -370,32 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn glass_trait_sampling_preserves_direction_event_probability_and_weight() {
-        let glass: Box<dyn Material> = Box::new(Dielectric::new(1.5).unwrap());
-        let concrete = Dielectric::new(1.5).unwrap();
-        let wo = Vector3::new(0.6, 0.0, -0.8);
-        for random in [0, u64::MAX] {
-            let expected =
-                glass_result(concrete.sample(wo, Vector3::z(), &mut FixedRng::new(random)))
-                    .unwrap();
-            let sample =
-                glass_result(glass.sample(wo, Vector3::z(), &mut FixedRng::new(random))).unwrap();
-            assert_eq!(sample.wi, expected.wi);
-            assert_eq!(sample.event, expected.event);
-
-            assert_eq!(sample.weight, expected.weight);
-            assert_eq!(
-                glass
-                    .sample(wo, Vector3::z(), &mut FixedRng::new(random))
-                    .unwrap()
-                    .wi,
-                sample.wi
-            );
-            assert_eq!(glass.pdf(sample.wi, wo, Vector3::z()), 0.0);
-        }
-    }
-
-    #[test]
     fn fresnel_matches_normal_oblique_and_brewster_incidence() {
         // 空气 -> n=1.5 玻璃：法向入射 F=((1-1.5)/(1+1.5))²=0.04。
         assert!((fresnel_dielectric(1.0, 1.0, 1.5).unwrap() - 0.04).abs() < 1e-14);

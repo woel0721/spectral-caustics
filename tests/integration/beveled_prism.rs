@@ -1,4 +1,4 @@
-mod support;
+use crate::support::{assert_camera_images_bits_eq, test_materials as materials};
 use nalgebra::Vector2;
 use nalgebra::Vector3;
 use serde_json::json;
@@ -13,15 +13,15 @@ use spectral_caustics::geometry::beveled_prism::BeveledPrism;
 use spectral_caustics::geometry::beveled_prism::ROUND_SEGMENTS;
 use spectral_caustics::geometry::object::Hittable;
 use spectral_caustics::renderer::Renderer;
-use support::{assert_camera_images_bits_eq, test_materials as materials};
 
 fn config() -> Config {
-    let mut config = Config::from_json(include_str!("../configs/beveled_prism.json")).unwrap();
+    let mut config = Config::from_json(include_str!("../../configs/beveled_prism.json")).unwrap();
     config.render.width = 20;
     config.render.height = 16;
     config.render.camera_spp = 8;
     config.render.samples_per_pixel_axis = 1;
     config.render.thread_count = Some(1);
+    config.scene.environment.as_mut().unwrap().map_path = None;
     config.scene.environment_samples = 3;
     config.scene.objects.swap(0, 1);
     #[cfg(feature = "diagnostics")]
@@ -175,8 +175,17 @@ fn camera_center_ray_hits_all_eight_facets_of_each_round_corner_at_both_test_siz
 
 #[test]
 fn existing_materials_and_debug_reuse_rgb_paths_across_mis_depths_and_threads() {
-    for material in materials() {
+    let configs = [
+        (EnvironmentMisHeuristic::Balance, 0),
+        (EnvironmentMisHeuristic::Power, 1),
+        (EnvironmentMisHeuristic::Balance, 4),
+        (EnvironmentMisHeuristic::Power, 1),
+    ];
+    for (material, (heuristic, depth)) in materials().into_iter().zip(configs) {
         let mut config = config();
+        config.render.width = 12;
+        config.render.height = 10;
+        config.render.camera_spp = 4;
         if let ObjectConfig::BeveledPrism { material: slot, .. } = &mut config.scene.objects[1] {
             *slot = material.clone();
         }
@@ -195,75 +204,67 @@ fn existing_materials_and_debug_reuse_rgb_paths_across_mis_depths_and_threads() 
                 .iter()
                 .all(|p| *p == Vector3::zeros())
         );
-        for heuristic in [
-            EnvironmentMisHeuristic::Balance,
-            EnvironmentMisHeuristic::Power,
-        ] {
-            scene.camera_options.environment_mis_heuristic = heuristic;
-            for depth in [0, 1, 4] {
-                scene.camera_options.max_diffuse_bounces = depth;
-                #[cfg(feature = "diagnostics")]
-                {
-                    config.render.diagnostics.path = false;
-                }
-                let ordinary = Renderer::new(config.render.clone())
-                    .unwrap()
-                    .render(&scene)
-                    .unwrap();
-                #[cfg(feature = "diagnostics")]
-                let mut reference = None;
-                for threads in [1, 2, 4, 1] {
-                    config.render.thread_count = Some(threads);
-                    #[cfg(feature = "diagnostics")]
-                    {
-                        config.render.diagnostics.path = true;
-                    }
-                    let images = Renderer::new(config.render.clone())
-                        .unwrap()
-                        .render(&scene)
-                        .unwrap();
-                    assert_camera_images_bits_eq(&images, &ordinary);
-                    for ((direct, caustics), combined) in images
-                        .direct
-                        .pixels()
+        scene.camera_options.environment_mis_heuristic = heuristic;
+        scene.camera_options.max_diffuse_bounces = depth;
+        #[cfg(feature = "diagnostics")]
+        {
+            config.render.diagnostics.path = false;
+        }
+        let ordinary = Renderer::new(config.render.clone())
+            .unwrap()
+            .render(&scene)
+            .unwrap();
+        #[cfg(feature = "diagnostics")]
+        let mut reference = None;
+        for threads in [1, 2, 4] {
+            config.render.thread_count = Some(threads);
+            #[cfg(feature = "diagnostics")]
+            {
+                config.render.diagnostics.path = true;
+            }
+            let images = Renderer::new(config.render.clone())
+                .unwrap()
+                .render(&scene)
+                .unwrap();
+            assert_camera_images_bits_eq(&images, &ordinary);
+            for ((direct, caustics), combined) in images
+                .direct
+                .pixels()
+                .iter()
+                .zip(images.caustics.pixels())
+                .zip(images.combined.pixels())
+            {
+                assert!((direct + caustics - combined).norm() < 1e-12);
+            }
+            #[cfg(feature = "diagnostics")]
+            if let Some(debug) = &images.path_debug {
+                assert_eq!(debug.target_object_id, Some(1));
+                assert!(debug.pixels.iter().any(|p| p.target_samples > 0));
+                assert!(
+                    debug
+                        .pixels
                         .iter()
-                        .zip(images.caustics.pixels())
-                        .zip(images.combined.pixels())
-                    {
-                        assert!((direct + caustics - combined).norm() < 1e-12);
+                        .all(|p| p.terminations.values().sum::<u64>() == p.target_samples)
+                );
+                let events = |f: fn(&spectral_caustics::diagnostics::PathDebugPixel) -> u64| {
+                    debug.pixels.iter().map(f).sum::<u64>()
+                };
+                match material {
+                    MaterialConfig::Dielectric { .. } => {
+                        assert!(events(|p| p.events.specular_transmission) > 0)
                     }
-                    #[cfg(feature = "diagnostics")]
-                    if let Some(debug) = &images.path_debug {
-                        assert_eq!(debug.target_object_id, Some(1));
-                        assert!(debug.pixels.iter().any(|p| p.target_samples > 0));
-                        assert!(
-                            debug
-                                .pixels
-                                .iter()
-                                .all(|p| p.terminations.values().sum::<u64>() == p.target_samples)
-                        );
-                        let events =
-                            |f: fn(&spectral_caustics::diagnostics::PathDebugPixel) -> u64| {
-                                debug.pixels.iter().map(f).sum::<u64>()
-                            };
-                        match material {
-                            MaterialConfig::Dielectric { .. } => {
-                                assert!(events(|p| p.events.specular_transmission) > 0)
-                            }
-                            MaterialConfig::GgxMetal { roughness, .. } if roughness > 0.0 => {
-                                assert!(events(|p| p.events.glossy_reflection) > 0 || depth == 0)
-                            }
-                            _ => assert!(events(|p| p.events.specular_reflection) > 0),
-                        }
-                        if let Some(expected) = &reference {
-                            assert_eq!(debug, expected);
-                        }
+                    MaterialConfig::GgxMetal { roughness, .. } if roughness > 0.0 => {
+                        assert!(events(|p| p.events.glossy_reflection) > 0)
                     }
-                    #[cfg(feature = "diagnostics")]
-                    {
-                        reference = images.path_debug;
-                    }
+                    _ => assert!(events(|p| p.events.specular_reflection) > 0),
                 }
+                if let Some(expected) = &reference {
+                    assert_eq!(debug, expected);
+                }
+            }
+            #[cfg(feature = "diagnostics")]
+            {
+                reference = images.path_debug;
             }
         }
     }

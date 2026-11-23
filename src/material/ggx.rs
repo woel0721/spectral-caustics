@@ -21,23 +21,6 @@ pub(super) fn d(cos_h: f64, alpha: f64) -> f64 {
     a2 / (PI * denominator * denominator)
 }
 
-/// 计算两个方向之间因微表面相互遮挡而保留下来的比例，供金属 BRDF 使用。
-///
-/// 输入：入射/出射方向相对法线的余弦 c_i/c_o 和粗糙参数 α；输出：高度相关 Smith 遮蔽项 G，背半球为 0。
-///
-/// 公式：s(c)=√(α²+(1-α²)c²)，G=2c_i c_o/[c_i s(c_o)+c_o s(c_i)]。
-#[cfg(test)]
-pub(super) fn g(cos_i: f64, cos_o: f64, alpha: f64) -> f64 {
-    if cos_i <= 0.0 || cos_o <= 0.0 {
-        return 0.0;
-    }
-    let a2 = alpha * alpha;
-    let root = |c: f64| (a2 + (1.0 - a2) * c * c).sqrt();
-    let scale = cos_i.max(cos_o);
-    let (ci, co) = (cos_i / scale, cos_o / scale);
-    2.0 * ci * co * scale / (ci * root(cos_o) + co * root(cos_i))
-}
-
 /// 高度相关 Smith 可见性项 V = G / (4 c_i c_o) = 0.5 / [c_i s(c_o) + c_o s(c_i)]。
 /// 直接消去分子分母中的 c_i c_o，避免近切线方向提前下溢且仅需一次除法。
 pub(super) fn visibility(cos_i: f64, cos_o: f64, alpha: f64) -> f64 {
@@ -159,11 +142,17 @@ mod tests {
                 .sum();
             assert!((integral - 1.0).abs() < 2e-6, "{alpha}: {integral}");
             assert!((d(1.0, alpha) - 1.0 / (PI * alpha * alpha)).abs() < 1e-12);
-            assert_eq!(g(1.0, 1.0, alpha), 1.0);
+            assert_eq!(4.0 * visibility(1.0, 1.0, alpha), 1.0);
+            assert_eq!(visibility(0.0, 0.5, alpha), 0.0);
+            assert_eq!(visibility(0.5, -0.1, alpha), 0.0);
             let (ci, co) = (0.3_f64, 0.8_f64);
             let lambda =
                 |c: f64| ((1.0 + alpha * alpha * (1.0 - c * c) / (c * c)).sqrt() - 1.0) / 2.0;
-            assert!((g(ci, co, alpha) - 1.0 / (1.0 + lambda(ci) + lambda(co))).abs() < 1e-14);
+            assert!(
+                (4.0 * ci * co * visibility(ci, co, alpha) - 1.0 / (1.0 + lambda(ci) + lambda(co)))
+                    .abs()
+                    < 1e-14
+            );
         }
     }
     #[test]

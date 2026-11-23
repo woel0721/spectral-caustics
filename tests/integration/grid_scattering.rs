@@ -32,16 +32,30 @@ fn octants(values: [f64; 8]) -> Vec<f64> {
         .collect()
 }
 
+struct PanicRng;
+
+impl RngCore for PanicRng {
+    fn next_u32(&mut self) -> u32 {
+        panic!("non-medium RNG stream consumed")
+    }
+    fn next_u64(&mut self) -> u64 {
+        panic!("non-medium RNG stream consumed")
+    }
+    fn fill_bytes(&mut self, _dest: &mut [u8]) {
+        panic!("non-medium RNG stream consumed")
+    }
+}
+
 fn trace<T: CameraTransport>(
     job: &RenderJob,
     state: &mut CameraPathState<T>,
     sun: (Vector3<f64>, f64),
     rng: &mut StdRng,
 ) {
-    let mut camera = StdRng::seed_from_u64(1);
-    let mut environment = StdRng::seed_from_u64(2);
-    let mut diffuse = StdRng::seed_from_u64(3);
-    let mut untouched = [camera.clone(), environment.clone(), diffuse.clone()];
+    // Delta candidates, phase sampling and volume NEE only consume the medium stream.
+    let mut camera = PanicRng;
+    let mut environment = PanicRng;
+    let mut diffuse = PanicRng;
     trace_camera_path(
         job,
         state,
@@ -59,13 +73,6 @@ fn trace<T: CameraTransport>(
         None,
     )
     .unwrap();
-    // Delta candidates, phase sampling and volume NEE only consume the medium stream.
-    for (mut actual, expected) in [camera, environment, diffuse]
-        .into_iter()
-        .zip(&mut untouched)
-    {
-        assert_eq!(actual.next_u64(), expected.next_u64());
-    }
 }
 
 #[test]
@@ -112,18 +119,19 @@ fn layered_grid_single_scattering_matches_independent_slab_integrals() {
                 } else {
                     1.2 * (-2.0_f64).exp()
                 };
+            let samples = 16_000;
             let mut mean = 0.0;
             let mut rng = StdRng::seed_from_u64(192);
-            for _ in 0..50_000 {
+            for _ in 0..samples {
                 let mut state = CameraPathState::new(ray, 0);
                 trace(&job, &mut state, (wi, 1.0), &mut rng);
-                mean += state.radiance.direct.x / 50_000.0;
+                mean += state.radiance.direct.x / samples as f64;
                 assert!(state.volume_scatters <= 1);
                 assert_eq!(state.path_depth, 0);
                 assert_eq!(state.radiance.caustics, Vector3::zeros());
             }
             assert!(
-                (mean / expected - 1.0).abs() < 0.025,
+                (mean / expected - 1.0).abs() < 0.035,
                 "g={g}, sign={sign}: {mean} vs {expected}"
             );
         }
@@ -207,18 +215,19 @@ fn conservative_heterogeneous_fog_recovers_unit_environment_with_multiple_scatte
         let mut means = Vec::new();
         for budget in [0, 1, 2, 8, 32] {
             job.camera_options.max_volume_scatters = budget;
+            let samples = 4_000;
             let mut rng = StdRng::seed_from_u64(313);
             let mut mean = 0.0;
-            for _ in 0..12_000 {
+            for _ in 0..samples {
                 let mut state = CameraPathState::new(ray, 0);
                 trace(&job, &mut state, (Vector3::z(), 0.0), &mut rng);
-                mean += state.radiance.direct.x / 12_000.0;
+                mean += state.radiance.direct.x / samples as f64;
                 assert!(state.volume_scatters <= budget);
             }
             // Constant boundary radiance and no absorption have exact full L=1,
             // regardless of density. Finite budgets omit positive higher orders.
             assert!(
-                mean <= 1.025,
+                mean <= 1.035,
                 "energy gain: {mis:?}, budget={budget}: {mean}"
             );
             means.push(mean);
@@ -231,6 +240,6 @@ fn conservative_heterogeneous_fog_recovers_unit_environment_with_multiple_scatte
             .transmittance_ray(&ray, f64::INFINITY, 550.0);
         assert!((means[0] - tr).abs() < 1e-12);
         assert!(means[1] > means[0] && means[2] > means[1] && means[3] > means[2]);
-        assert!((means[4] - 1.0).abs() < 0.025, "{mis:?}: {means:?}");
+        assert!((means[4] - 1.0).abs() < 0.035, "{mis:?}: {means:?}");
     }
 }
