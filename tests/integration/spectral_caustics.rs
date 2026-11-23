@@ -60,7 +60,7 @@ fn centroid(map: &SpectralCausticsMap, layer: usize) -> Vector3<f64> {
     values
         .iter()
         .enumerate()
-        .map(|(i, &e)| center(map, i) * e)
+        .map(|(i, e)| center(map, i) * e)
         .sum::<Vector3<f64>>()
         / values.iter().sum::<f64>()
 }
@@ -84,7 +84,7 @@ fn scalar_nodes_reintegrate_to_original_xyz_flux_and_resolve_dispersion() {
         let mut integral = vec![Vector3::zeros(); rgb.caustics.pixels().len()];
         for (j, &(nm, width)) in atlas.wavelength_samples().iter().enumerate() {
             for (xyz, e) in integral.iter_mut().zip(atlas.layer_irradiance(j).unwrap()) {
-                *xyz += cie_xyz(nm).unwrap() * (*e * width);
+                *xyz += cie_xyz(nm).unwrap() * (e * width);
             }
         }
         for (a, b) in integral.iter().zip(rgb.caustics.pixels()) {
@@ -157,7 +157,7 @@ fn source_flux_does_not_gain_a_wavelength_width_or_spatial_sample_count_factor()
         .unwrap()
         .unwrap();
     for i in 0..map.wavelength_samples().len() {
-        for (&a, &b) in map
+        for (a, b) in map
             .layer_irradiance(i)
             .unwrap()
             .iter()
@@ -212,7 +212,7 @@ fn a_non_ground_first_diffuse_vertex_prevents_later_ground_lookup() {
         .unwrap()
         .iter()
         .enumerate()
-        .max_by(|a, b| a.1.total_cmp(b.1))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
         .unwrap();
     let p = center(&map, i);
     assert!(map.sample(p, 550.0).unwrap() > 0.0);
@@ -358,7 +358,7 @@ fn hero_packet_integral_matches_independent_fine_wavelength_quadrature() {
         .unwrap()
         .iter()
         .enumerate()
-        .max_by(|a, b| a.1.total_cmp(b.1))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
         .unwrap();
     let p = center(&map, i);
     c.scene.camera.position = (p + Vector3::z()).into();

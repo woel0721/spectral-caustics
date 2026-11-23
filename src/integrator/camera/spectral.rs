@@ -13,11 +13,13 @@ use crate::config::RenderJob;
 use crate::config::render::RenderSetting;
 use crate::config::render::spectral_sample_counts;
 use crate::geometry::ray::Ray;
-use crate::sampling::rng::CAMERA_STREAM;
-use crate::sampling::rng::DIFFUSE_STREAM;
-use crate::sampling::rng::ENVIRONMENT_STREAM;
-use crate::sampling::rng::MEDIUM_STREAM;
-use crate::sampling::rng::pixel_seed;
+use crate::sampling::{
+    rng::{
+        DIFFUSE_STREAM, ENVIRONMENT_STREAM, MEDIUM_STREAM, PREFIX_STREAM, RenderRng, pixel_seed,
+        unit_f64_from_u64,
+    },
+    subpixel::{SubpixelSampler, permutation_salt, permute},
+};
 use crate::spectrum::cie_xyz;
 use crate::spectrum::emission::WAVELENGTH_MAX_NM;
 use crate::spectrum::emission::WAVELENGTH_MIN_NM;
@@ -26,11 +28,9 @@ use nalgebra::Vector2;
 use nalgebra::Vector3;
 use rand::Rng;
 use rand::SeedableRng;
-use rand::rngs::StdRng;
 use std::error::Error;
 
 const WAVELENGTH_STREAM: u64 = 0xe703_7ed1_a0b4_28db;
-pub(crate) const PREFIX_STREAM: u64 = 0x8ebc_6af0_9c88_c6e3;
 const PACKET_SAMPLE_STREAM: u64 = 0x5899_65cc_7537_4cc3;
 const PACKET_LANE_STREAM: u64 = 0x1d8e_4e27_c47d_124f;
 
@@ -167,18 +167,20 @@ pub fn integrate_spectral(
                 }
                 Ok(())
             };
+            let subpixel = SubpixelSampler::new(seed, index);
+            let perm_salt = permutation_salt(seed, index);
             if packet_size == 1 {
-                let mut jitter = StdRng::seed_from_u64(pixel_seed(seed, index, CAMERA_STREAM));
                 let mut medium = has_medium
-                    .then(|| StdRng::seed_from_u64(pixel_seed(seed, index, MEDIUM_STREAM)));
-                let mut scattering = StdRng::seed_from_u64(pixel_seed(seed, index, DIFFUSE_STREAM));
-                let mut prefix = StdRng::seed_from_u64(pixel_seed(seed, index, PREFIX_STREAM));
+                    .then(|| RenderRng::seed_from_u64(pixel_seed(seed, index, MEDIUM_STREAM)));
+                let mut scattering =
+                    RenderRng::seed_from_u64(pixel_seed(seed, index, DIFFUSE_STREAM));
+                let mut prefix = RenderRng::seed_from_u64(pixel_seed(seed, index, PREFIX_STREAM));
                 let mut environment = has_environment
-                    .then(|| StdRng::seed_from_u64(pixel_seed(seed, index, ENVIRONMENT_STREAM)));
+                    .then(|| RenderRng::seed_from_u64(pixel_seed(seed, index, ENVIRONMENT_STREAM)));
                 let mut wavelength =
-                    StdRng::seed_from_u64(pixel_seed(seed, index, WAVELENGTH_STREAM));
+                    RenderRng::seed_from_u64(pixel_seed(seed, index, WAVELENGTH_STREAM));
                 for i in 0..spatial_spp {
-                    let offset = Vector2::new(jitter.random::<f64>(), jitter.random::<f64>());
+                    let offset = subpixel.offset(permute(i, spatial_spp, perm_salt));
                     let ray = scene
                         .camera
                         .ray_for_pixel_sample(index % width, index / width, width, height, offset)
@@ -217,20 +219,15 @@ pub fn integrate_spectral(
                         seed,
                         index,
                         i,
+                        subpixel.offset(permute(i, spatial_spp, perm_salt)),
                         has_environment,
                         has_medium,
                     )?;
-                    let mut common = Some(common);
                     for lane in 0..packet_size {
-                        let mut wavelength = packet_rng(seed, index, i, lane, WAVELENGTH_STREAM);
-                        let u = wavelength.random::<f64>();
+                        let u = packet_wavelength_jitter(seed, index, i, lane);
                         let nm = packet_wavelength_nm(i, spatial_spp, lane, u);
                         // 波长层内抖动独立；路径流共享随机值，不共享可变游标。
-                        let mut lane_rngs = if lane + 1 == packet_size {
-                            common.take().expect("last lane consumes common RNGs")
-                        } else {
-                            common.as_ref().expect("common RNGs").clone()
-                        };
+                        let mut lane_rngs = common;
                         trace_lane(
                             ray,
                             nm,
@@ -262,12 +259,12 @@ pub fn integrate_spectral(
     )
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(crate) struct PacketSampleRngs {
-    prefix: StdRng,
-    environment: Option<StdRng>,
-    scattering: StdRng,
-    medium: Option<StdRng>,
+    prefix: RenderRng,
+    environment: Option<RenderRng>,
+    scattering: RenderRng,
+    medium: Option<RenderRng>,
 }
 
 impl PacketSampleRngs {
@@ -300,11 +297,10 @@ pub(crate) fn packet_primary_sample(
     seed: u64,
     pixel_index: usize,
     sample: usize,
+    offset: Vector2<f64>,
     has_environment: bool,
     has_medium: bool,
 ) -> Result<(Ray, PacketSampleRngs), &'static str> {
-    let mut jitter = packet_rng(seed, pixel_index, sample, 0, CAMERA_STREAM);
-    let offset = Vector2::new(jitter.random::<f64>(), jitter.random::<f64>());
     let ray = scene
         .camera
         .ray_for_pixel_sample(
@@ -346,18 +342,20 @@ pub(crate) fn spectral_camera_setup(
 
 /// 为某个 Packet 样本/波长路径建立可复现随机流，供像素并行与公共随机数采样。
 ///
-/// 输入：seed、像素编号、空间样本编号、lane 和流标识；输出：派生的 StdRng。
+/// 输入：seed、像素编号、空间样本编号、lane 和流标识；输出：派生的 RenderRng。
 /// 各路径类用独立 stream；需要公共随机数时传相同 lane 并复制 RNG 状态，不共享可变游标。
-pub(crate) fn packet_rng(
-    seed: u64,
-    pixel: usize,
-    sample: usize,
-    lane: usize,
-    stream: u64,
-) -> StdRng {
+fn packet_rng(seed: u64, pixel: usize, sample: usize, lane: usize, stream: u64) -> RenderRng {
+    RenderRng::seed_from_u64(packet_seed(seed, pixel, sample, lane, stream))
+}
+
+fn packet_seed(seed: u64, pixel: usize, sample: usize, lane: usize, stream: u64) -> u64 {
     let pixel = pixel_seed(seed, pixel, stream);
     let sample = pixel_seed(pixel, sample, PACKET_SAMPLE_STREAM);
-    StdRng::seed_from_u64(pixel_seed(sample, lane, PACKET_LANE_STREAM))
+    pixel_seed(sample, lane, PACKET_LANE_STREAM)
+}
+
+fn packet_wavelength_jitter(seed: u64, pixel: usize, sample: usize, lane: usize) -> f64 {
+    unit_f64_from_u64(packet_seed(seed, pixel, sample, lane, WAVELENGTH_STREAM))
 }
 
 /// 在四波长 Packet 的一个细分层内生成波长，保证所有细分层各取一个样本。
@@ -431,17 +429,17 @@ mod tests {
                     for lane in 0..4 {
                         for stream in [
                             WAVELENGTH_STREAM,
-                            CAMERA_STREAM,
                             PREFIX_STREAM,
                             ENVIRONMENT_STREAM,
                             DIFFUSE_STREAM,
                             MEDIUM_STREAM,
                         ] {
+                            assert!(values.insert(packet_seed(seed, pixel, sample, lane, stream)));
                             let mut a = packet_rng(seed, pixel, sample, lane, stream);
                             let mut b = packet_rng(seed, pixel, sample, lane, stream);
                             let first = a.next_u64();
                             assert_eq!(first, b.next_u64());
-                            assert!(values.insert(first));
+                            assert_ne!(first, a.next_u64());
                         }
                     }
                 }
@@ -527,22 +525,21 @@ mod tests {
             let mut expected = Vector3::zeros();
             let mut seen_multiple = false;
             let mut seen_divergent_lanes = false;
+            let subpixel = SubpixelSampler::new(settings.seed, 0);
+            let salt = permutation_salt(settings.seed, 0);
             for i in 0..4 {
-                let mut jitter = packet_rng(settings.seed, 0, i, 0, CAMERA_STREAM);
                 let ray = job
                     .camera
-                    .ray_for_pixel_sample(
-                        0,
-                        0,
-                        1,
-                        1,
-                        Vector2::new(jitter.random(), jitter.random()),
-                    )
+                    .ray_for_pixel_sample(0, 0, 1, 1, subpixel.offset(permute(i, 4, salt)))
                     .unwrap();
                 let mut reference = None::<(usize, _, _, _, _)>;
                 for lane in 0..4 {
-                    let mut wavelength = packet_rng(settings.seed, 0, i, lane, WAVELENGTH_STREAM);
-                    let nm = packet_wavelength_nm(i, 4, lane, wavelength.random());
+                    let nm = packet_wavelength_nm(
+                        i,
+                        4,
+                        lane,
+                        packet_wavelength_jitter(settings.seed, 0, i, lane),
+                    );
                     let mut state = CameraPathState::spectral(ray, nm, 0).unwrap();
                     // Each scalar lane owns fresh streams. The real Packet must reset
                     // its medium cursor to the same state even after a long previous lane.

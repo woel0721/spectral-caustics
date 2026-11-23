@@ -1,7 +1,6 @@
 use crate::support::assert_camera_images_bits_eq;
 use nalgebra::Vector2;
 use nalgebra::Vector3;
-use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rayon::prelude::*;
@@ -278,9 +277,8 @@ fn camera_misses_return_rotated_scaled_hdr_background() {
     .unwrap();
     scene.scene.objects.clear();
     fs::remove_file(&hdr.0).unwrap();
-    // pixel_seed(0, 0, CAMERA_STREAM=0) = 0，独立推导新逐像素流的首条路径。
-    let mut rng = StdRng::seed_from_u64(0);
-    let offset = Vector2::new(rng.random::<f64>(), rng.random::<f64>());
+    // The first fixed-point R2 point is the pixel shift itself.
+    let offset = Vector2::new(0.0, 0.8342176043156949);
     let direction = scene
         .camera
         .ray_for_pixel_sample(0, 0, 1, 1, offset)
@@ -311,30 +309,68 @@ fn camera_misses_return_rotated_scaled_hdr_background() {
 fn glass_reflection_and_transmission_query_hdr_in_the_final_direction() {
     let hdr = TemporaryHdr::new(false);
     let map = EnvironmentMap::load(&hdr.0).unwrap();
-    let mut config = scene_config(hdr.config());
-    config.objects = vec![ObjectConfig::Ground {
-        height_m: 1.0,
-        material: MaterialConfig::Dielectric {
-            ior: 1.5,
-            dispersion: None,
-        },
-    }];
-    let scene = RenderJob::from_config(&config).unwrap();
+    use spectral_caustics::geometry::ground::Ground;
+    use spectral_caustics::material::{BsdfSample, Material, dielectric::Dielectric};
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingGlass {
+        glass: Dielectric,
+        samples: Arc<Mutex<Vec<BsdfSample>>>,
+    }
+
+    impl Material for RecordingGlass {
+        fn evaluate_rgb(&self, _: Vector3<f64>, _: Vector3<f64>, _: Vector3<f64>) -> Vector3<f64> {
+            Vector3::zeros()
+        }
+
+        fn has_non_delta(&self) -> bool {
+            false
+        }
+
+        fn has_delta(&self) -> bool {
+            true
+        }
+
+        fn sample(
+            &self,
+            wo: Vector3<f64>,
+            normal: Vector3<f64>,
+            rng: &mut dyn rand::RngCore,
+        ) -> Option<BsdfSample> {
+            let event = self.glass.sample(wo, normal, rng)?;
+            self.samples.lock().unwrap().push(event);
+            Some(event)
+        }
+    }
+
+    let mut scene = RenderJob::from_config(&scene_config(hdr.config())).unwrap();
+    scene.scene.objects.clear();
+    let samples = Arc::new(Mutex::new(Vec::new()));
+    scene.scene.add(
+        Box::new(Ground::new(1.0).unwrap()),
+        Box::new(RecordingGlass {
+            glass: Dielectric::new(1.5).unwrap(),
+            samples: samples.clone(),
+        }),
+    );
     fs::remove_file(&hdr.0).unwrap();
+    let rendered = spectral_caustics::integrator::camera::integrate_rgb(
+        &scene,
+        &RenderSetting {
+            width: 1,
+            height: 1,
+            camera_spp: 256,
+            seed: 0,
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
     let mut checked = [false; 2];
     let mut expected = Vector3::zeros();
-    let mut rng = StdRng::seed_from_u64(0);
-    for _ in 0..256 {
-        let offset = Vector2::new(rng.random::<f64>(), rng.random::<f64>());
-        let ray = scene
-            .camera
-            .ray_for_pixel_sample(0, 0, 1, 1, offset)
-            .unwrap();
-        let hit = scene.scene.intersect(&ray).unwrap();
-        let material = scene.scene.material(hit.material_id);
-        let sample = material
-            .sample(-ray.direction, hit.normal, &mut rng)
-            .unwrap();
+    let samples = samples.lock().unwrap();
+    assert_eq!(samples.len(), 256);
+    for sample in samples.iter() {
         let index = usize::from(sample.event == ScatterType::SpecularTransmission);
         expected += map
             .radiance(sample.wi)
@@ -345,20 +381,7 @@ fn glass_reflection_and_transmission_query_hdr_in_the_final_direction() {
     }
     assert_eq!(checked, [true; 2]);
     assert_rgb(
-        spectral_caustics::integrator::camera::integrate_rgb(
-            &scene,
-            &spectral_caustics::config::render::RenderSetting {
-                width: 1,
-                height: 1,
-                camera_spp: 256,
-                seed: 0,
-                ..Default::default()
-            },
-            None,
-        )
-        .map(|images| images.combined)
-        .unwrap()
-        .pixels()[0],
+        rendered.combined.pixels()[0],
         linear_srgb_to_xyz(expected).unwrap(),
     );
 }

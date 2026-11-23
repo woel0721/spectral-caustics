@@ -2,6 +2,7 @@
 use super::GroundReceiver;
 use crate::optics::dispersion::IorMode;
 use nalgebra::Vector3;
+use std::{fmt, ops::Range};
 pub struct SpectralCausticsMap {
     pub(crate) width: usize,
     pub(crate) height: usize,
@@ -10,7 +11,110 @@ pub struct SpectralCausticsMap {
     pub(crate) mode: IorMode,
     /// 与原光源 XYZ 积分完全相同的节点及梯形积分宽度。
     pub(crate) samples: Vec<(f64, f64)>,
-    pub(crate) layers: Vec<Vec<f64>>,
+    pub(crate) storage: SpectralAtlasStorage,
+}
+
+pub(crate) enum SpectralAtlasStorage {
+    PerWavelength(Vec<Vec<f64>>),
+    ScaledSingle {
+        base: Option<Vec<f64>>,
+        node_densities: Vec<f64>,
+    },
+}
+
+/// Read-only, row-major Eλ values in relative flux per m² per nm.
+#[derive(Clone, Copy)]
+pub struct LayerIrradiance<'a> {
+    pixels: &'a [f64],
+    len: usize,
+    scale: f64,
+}
+
+impl<'a> LayerIrradiance<'a> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Read a pixel by its row-major index.
+    pub fn get(&self, index: usize) -> Option<f64> {
+        (index < self.len).then(|| self.value(index))
+    }
+
+    pub fn iter(&self) -> LayerIrradianceIter<'a> {
+        self.into_iter()
+    }
+
+    /// Materialize a dense copy of the layer.
+    pub fn to_vec(&self) -> Vec<f64> {
+        self.iter().collect()
+    }
+
+    fn value(&self, index: usize) -> f64 {
+        self.pixels.get(index).map_or(0.0, |&v| v * self.scale)
+    }
+}
+
+impl fmt::Debug for LayerIrradiance<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl PartialEq for LayerIrradiance<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len == other.len && self.iter().eq(other.iter())
+    }
+}
+
+/// Iterator over the logical values of a spectral irradiance layer.
+pub struct LayerIrradianceIter<'a> {
+    layer: LayerIrradiance<'a>,
+    indices: Range<usize>,
+}
+
+impl Iterator for LayerIrradianceIter<'_> {
+    type Item = f64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.indices.next().map(|i| self.layer.value(i))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.indices.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for LayerIrradianceIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.indices.next_back().map(|i| self.layer.value(i))
+    }
+}
+
+impl ExactSizeIterator for LayerIrradianceIter<'_> {}
+
+impl<'a> IntoIterator for LayerIrradiance<'a> {
+    type Item = f64;
+    type IntoIter = LayerIrradianceIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        LayerIrradianceIter {
+            layer: self,
+            indices: 0..self.len,
+        }
+    }
+}
+
+impl<'a> IntoIterator for &LayerIrradiance<'a> {
+    type Item = f64;
+    type IntoIter = LayerIrradianceIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        (*self).into_iter()
+    }
 }
 
 impl SpectralCausticsMap {
@@ -41,15 +145,29 @@ impl SpectralCausticsMap {
 
     /// 读取指定波长层的原始 Eλ，供通量和落点诊断。
     ///
-    /// 输入：节点下标 index；输出：行优先只读标量切片，单位相对通量/(m²·nm)，越界返回 None。
-    pub fn layer_irradiance(&self, index: usize) -> Option<&[f64]> {
-        self.layers.get(index).map(Vec::as_slice)
+    /// 输入：节点下标 index。输出：行优先、零分配的只读视图，越界返回 None。
+    pub fn layer_irradiance(&self, index: usize) -> Option<LayerIrradiance<'_>> {
+        let (pixels, scale) = match &self.storage {
+            SpectralAtlasStorage::PerWavelength(layers) => (layers.get(index)?.as_slice(), 1.0),
+            SpectralAtlasStorage::ScaledSingle {
+                base,
+                node_densities,
+            } => (
+                base.as_deref().unwrap_or_default(),
+                *node_densities.get(index)?,
+            ),
+        };
+        Some(LayerIrradiance {
+            pixels,
+            len: self.width * self.height,
+            scale,
+        })
     }
 
     /// 在世界位置和波长上插值焦散辐照度，供光谱相机地面着色。
     ///
     /// 输入：世界 position（米）和 wavelength_nm；输出：Eλ（相对通量/(m²·nm)），非有限或计算无效返回 None。
-    /// 先按 XY 双线性权重求两层 E0/E1，再用 t=(λ-λ0)/(λ1-λ0) 得到 Eλ=(1-t)E0+tE1。
+    /// XY 使用双线性插值，λ 使用节点间线性插值。共享底图时先插值节点密度，再乘底图的空间插值。
     /// 接收区 [min,max) 或发射波段外返回零；不外推，不再乘 Δλ 或除像素面积。
     pub fn sample(&self, position: Vector3<f64>, wavelength_nm: f64) -> Option<f64> {
         if !wavelength_nm.is_finite() || position.iter().any(|v| !v.is_finite()) {
@@ -64,9 +182,18 @@ impl SpectralCausticsMap {
             return Some(0.0);
         };
         let right = self.samples.partition_point(|&(nm, _)| nm < wavelength_nm);
-        let left = right.saturating_sub(1);
-        let spatial = |layer: usize| -> f64 {
-            let pixels = &self.layers[layer];
+        // Exact nodes use a single value, without evaluating the adjacent layer.
+        let left = if wavelength_nm == self.samples[right].0 {
+            right
+        } else {
+            right - 1
+        };
+        let t = if left == right {
+            0.0
+        } else {
+            (wavelength_nm - self.samples[left].0) / (self.samples[right].0 - self.samples[left].0)
+        };
+        let spatial = |pixels: &[f64]| -> f64 {
             let mut sum = 0.0;
             for &(x, y, w) in &weights {
                 if w != 0.0 {
@@ -75,14 +202,28 @@ impl SpectralCausticsMap {
             }
             sum
         };
-        let value = if left == right || wavelength_nm == self.samples[left].0 {
-            spatial(left)
-        } else if wavelength_nm == self.samples[right].0 {
-            spatial(right)
-        } else {
-            let t = (wavelength_nm - self.samples[left].0)
-                / (self.samples[right].0 - self.samples[left].0);
-            spatial(left) * (1.0 - t) + spatial(right) * t
+        let value = match &self.storage {
+            SpectralAtlasStorage::PerWavelength(layers) => {
+                let a = spatial(&layers[left]);
+                if left == right {
+                    a
+                } else {
+                    a * (1.0 - t) + spatial(&layers[right]) * t
+                }
+            }
+            SpectralAtlasStorage::ScaledSingle {
+                base,
+                node_densities,
+            } => {
+                let Some(base) = base else { return Some(0.0) };
+                let a = node_densities[left];
+                let density = if left == right {
+                    a
+                } else {
+                    a * (1.0 - t) + node_densities[right] * t
+                };
+                spatial(base) * density
+            }
         };
         (value.is_finite() && value >= 0.0).then_some(value)
     }
@@ -169,11 +310,11 @@ mod tests {
             ground_id: 0,
             mode: IorMode::Constant,
             samples: vec![(400.0, 50.0), (500.0, 55.0), (510.0, 5.0)],
-            layers: vec![
+            storage: SpectralAtlasStorage::PerWavelength(vec![
                 vec![1.0, 3.0, 5.0, 7.0],
                 vec![3.0, 9.0, 15.0, 21.0],
                 vec![4.0; 4],
-            ],
+            ]),
         };
         let at = |x, y, nm| map.sample(Vector3::new(x, y, 0.0), nm).unwrap();
         assert_eq!(at(0.5, 1.5, 400.0), 1.0);
@@ -194,6 +335,65 @@ mod tests {
         }
         assert!(map.sample(Vector3::zeros(), f64::NAN).is_none());
         assert!(map.sample(Vector3::repeat(f64::INFINITY), 450.0).is_none());
+    }
+
+    #[test]
+    fn scaled_single_interpolates_density_and_exposes_logical_layers() {
+        let mut map = SpectralCausticsMap {
+            width: 2,
+            height: 2,
+            receiver: GroundReceiver {
+                min_m: Vector2::zeros(),
+                max_m: Vector2::repeat(2.0),
+            },
+            ground_id: 0,
+            mode: IorMode::Constant,
+            samples: vec![(400.0, 50.0), (500.0, 55.0), (510.0, 5.0)],
+            storage: SpectralAtlasStorage::ScaledSingle {
+                base: Some(vec![1.0, 3.0, 5.0, 7.0]),
+                node_densities: vec![1.0, 3.0, 0.0],
+            },
+        };
+        let p = Vector3::new(1.0, 1.0, 0.0);
+        for (nm, expected) in [
+            (400.0, 4.0),
+            (450.0, 8.0),
+            (500.0, 12.0),
+            (505.0, 6.0),
+            (510.0, 0.0),
+        ] {
+            assert_eq!(map.sample(p, nm), Some(expected));
+        }
+        let layer = map.layer_irradiance(1).unwrap();
+        assert_eq!(layer.len(), 4);
+        assert!(!layer.is_empty());
+        assert_eq!(layer.get(3), Some(21.0));
+        assert_eq!(layer.get(4), None);
+        let scaled = vec![3.0, 9.0, 15.0, 21.0];
+        assert_eq!(layer.to_vec(), scaled);
+        assert_eq!(layer.iter().len(), 4);
+        assert_eq!(layer.iter().next_back(), Some(21.0));
+        assert!(layer.into_iter().eq(scaled.iter().copied()));
+        assert!(IntoIterator::into_iter(&layer).eq(scaled.iter().copied()));
+        assert_eq!(
+            layer,
+            LayerIrradiance {
+                pixels: &scaled,
+                len: 4,
+                scale: 1.0
+            }
+        );
+        assert!(map.layer_irradiance(3).is_none());
+
+        map.storage = SpectralAtlasStorage::ScaledSingle {
+            base: None,
+            node_densities: vec![1.0, 3.0, 0.0],
+        };
+        assert_eq!(map.sample(p, 450.0), Some(0.0));
+        let layer = map.layer_irradiance(1).unwrap();
+        assert_eq!(layer.get(0), Some(0.0));
+        assert_eq!(layer.get(4), None);
+        assert_eq!(layer.to_vec(), vec![0.0; 4]);
     }
 
     #[test]

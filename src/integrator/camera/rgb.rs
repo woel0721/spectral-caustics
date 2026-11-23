@@ -10,9 +10,15 @@ use super::{
 };
 #[cfg(feature = "diagnostics")]
 use crate::diagnostics::{PathDebugAccumulator, PathDebugSample};
+use crate::sampling::{
+    rng::{
+        DIFFUSE_STREAM, ENVIRONMENT_STREAM, MEDIUM_STREAM, PREFIX_STREAM, RenderRng, pixel_seed,
+    },
+    subpixel::SubpixelSampler,
+};
 use crate::{caustics::SpectralLighting, color::linear_srgb_to_xyz, config::RenderJob};
-use nalgebra::{Vector2, Vector3};
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use nalgebra::Vector3;
+use rand::SeedableRng;
 use std::error::Error;
 
 pub(crate) fn validate_rgb_render(
@@ -82,20 +88,21 @@ pub fn integrate_rgb(
         #[cfg(feature = "diagnostics")]
         debug_path.then_some(job.diagnostic_target),
         |index: usize| -> Result<RenderedPixel, String> {
-            let mut camera = StdRng::seed_from_u64(pixel_seed(seed, index, CAMERA_STREAM));
+            let subpixel = SubpixelSampler::new(seed, index);
+            let mut camera = RenderRng::seed_from_u64(pixel_seed(seed, index, PREFIX_STREAM));
             let mut environment = has_environment
-                .then(|| StdRng::seed_from_u64(pixel_seed(seed, index, ENVIRONMENT_STREAM)));
-            let mut medium = has_medium.then(|| {
-                StdRng::seed_from_u64(pixel_seed(seed, index, crate::sampling::rng::MEDIUM_STREAM))
-            });
-            let mut continuation = StdRng::seed_from_u64(pixel_seed(seed, index, DIFFUSE_STREAM));
+                .then(|| RenderRng::seed_from_u64(pixel_seed(seed, index, ENVIRONMENT_STREAM)));
+            let mut medium = has_medium
+                .then(|| RenderRng::seed_from_u64(pixel_seed(seed, index, MEDIUM_STREAM)));
+            let mut continuation =
+                RenderRng::seed_from_u64(pixel_seed(seed, index, DIFFUSE_STREAM));
             let mut unused_environment = UnusedRng;
             let mut unused_medium = UnusedRng;
             let (mut d, mut c) = (Vector3::zeros(), Vector3::zeros());
             #[cfg(feature = "diagnostics")]
             let mut statistics = debug_path.then(PathDebugAccumulator::default);
-            for _ in 0..spp {
-                let offset = Vector2::new(camera.random::<f64>(), camera.random::<f64>());
+            for sample in 0..spp {
+                let offset = subpixel.offset(sample);
                 let ray = job
                     .camera
                     .ray_for_pixel_sample(index % width, index / width, width, height, offset)
@@ -149,5 +156,3 @@ pub fn integrate_rgb(
         },
     )
 }
-
-use crate::sampling::rng::{CAMERA_STREAM, DIFFUSE_STREAM, ENVIRONMENT_STREAM, pixel_seed};

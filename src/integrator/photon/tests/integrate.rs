@@ -1,5 +1,6 @@
 use super::super::emission::{
-    BLOCK_SCRATCH_BUDGET_BYTES, PhotonPlan, irradiance_batch_size, spectral_sample_blocks,
+    BLOCK_SCRATCH_BUDGET_BYTES, PhotonPlan, for_each_emitted_hit, irradiance_batch_size,
+    spectral_sample_blocks,
 };
 use super::super::integrate::{
     integrate_spectral, integrate_xyz, irradiance_layer, xyz_block_batch_size,
@@ -12,7 +13,6 @@ use crate::film::Framebuffer;
 use crate::geometry::ray::Ray;
 use crate::optics::dispersion::IorMode;
 use nalgebra::Vector3;
-use rand::{Rng, SeedableRng};
 
 const SAMPLING_SEED: u64 = 42;
 const MAX_SPECTRAL_BLOCKS: usize = 16;
@@ -42,41 +42,100 @@ fn sample_settings(base: &RenderSetting, samples: usize, mode: IorMode) -> Rende
 
 use crate::geometry::ground::Ground;
 use crate::geometry::prism::Prism;
-use rand::rngs::StdRng;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 #[test]
 fn spectral_blocks_cover_every_row_and_replay_all_random_dimensions() {
-    for dimensions in [2, 4] {
-        for (samples_x, samples_y, max_blocks) in [
-            (1, 1, MAX_SPECTRAL_BLOCKS),
-            (7, 5, MAX_SPECTRAL_BLOCKS),
-            (3, 9, 1),
-            (3, 9, 2),
-            (3, 9, 7),
-            (5, 33, MAX_SPECTRAL_BLOCKS),
-        ] {
-            let blocks =
-                spectral_sample_blocks(samples_x, samples_y, SAMPLING_SEED, max_blocks, dimensions);
-            assert!(blocks.len() <= max_blocks);
-            let mut serial_rng = StdRng::seed_from_u64(SAMPLING_SEED);
-            let mut next_row = 0;
-            for (rows, mut rng) in blocks {
-                assert_eq!(rows.start, next_row);
-                assert!(rows.end > rows.start);
-                next_row = rows.end;
-                for _ in rows {
-                    for _ in 0..samples_x {
-                        for _ in 0..dimensions {
-                            assert_eq!(rng.random::<f64>(), serial_rng.random::<f64>());
-                        }
-                    }
+    use crate::light::DiskAreaLight;
+    use crate::material::lambertian::Lambertian;
+
+    let mut job = vertical_light_scene();
+    job.scene.add(
+        Box::new(Ground::new(0.0).unwrap()),
+        Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()),
+    );
+    let parallel = job.scene.light.clone();
+    let disk = DiskAreaLight::new(Vector3::z() * 2.0, -Vector3::z(), 1.0, 1.0).unwrap();
+    for light in [parallel, disk.into()] {
+        job.scene.light = light;
+        for (samples_x, samples_y) in [(1, 1), (7, 5), (3, 9), (5, 33)] {
+            let collect = |rows: Vec<_>| {
+                let mut rays = Vec::new();
+                for range in rows {
+                    for_each_emitted_hit(
+                        &job,
+                        samples_x,
+                        samples_y,
+                        range,
+                        SAMPLING_SEED,
+                        |index, ray, _, _| {
+                            assert_eq!(2 * index, rays.len());
+                            rays.push(ray.origin.map(f64::to_bits));
+                            rays.push(ray.direction.map(f64::to_bits));
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
                 }
+                assert_eq!(rays.len(), 2 * samples_x * samples_y);
+                rays
+            };
+            let serial = collect(std::iter::once(0..samples_y).collect());
+            for max_blocks in [1, 2, 7, MAX_SPECTRAL_BLOCKS] {
+                let blocks = spectral_sample_blocks(samples_y, max_blocks);
+                assert!(blocks.len() <= max_blocks);
+                assert_eq!(collect(blocks), serial);
             }
-            assert_eq!(next_row, samples_y);
         }
+    }
+}
+
+#[test]
+fn scaled_single_atlas_rejects_overflow_at_build_time() {
+    use crate::geometry::sphere::Sphere;
+    use crate::material::{dielectric::Dielectric, lambertian::Lambertian};
+    use nalgebra::Vector2;
+
+    let mut job = vertical_light_scene();
+    let target = job.scene.add(
+        Box::new(Sphere::new(Vector3::z(), 0.5).unwrap()),
+        Box::new(Dielectric::new(1.0).unwrap()),
+    );
+    let ground = job.scene.add(
+        Box::new(Ground::new(0.0).unwrap()),
+        Box::new(Lambertian::new(Vector3::repeat(0.8)).unwrap()),
+    );
+    job.photon.ground_id = Some(ground);
+    job.select_caustics_object(target).unwrap();
+    job.photon.receiver.min_m = Vector2::repeat(-0.5);
+    job.photon.receiver.max_m = Vector2::repeat(0.5);
+    let light = job.scene.light.as_parallel_mut().unwrap();
+    light.aperture_min_m = Vector2::repeat(-0.25);
+    light.aperture_max_m = Vector2::repeat(0.25);
+    light.total_flux = f64::MAX / 1024.0;
+
+    // D65 normalization over this narrow violet band makes the density large.
+    let settings = RenderSetting {
+        mode: IorMode::Constant,
+        width: 1,
+        height: 1,
+        samples_per_pixel_axis: 1,
+        wavelength_min_nm: 380.0,
+        wavelength_max_nm: 381.0,
+        wavelength_step_nm: 1.0,
+        ..Default::default()
+    };
+    let plan = PhotonPlan::new(&job, &settings, Some(target), ground, false).unwrap();
+    assert!(!plan.spectral_caustics);
+    assert_eq!(
+        plan.fixed_caustics.as_deref(),
+        Some(&[f64::MAX / 1024.0][..])
+    );
+    match integrate_spectral(&job, &settings) {
+        Err(e) => assert_eq!(e.to_string(), "spectral irradiance overflow"),
+        Ok(_) => panic!("overflowing atlas was built"),
     }
 }
 
@@ -704,8 +763,9 @@ fn batched_emission_and_parallel_irradiance_layer_are_bit_identical_across_threa
             .install(|| integrate_spectral(&job, &constant_settings))
             .unwrap()
             .unwrap();
-        let layer_bits = bits_f64(atlas.layer_irradiance(0).unwrap());
-        assert!(atlas.layer_irradiance(0).unwrap().iter().any(|&v| v > 0.0));
+        let layer = atlas.layer_irradiance(0).unwrap();
+        let layer_bits: Vec<_> = layer.iter().map(f64::to_bits).collect();
+        assert!(layer.iter().any(|v| v > 0.0));
         if let Some(expected) = &ref_atlas_layer {
             assert_eq!(&layer_bits, expected);
         } else {
@@ -789,8 +849,8 @@ fn batched_emission_and_parallel_irradiance_layer_are_bit_identical_across_threa
         let atlas_bits: Vec<_> = (0..plan.nodes.len())
             .map(|index| {
                 let layer = atlas.layer_irradiance(index).unwrap();
-                assert!(layer.iter().any(|&v| v > 0.0));
-                bits_f64(layer)
+                assert!(layer.iter().any(|v| v > 0.0));
+                layer.iter().map(f64::to_bits).collect::<Vec<_>>()
             })
             .collect();
         assert_ne!(atlas_bits[0], atlas_bits[4]);
@@ -834,11 +894,21 @@ fn batched_emission_and_parallel_irradiance_layer_are_bit_identical_across_threa
     let missed_atlas = integrate_spectral(&missed, &constant_settings)
         .unwrap()
         .unwrap();
+    assert!(matches!(
+        missed_atlas.storage,
+        crate::caustics::map::SpectralAtlasStorage::ScaledSingle { base: None, .. }
+    ));
+    let receiver = missed_atlas.receiver();
+    let center = (receiver.min_m + receiver.max_m) * 0.5;
+    assert_eq!(
+        missed_atlas.sample(Vector3::new(center.x, center.y, 0.0), 550.0),
+        Some(0.0)
+    );
     assert!(
         missed_atlas
             .layer_irradiance(0)
             .unwrap()
             .iter()
-            .all(|&v| v == 0.0)
+            .all(|v| v == 0.0)
     );
 }

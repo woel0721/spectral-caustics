@@ -453,7 +453,7 @@ fn disk_scalar_nodes_reintegrate_without_extra_fresnel_d65_or_pdf_factors() {
         let mut integrated = vec![Vector3::zeros(); c.render.width * c.render.height];
         for (j, &(nm, delta)) in map.wavelength_samples().iter().enumerate() {
             for (p, e) in integrated.iter_mut().zip(map.layer_irradiance(j).unwrap()) {
-                *p += cie_xyz(nm).unwrap() * (*e * delta);
+                *p += cie_xyz(nm).unwrap() * (e * delta);
             }
         }
         for (a, b) in integrated.iter().zip(xyz.caustics.pixels()) {

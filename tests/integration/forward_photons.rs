@@ -206,7 +206,7 @@ fn photon_xyz_atlas_and_direct_preview_apply_the_same_analytic_extinction() {
             let vacuum = vacuum_atlas.layer_irradiance(layer).unwrap();
             let fog = fog_atlas.layer_irradiance(layer).unwrap();
             // The source spectrum can have zero density at individual nodes.
-            for ((&a, &b), &e) in clear.iter().zip(vacuum).zip(fog) {
+            for ((a, b), e) in clear.iter().zip(vacuum).zip(fog) {
                 assert_eq!(a.to_bits(), b.to_bits());
                 assert!((a * tr - e).abs() <= 2e-12 * a);
             }
@@ -254,7 +254,7 @@ fn photon_xyz_atlas_and_direct_preview_apply_the_same_analytic_extinction() {
         for (i, &(nm, _)) in filtered.wavelength_samples().iter().enumerate() {
             let sigma_t = 1.2 - 0.8 * ((nm - 380.0) / 400.0);
             let tr = (-sigma_t * 0.4 * 1.0_f64.hypot(0.45)).exp();
-            for (&clear, &filtered) in clear_atlas
+            for (clear, filtered) in clear_atlas
                 .layer_irradiance(i)
                 .unwrap()
                 .iter()
@@ -372,7 +372,7 @@ fn bound_five_micron_plate_attenuates_xyz_atlas_and_direct_from_each_launch_side
                 let clear = clear_map.layer_irradiance(i).unwrap();
                 let step = step_map.layer_irradiance(i).unwrap();
                 let parallel = parallel_map.layer_irradiance(i).unwrap();
-                for (((&clear, &step), &parallel), xyz) in
+                for (((clear, step), parallel), xyz) in
                     clear.iter().zip(step).zip(parallel).zip(&mut reweighted)
                 {
                     assert!((step - clear * caustics_tr).abs() <= tolerance * clear);
@@ -587,7 +587,7 @@ fn constant_ior_spectral_absorption_preserves_landings_and_filters_xyz_and_atlas
         let clear = clear_atlas.layer_irradiance(i).unwrap();
         let filtered = filtered_atlas.layer_irradiance(i).unwrap();
         let with_budget = absorption_with_volume_budget.layer_irradiance(i).unwrap();
-        for (((&clear, &filtered), &with_budget), xyz) in clear
+        for (((clear, filtered), with_budget), xyz) in clear
             .iter()
             .zip(filtered)
             .zip(with_budget)
@@ -778,7 +778,7 @@ fn photon_volume_landing_maps_reintegrate_and_repeat_across_threads() {
         let atlas = map(&job, enabled, 1);
         let mut integral = vec![Vector3::zeros(); serial.caustics.pixels().len()];
         for (i, &(nm, width)) in atlas.wavelength_samples().iter().enumerate() {
-            for (xyz, &e) in integral.iter_mut().zip(atlas.layer_irradiance(i).unwrap()) {
+            for (xyz, e) in integral.iter_mut().zip(atlas.layer_irradiance(i).unwrap()) {
                 *xyz += cie_xyz(nm).unwrap() * (e * width);
             }
         }
@@ -792,7 +792,7 @@ fn photon_volume_landing_maps_reintegrate_and_repeat_across_threads() {
                     map.layer_irradiance(0).unwrap(),
                     map.layer_irradiance(last).unwrap(),
                 );
-                blue.iter().zip(red).any(|(&a, &b)| {
+                blue.iter().zip(red).any(|(a, b)| {
                     let a = a / d65_spd(380.0).unwrap();
                     let b = b / d65_spd(780.0).unwrap();
                     (a - b).abs() > 1e-12 * a.max(b)
@@ -882,7 +882,7 @@ fn photon_volume_caustics_stay_zero_when_all_emission_misses_the_glass() {
     );
     let atlas = map(&job, &c.render, 1);
     for i in 0..atlas.wavelength_samples().len() {
-        assert!(atlas.layer_irradiance(i).unwrap().iter().all(|&v| v == 0.0));
+        assert!(atlas.layer_irradiance(i).unwrap().iter().all(|v| v == 0.0));
     }
 }
 
@@ -907,7 +907,7 @@ fn forward_xyz_and_scalar_maps_share_paths_conserve_flux_and_repeat_across_threa
             let atlas = map(&scene, &c.render, 1);
             let mut integral = vec![Vector3::zeros(); lighting.caustics.pixels().len()];
             for (j, &(nm, width)) in atlas.wavelength_samples().iter().enumerate() {
-                for (xyz, &e) in integral.iter_mut().zip(atlas.layer_irradiance(j).unwrap()) {
+                for (xyz, e) in integral.iter_mut().zip(atlas.layer_irradiance(j).unwrap()) {
                     *xyz += cie_xyz(nm).unwrap() * (e * width);
                 }
             }

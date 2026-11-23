@@ -4,6 +4,7 @@ use crate::integrator::camera::{
     UnusedRng, path::trace_camera_path, transport::Caustics, types::CameraPathState,
 };
 use crate::optics::dispersion::IorMode;
+use crate::sampling::subpixel::{SubpixelSampler, permutation_salt, permute};
 use crate::spectrum::emission::{WAVELENGTH_MAX_NM, WAVELENGTH_MIN_NM};
 use rayon::prelude::*;
 use std::error::Error;
@@ -89,6 +90,8 @@ pub fn render_fixed_wavelength_camera(
                 .enumerate()
                 .try_for_each(|(offset_index, pixel)| {
                     let pixel_index = start + offset_index;
+                    let subpixel = SubpixelSampler::new(seed, pixel_index);
+                    let perm_salt = permutation_salt(seed, pixel_index);
                     let mut unused_environment = UnusedRng;
                     let mut unused_medium = UnusedRng;
                     for sample in 0..spp {
@@ -99,18 +102,12 @@ pub fn render_fixed_wavelength_camera(
                             seed,
                             pixel_index,
                             sample,
+                            subpixel.offset(permute(sample, spp, perm_salt)),
                             has_environment,
                             has_medium,
                         )?;
-                        let mut common = Some(common);
-                        for (lane, (radiance, &nm)) in
-                            pixel.iter_mut().zip(wavelengths_nm).enumerate()
-                        {
-                            let mut lane_rngs = if lane + 1 == lanes {
-                                common.take().expect("last lane consumes common RNGs")
-                            } else {
-                                common.as_ref().expect("common RNGs").clone()
-                            };
+                        for (radiance, &nm) in pixel.iter_mut().zip(wavelengths_nm) {
+                            let mut lane_rngs = common;
                             let mut state = CameraPathState::spectral(
                                 ray,
                                 nm,

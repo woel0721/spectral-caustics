@@ -87,10 +87,6 @@ impl Light {
         self.validate_emission()?;
         Ok(self.sunlight())
     }
-    /// 返回每条发射射线需要的随机维数：平行光为位置 2 维，圆盘为位置加方向共 4 维，用于定位采样块。
-    pub(crate) fn emission_dimensions(&self) -> usize {
-        if self.as_disk().is_some() { 4 } else { 2 }
-    }
 }
 
 impl From<ParallelLight> for Light {
