@@ -1,0 +1,123 @@
+{
+  "render": {
+    "camera_mode": "rgb",
+    "width": 1280,
+    "height": 720,
+    "samples_per_pixel_axis": 4,
+    "camera_spp": 1024,
+    "spectral_packet_size": 1,
+    "mode": "dispersion",
+    "photon_max_events": 32,
+    "photon_max_volume_scatters": 0,
+    "wavelength_min_nm": 380.0,
+    "wavelength_max_nm": 780.0,
+    "wavelength_step_nm": 10.0,
+    "exposure": 1.0,
+    "seed": 42,
+    "thread_count": null,
+    "max_spectral_blocks": 16,
+    "output_path": "output/showcase_hdri_materials/camera_combined.png"
+  },
+  "scene": {
+    "camera": {
+      "position": [2.25, -4.60, 1.46],
+      "target": [-0.08, 0.20, 0.60],
+      "up": [0.0, 0.0, 1.0],
+      "fov_y_degrees": 28.0
+    },
+    "background_linear_rgb": [0.08, 0.10, 0.14],
+    "environment": {
+      "map_path": "assets/HDRI/herkulessaulen_4k.hdr",
+      "rotation_degrees": 35.0,
+      "intensity": 0.44,
+      "horizon_linear_rgb": [0.16, 0.20, 0.28],
+      "zenith_linear_rgb": [0.04, 0.08, 0.18]
+    },
+    "environment_samples": 8,
+    "light_samples": 1,
+    "environment_mis_heuristic": "power",
+    "max_diffuse_bounces": 4,
+    "max_volume_scatters": 0,
+    "ground_checkerboard": {
+      "cell_size_m": 0.50,
+      "even_scale": 0.38,
+      "odd_scale": 1.0
+    },
+    "ground_margin_m": 14.0,
+    "objects": [
+      {
+        "type": "sphere",
+        "center_m": [-1.65, -0.25, 0.60],
+        "radius_m": 0.60,
+        "caustics": true,
+        "material": {
+          "type": "dielectric",
+          "ior": 1.52,
+          "dispersion": {
+            "a": 1.50,
+            "b_um2": 0.022
+          }
+        }
+      },
+      {
+        "type": "beveled_prism",
+        "cross_section_m": [
+          [-0.45, 0.01],
+          [0.37, 0.01],
+          [-0.04, 0.72]
+        ],
+        "y_min_m": -0.78,
+        "y_max_m": 0.68,
+        "bevel_size_m": 0.048,
+        "material": {
+          "type": "dielectric",
+          "ior": 1.54
+        }
+      },
+      {
+        "type": "sphere",
+        "center_m": [1.62, -0.45, 0.58],
+        "radius_m": 0.58,
+        "caustics": false,
+        "material": {
+          "type": "ggx_metal",
+          "eta": [0.18, 0.42, 1.37],
+          "k": [3.42, 2.35, 1.77],
+          "roughness": 0.18
+        }
+      },
+      {
+        "type": "sphere",
+        "center_m": [-0.28, 1.85, 0.78],
+        "radius_m": 0.78,
+        "caustics": false,
+        "material": {
+          "type": "ggx_metal",
+          "eta": [0.20, 0.22, 0.26],
+          "k": [3.60, 3.30, 2.90],
+          "roughness": 0.36
+        }
+      },
+      {
+        "type": "ground",
+        "height_m": 0.0,
+        "material": {
+          "type": "lambertian",
+          "albedo": [0.46, 0.46, 0.46]
+        }
+      }
+    ],
+    "light": {
+      "type": "parallel",
+      "height_m": 3.5,
+      "direction": [0.78, -0.25, -1.0],
+      "aperture_min_m": [-5.0, -0.6],
+      "aperture_max_m": [-2.8, 1.6],
+      "total_flux": 10.5
+    },
+    "receiver": {
+      "min_m": [-2.6, -1.5],
+      "max_m": [0.0, 1.1]
+    }
+  }
+}
