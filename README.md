@@ -8,13 +8,19 @@ Rust · CPU Renderer · Spectral Rendering · Volume Scattering
 
 ## 效果展示
 
-| 玻璃球 · Sphere | 直立棱镜 · Prism |
-| :---: | :---: |
-| ![玻璃球下方的阴影中聚集着明亮的焦斑](assets/previews/forward_photons/sphere/camera_combined.png) | ![直立棱镜把入射光折向右侧地面，形成亮带](assets/previews/forward_photons/prism/camera_combined.png) |
-| **光谱焦散 · 棱镜的焦散分量** | **体渲染 · 非均匀网格雾** |
-| ![仅保留焦散贡献后，可以看到亮带边缘分离的颜色](assets/previews/forward_photons/prism/camera_caustics.png) | ![网格雾中的两个球体，逆光散射使背景变亮，远处的棋盘对比度降低](assets/previews/volume/grid_fog.png) |
+![竖直色散三棱镜在暗色棋盘格上投射出彩虹焦散带，后方悬浮着被圆盘光源照亮的蓝色光谱程序化雾与暖色漫反射球，右侧镜面球映出焦散与雾气](assets/previews/showcase/spectral_prism_combined.png)
 
-左下图单独显示右上图中的焦散贡献。右下图使用 24 × 20 × 16 的密度网格，允许每条相机路径最多散射 8 次。
+*光谱旗舰场景（1280 × 720 · `Packet = 4` · 2048 SPP）：直立三棱镜的 Cauchy 色散与 Eλ 前向光子焦散、`64 × 64 × 48` 程序化非均匀光谱雾（波长相关 σa、σs、g 与光子体散射）、镜面反射焦散及 2 次漫反射间接照明。配置见 [configs/showcase_spectral_prism.json](configs/showcase_spectral_prism.json)。*
+
+![户外 HDRI 光照下的中性棋盘格地面上摆放着高色散聚光玻璃球、斜置倒角玻璃三棱镜以及拉丝黄金与缎面银两颗 GGX 金属球](assets/previews/showcase/hdri_materials_combined.png)
+
+*材质与环境旗舰场景（1280 × 720 · `RGB` · 1024 SPP）：`herkulessaulen_4k.hdr` 环境照明与 Power MIS、平行光驱动的玻璃球色散焦散、倒角三棱镜圆棱高光、不同粗糙度（`0.18` 金 / `0.36` 银）的 GGX 微表面金属及 4 次反弹间接光。配置见 [configs/showcase_hdri_materials.json](configs/showcase_hdri_materials.json)。*
+
+| 光谱焦散分量 · 独立 Caustics 通道 | 体渲染 · 非均匀密度网格雾 |
+| :---: | :---: |
+| ![仅保留焦散通道后，可见棱镜投射的彩虹焦散带及镜面球中的焦散倒影](assets/previews/showcase/spectral_prism_caustics.png) | ![网格雾中的两个球体，逆光散射使背景变亮，远处的棋盘对比度降低](assets/previews/volume/grid_fog.png) |
+
+左图单独显示上方光谱旗舰场景的 `Caustics` 线性分量（含镜面球中反射的焦散）；右图使用 24 × 20 × 16 的密度网格，允许每条相机路径最多散射 8 次。
 
 ## 核心功能
 
@@ -41,6 +47,8 @@ cargo run --release --locked -- configs/grid_fog.json
 
 | 想尝试的场景 | 替换命令末尾的配置文件 |
 | --- | --- |
+| 光谱焦散与程序化光谱雾（1280 × 720 旗舰展示，耗时较长） | [configs/showcase_spectral_prism.json](configs/showcase_spectral_prism.json) |
+| HDRI、倒角棱镜与双 GGX 金属（1280 × 720 旗舰展示，耗时较长） | [configs/showcase_hdri_materials.json](configs/showcase_hdri_materials.json) |
 | 圆盘面光源下的玻璃球聚光 | [configs/sphere_forward_preview.json](configs/sphere_forward_preview.json) |
 | 圆盘面光源下的棱镜色散与地面焦散 | [configs/vertical_prism_forward_preview.json](configs/vertical_prism_forward_preview.json) |
 | 比较均匀雾与网格雾 | [configs/homogeneous_fog.json](configs/homogeneous_fog.json) · [configs/grid_fog.json](configs/grid_fog.json) |
